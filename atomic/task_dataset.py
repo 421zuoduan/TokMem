@@ -749,7 +749,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )
         
