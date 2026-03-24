@@ -78,6 +78,9 @@ def main():
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--device', type=str, default="cuda", help='Device to use')
+    parser.add_argument('--device_map', type=str, default=None,
+                        choices=[None, "auto", "balanced", "balanced_low_0", "sequential"],
+                        help='Optional Hugging Face device_map for sharding the frozen backbone across multiple GPUs')
     parser.add_argument('--decouple_embeddings', action='store_true', 
                         help='Use separate input/output embeddings for task tokens')
     parser.add_argument('--max_instruction_tokens', type=int, default=1024, 
@@ -107,6 +110,7 @@ def main():
     print("=" * 60)
     print(f"Model: {args.model_name}")
     print(f"Device: {args.device}")
+    print(f"Device map: {args.device_map}")
     print(f"Number of tasks to sample: {args.num_tasks}")
     # Ratios removed; using sizes mode only
     print(f"Decouple embeddings: {args.decouple_embeddings}")
@@ -160,6 +164,7 @@ def main():
         device=args.device,
         decouple_embeddings=args.decouple_embeddings,
         is_extended=is_extended,
+        device_map=args.device_map,
     )
     
     print("\nModel Information:")

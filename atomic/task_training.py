@@ -64,9 +64,11 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
     
     with torch.no_grad():
         for batch in val_dataloader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+            input_device = model.get_input_device()
+            output_device = model.get_output_device()
+            input_ids = batch['input_ids'].to(input_device)
+            attention_mask = batch['attention_mask'].to(input_device)
+            labels = batch['labels'].to(output_device)
 
             logits = model(input_ids, attention_mask)
             shift_logits = logits[..., :-1, :].contiguous()
@@ -160,9 +162,11 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
             # Move batch to device
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+            input_device = model.get_input_device()
+            output_device = model.get_output_device()
+            input_ids = batch['input_ids'].to(input_device)
+            attention_mask = batch['attention_mask'].to(input_device)
+            labels = batch['labels'].to(output_device)
             
             # Forward pass
             logits = model(input_ids, attention_mask)
@@ -179,7 +183,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             batch_loss += loss.item()
             
             # Calculate task token loss
-            task_mask = torch.isin(shift_labels, model.reserved_token_tensor)
+            task_mask = torch.isin(shift_labels, model.get_reserved_token_tensor(shift_labels.device))
             valid_mask = shift_labels != -100
             task_token_mask = task_mask & valid_mask
             
@@ -334,7 +338,7 @@ def demo_task_calling(model, tokenizer, test_examples, device="cuda", use_ground
         
         # Tokenize instruction input
         instruction_text = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-        instruction_tokens = tokenizer(instruction_text, return_tensors="pt").to(device)
+        instruction_tokens = tokenizer(instruction_text, return_tensors="pt").to(model.get_input_device())
         
         # Generate with task prediction or ground truth tasks
         if use_ground_truth_tasks:
@@ -429,8 +433,8 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
         
         try:
             # With eval mode dataset, input_ids already contain just instruction input
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            input_ids = batch['input_ids'].to(model.get_input_device())
+            attention_mask = batch['attention_mask'].to(model.get_input_device())
             
             # Generate with task prediction or ground truth tasks
             if use_ground_truth_tasks:

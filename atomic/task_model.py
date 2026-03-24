@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.utils import is_accelerate_available
 import json
 
 def count_parameters(model):
@@ -39,7 +40,7 @@ class TaskCallingModel(nn.Module):
     
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tasks=100, task_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, is_extended=False):
+                 decouple_embeddings=False, is_extended=False, device_map=None):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         # self.num_tasks = min(num_tasks, 248)  # Max 248 reserved tokens available
@@ -47,6 +48,8 @@ class TaskCallingModel(nn.Module):
         self.device = device
         self.dtype = dtype
         self.decouple_embeddings = decouple_embeddings
+        self.device_map = device_map
+        self._reserved_token_tensor_cache = {}
         
         # Load tokenizer to get reserved token mappings
         self.tokenizer = tokenizer
@@ -55,33 +58,44 @@ class TaskCallingModel(nn.Module):
         self._setup_reserved_tokens()
         
         # Load frozen base model (all parameters frozen)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device)
+        model_load_kwargs = {"dtype": dtype}
+        if device_map is not None:
+            if not is_accelerate_available():
+                raise ImportError(
+                    "Multi-GPU loading via device_map requires accelerate. "
+                    "Install it with `pip install accelerate`."
+                )
+            model_load_kwargs["device_map"] = device_map
+
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_load_kwargs)
+        if device_map is None:
+            self.model = self.model.to(device)
         if is_extended:
             self.model.resize_token_embeddings(len(tokenizer))
+
+        self.input_device = self.model.model.embed_tokens.weight.device
+        self.output_device = self.model.lm_head.weight.device
+        self.runtime_device = self.input_device
             
         for param in self.model.parameters():
             param.requires_grad = False
         
         # Get original embedding parameters for initialization
         original_embeddings = self.model.model.embed_tokens.weight.data
-        
-        # Create trainable parameters for task tokens (coupled or decoupled)
-        # Clone the embeddings for the reserved tokens and make them parameters
-        # Pre-create tensor for efficiency and reuse
-        self.reserved_token_tensor = torch.tensor(self.reserved_token_ids, device=device)
+        reserved_on_input_device = self.get_reserved_token_tensor(self.input_device)
         
         if self.decouple_embeddings:
             # Separate parameters for input and output layers
             self.trainable_task_input_embeddings = nn.Parameter(
-                original_embeddings[self.reserved_token_tensor].clone()
+                original_embeddings[reserved_on_input_device].clone().to(self.input_device)
             )
             self.trainable_task_output_embeddings = nn.Parameter(
-                original_embeddings[self.reserved_token_tensor].clone()
+                original_embeddings[reserved_on_input_device].clone().to(self.output_device)
             )
         else:
             # Shared parameter for both input and output layers
             self.trainable_task_embeddings = nn.Parameter(
-                original_embeddings[self.reserved_token_tensor].clone()
+                original_embeddings[reserved_on_input_device].clone().to(self.output_device)
             )
             # Create aliases for backward compatibility
             self.trainable_task_input_embeddings = self.trainable_task_embeddings
@@ -109,15 +123,17 @@ class TaskCallingModel(nn.Module):
         def custom_embed_forward(input_ids):
             # Get standard embeddings
             embeddings = self.original_embed_forward(input_ids)
+            reserved_token_tensor = self.get_reserved_token_tensor(input_ids.device)
+            task_input_embeddings = self.trainable_task_input_embeddings.to(embeddings.device)
             
             # Create mask for any reserved tokens in input_ids
-            is_reserved = torch.isin(input_ids, self.reserved_token_tensor)
+            is_reserved = torch.isin(input_ids, reserved_token_tensor)
             if is_reserved.any():
                 # Find which reserved token each position corresponds to
                 for i, reserved_token_id in enumerate(self.reserved_token_ids):
                     mask = (input_ids == reserved_token_id)
                     if mask.any():
-                        embeddings[mask] = self.trainable_task_input_embeddings[i]
+                        embeddings[mask] = task_input_embeddings[i]
             
             return embeddings
         
@@ -125,13 +141,17 @@ class TaskCallingModel(nn.Module):
         def custom_lm_head_forward(hidden_states):
             # Get standard logits
             logits = self.original_lm_head_forward(hidden_states)
+            reserved_token_tensor = self.get_reserved_token_tensor(logits.device)
+            task_output_embeddings = self.trainable_task_output_embeddings.to(hidden_states.device)
             
             # Efficiently replace reserved token logits using batch matmul
             # Shape: hidden_states (..., hidden_dim), task_embeddings (num_tasks, hidden_dim)
-            task_logits = torch.matmul(hidden_states, self.trainable_task_output_embeddings.T)  # (..., num_tasks)
+            task_logits = torch.matmul(hidden_states, task_output_embeddings.T)  # (..., num_tasks)
+            if task_logits.device != logits.device:
+                task_logits = task_logits.to(logits.device)
             
             # Replace the specific reserved token positions with our computed logits
-            logits[..., self.reserved_token_tensor] = task_logits
+            logits[..., reserved_token_tensor] = task_logits
             
             return logits
         
@@ -164,6 +184,23 @@ class TaskCallingModel(nn.Module):
         if len(self.reserved_token_ids) > 5:
             print(f"  ... and {len(self.reserved_token_ids) - 5} more")
         print(f"Embedding coupling mode: {'Decoupled' if self.decouple_embeddings else 'Coupled'}")
+    
+    def get_reserved_token_tensor(self, device):
+        """Return reserved token IDs as a tensor on the requested device."""
+        device = torch.device(device)
+        if device not in self._reserved_token_tensor_cache:
+            self._reserved_token_tensor_cache[device] = torch.tensor(
+                self.reserved_token_ids, device=device, dtype=torch.long
+            )
+        return self._reserved_token_tensor_cache[device]
+
+    def get_input_device(self):
+        """Return the device where input_ids should be placed."""
+        return self.input_device
+
+    def get_output_device(self):
+        """Return the device where logits/labels should be placed."""
+        return self.output_device
     
     def forward(self, input_ids, attention_mask):
         """
@@ -263,11 +300,12 @@ class TaskCallingModel(nn.Module):
                     break
                 
                 # Append new tokens to input_ids and update attention_mask
-                input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
+                next_tokens_for_input = next_tokens.to(input_ids.device)
+                input_ids = torch.cat([input_ids, next_tokens_for_input.unsqueeze(-1)], dim=-1)
                 attention_mask = torch.cat(
                     [
                         attention_mask,
-                        torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype),
+                        torch.ones(batch_size, 1, device=attention_mask.device, dtype=attention_mask.dtype),
                     ],
                     dim=-1,
                 )
@@ -426,10 +464,10 @@ class TaskCallingModel(nn.Module):
         
         # Load embeddings
         if self.decouple_embeddings:
-            self.trainable_task_input_embeddings.data = data['input_embeddings'].to(self.device)
-            self.trainable_task_output_embeddings.data = data['output_embeddings'].to(self.device)
+            self.trainable_task_input_embeddings.data = data['input_embeddings'].to(self.input_device)
+            self.trainable_task_output_embeddings.data = data['output_embeddings'].to(self.output_device)
         else:
-            self.trainable_task_embeddings.data = data['embeddings'].to(self.device)
+            self.trainable_task_embeddings.data = data['embeddings'].to(self.output_device)
         
         print(f"Task tokens loaded from {filepath}")
         return data
