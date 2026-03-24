@@ -32,3 +32,11 @@ env/
 .mypy_cache/
 .cache/
 *.log
+
+
+.spec-workflow
+
+
+datasets
+models
+results
