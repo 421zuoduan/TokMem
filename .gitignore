@@ -38,5 +38,7 @@ env/
 
 
 datasets/
-models
-results
+models/
+results/
+logs/
+atomic/saved_models
