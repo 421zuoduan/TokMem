@@ -7,9 +7,16 @@ import os
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoTokenizer
 
-def load_natural_instructions_from_splits(tasks_dir="natural-instructions-2.8/tasks", 
-                                          train_tasks_file="natural-instructions-2.8/splits/default/train_tasks.txt",
-                                          test_tasks_file="natural-instructions-2.8/splits/default/test_tasks.txt",
+ATOMIC_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(ATOMIC_DIR)
+DATASETS_DIR = os.path.join(REPO_ROOT, "datasets", "natural-instructions-2.8")
+DEFAULT_TASKS_DIR = os.path.join(DATASETS_DIR, "tasks")
+DEFAULT_TRAIN_TASKS_FILE = os.path.join(DATASETS_DIR, "splits", "default", "train_tasks.txt")
+DEFAULT_TEST_TASKS_FILE = os.path.join(DATASETS_DIR, "splits", "default", "test_tasks.txt")
+
+def load_natural_instructions_from_splits(tasks_dir=DEFAULT_TASKS_DIR, 
+                                          train_tasks_file=DEFAULT_TRAIN_TASKS_FILE,
+                                          test_tasks_file=DEFAULT_TEST_TASKS_FILE,
                                           val_ratio=0.1, max_instances_per_task=500, max_instances_per_task_test=100, max_instruction_tokens=1024, tokenizer=None):
     """Load tasks from Natural Instructions dataset using predefined train/test splits
     
@@ -241,7 +248,7 @@ def load_natural_instructions_from_splits(tasks_dir="natural-instructions-2.8/ta
     return all_train_data, all_val_data, all_test_data
 
 
-def count_training_tasks(train_tasks_file="natural-instructions-2.8/splits/default/train_tasks.txt"):
+def count_training_tasks(train_tasks_file=DEFAULT_TRAIN_TASKS_FILE):
     """Count the number of tasks in the training split file
     
     Args:
@@ -261,7 +268,7 @@ def count_training_tasks(train_tasks_file="natural-instructions-2.8/splits/defau
 
 
 def sample_natural_instructions_tasks(
-    tasks_dir="natural-instructions-2.8/tasks",
+    tasks_dir=DEFAULT_TASKS_DIR,
     num_tasks=5,
     max_instruction_tokens=1000,
     tokenizer=None,

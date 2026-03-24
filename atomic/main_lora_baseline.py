@@ -19,6 +19,7 @@ from datetime import datetime
 
 # Import data loading functions from existing modules
 from task_dataset import (
+    DEFAULT_TASKS_DIR,
     sample_natural_instructions_tasks,
     NaturalInstructionsTaskDataset
 )
@@ -512,7 +513,7 @@ def generate_responses(model, tokenizer, test_examples, device="cuda", max_new_t
 
 def main():
     parser = argparse.ArgumentParser(description='LoRA Baseline for Natural Instructions')
-    parser.add_argument('--tasks_dir', type=str, default='natural-instructions-2.8/tasks', 
+    parser.add_argument('--tasks_dir', type=str, default=DEFAULT_TASKS_DIR, 
                         help='Directory containing Natural Instructions task files')
     parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.2-1B-Instruct", 
                         help='HuggingFace model name')
