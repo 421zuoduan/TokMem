@@ -22,6 +22,7 @@ import numpy as np
 # Import our custom modules
 from task_model import TaskCallingModel, print_model_info
 from task_dataset import (
+    DEFAULT_TASKS_DIR,
     create_natural_instructions_dataloader, 
     sample_natural_instructions_tasks
 )
@@ -65,7 +66,7 @@ def set_random_seed(seed):
 
 def main():
     parser = argparse.ArgumentParser(description='Natural Instructions Task Learning')
-    parser.add_argument('--tasks_dir', type=str, default='natural-instructions-2.8/tasks', 
+    parser.add_argument('--tasks_dir', type=str, default=DEFAULT_TASKS_DIR, 
                         help='Directory containing Natural Instructions task files')
     parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.2-1B-Instruct", 
                         help='HuggingFace model name')

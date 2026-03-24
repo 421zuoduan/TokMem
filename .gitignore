@@ -37,6 +37,6 @@ env/
 .spec-workflow
 
 
-datasets
+datasets/
 models
 results

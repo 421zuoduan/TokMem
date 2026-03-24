@@ -23,7 +23,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoTokenizer
 
 # Import from local modules
-from task_dataset import sample_natural_instructions_tasks
+from task_dataset import DEFAULT_TASKS_DIR, sample_natural_instructions_tasks
 
 def set_seed(seed=42):
     """Set seed for reproducibility"""
@@ -247,7 +247,7 @@ def main():
     # Load data with few-shot examples
     print(f"\nLoading {args.num_tasks} tasks from Natural Instructions...")
     train_data, val_data, test_data, task_names = sample_natural_instructions_tasks(
-        tasks_dir="natural-instructions-2.8/tasks",
+        tasks_dir=DEFAULT_TASKS_DIR,
         num_tasks=args.num_tasks,
         max_instruction_tokens=1000,
         tokenizer=tokenizer,
