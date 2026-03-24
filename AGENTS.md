@@ -7,7 +7,7 @@ This repository is organized by experiment track rather than by a shared package
 - `atomic/`: atomic task-memory experiments on Natural Instructions. Main entrypoints are `main_in_domain.py`, `main_tokmem.sh`, and `main_lora_baseline.sh`.
 - `compositional/`: sequential tool-calling experiments on XLAM/APIGen. Main entrypoints are `main_sequential.py`, `run_n_rounds_main.sh`, `run_n_rounds_lora.sh`, and `icl_baseline.sh`.
 - `memorization/`: embedding-capacity and memorization ablations, including GSM8K and long-text stress tests.
-- `paper.pdf`: project paper for method and results context.
+- `paper.pdf`: the paper corresponding to this repository. Treat it as the baseline method and results reference; future changes are expected to build on or modify the approaches described there.
 - `requirements.txt`: minimal Python dependency list.
 
 Tests are limited. The main standalone test-like script is `atomic/test_sbert_retriever.py`.
@@ -41,6 +41,15 @@ Most experiments require a CUDA-capable GPU and model access through Hugging Fac
 ## Coding Style & Naming Conventions
 
 Use Python with 4-space indentation and keep changes consistent with the surrounding file style. Prefer descriptive snake_case for functions, variables, and script names. Keep experiment-specific logic inside its own directory rather than introducing cross-directory coupling unless it is clearly reusable.
+
+For Bash scripts, keep them flat and direct:
+
+- prefer a single straightforward execution path over helper functions and layered control flow
+- avoid environment-variable-based parameterization unless it is genuinely necessary
+- do not introduce batches of config variables for model hyperparameters; write fixed paper or experiment settings directly in the command when possible
+- only define variables for long or reusable paths such as the repository root or dataset directory
+- avoid unnecessary input validation, help text, wrappers, and mode switches when the script is meant for one fixed experiment
+- prefer one explicit command over generic reusable shell abstractions
 
 There is no enforced formatter or linter in this repository. If you use one locally, avoid large style-only diffs.
 
