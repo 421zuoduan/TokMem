@@ -121,7 +121,7 @@ def main():
     
     # Set up logging
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging()
+    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(model_name=args.model_name, num_tasks=args.num_tasks)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
     print()

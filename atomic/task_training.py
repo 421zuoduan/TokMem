@@ -1,31 +1,62 @@
-import torch
+import gc
 import logging
 import os
+import re
+import time
 from datetime import datetime
 
-def setup_logging(log_dir="logs"):
-    """Set up logging configuration for training and evaluation"""
+import torch
+
+def _normalize_model_label(model_name):
+    """Convert a model name or path into a stable filename-safe label."""
+    if not model_name:
+        return "model"
+
+    model_label = os.path.basename(str(model_name).rstrip("/")) or str(model_name)
+    model_label = re.sub(r"[^A-Za-z0-9._-]+", "-", model_label).strip("-._")
+    return model_label or "model"
+
+
+def _format_duration(seconds):
+    """Format seconds as HH:MM:SS."""
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def setup_logging(log_dir="logs", model_name=None, num_tasks=None):
+    """Set up logging configuration for training and evaluation."""
     os.makedirs(log_dir, exist_ok=True)
-    
-    # Create timestamped log files
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    training_log = os.path.join(log_dir, f"training_{timestamp}.log")
-    evaluation_log = os.path.join(log_dir, f"evaluation_{timestamp}.log")
-    
-    # Configure training logger
+    model_label = _normalize_model_label(model_name)
+    task_label = f"{num_tasks}tasks" if num_tasks is not None else "unknowntasks"
+    suffix = f"_{timestamp}_{model_label}_{task_label}.log"
+
+    training_log = os.path.join(log_dir, f"training{suffix}")
+    evaluation_log = os.path.join(log_dir, f"evaluation{suffix}")
+
     training_logger = logging.getLogger('training')
     training_logger.setLevel(logging.INFO)
+    training_logger.propagate = False
+    for handler in list(training_logger.handlers):
+        handler.close()
+        training_logger.removeHandler(handler)
     training_handler = logging.FileHandler(training_log)
     training_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
     training_logger.addHandler(training_handler)
-    
-    # Configure evaluation logger
+
     eval_logger = logging.getLogger('evaluation')
     eval_logger.setLevel(logging.INFO)
+    eval_logger.propagate = False
+    for handler in list(eval_logger.handlers):
+        handler.close()
+        eval_logger.removeHandler(handler)
     eval_handler = logging.FileHandler(evaluation_log)
     eval_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
     eval_logger.addHandler(eval_handler)
-    
+
     return training_logger, eval_logger, training_log, evaluation_log, timestamp
 
 
@@ -46,6 +77,13 @@ def extract_trained_token_state(model):
             model.trainable_task_embeddings.detach().cpu().clone()
         )
     return state
+
+
+def clear_cuda_cache():
+    """Release Python garbage and any currently unused CUDA cache blocks."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
@@ -158,6 +196,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     best_val_loss = float('inf')
     best_model_state = None
     best_model_path = None
+    training_start_time = time.time()
     
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
@@ -223,13 +262,41 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 avg_task_loss = batch_task_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_task_count = batch_task_count / batches_since_log
                 
+                completed_batches = epoch * len(dataloader) + batch_idx + 1
+                elapsed_seconds = time.time() - training_start_time
+                if completed_batches > 0:
+                    total_estimated_seconds = elapsed_seconds * total_steps / completed_batches
+                    remaining_seconds = max(0.0, total_estimated_seconds - elapsed_seconds)
+                else:
+                    total_estimated_seconds = 0.0
+                    remaining_seconds = 0.0
+                time_summary = (
+                    f"Remaining/Total: {_format_duration(remaining_seconds)}/"
+                    f"{_format_duration(total_estimated_seconds)}"
+                )
+
                 # Show averages over the logging window
                 if batch_task_count > 0:
-                    print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}")    
-                    training_logger.info(f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f}")
-                else:   
-                    print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, Avg Loss: {avg_loss:.4f}, Avg Task Loss: N/A (no task tokens in window), LR: {current_lr:.6f}")
-                    training_logger.info(f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} AvgLoss:{avg_loss:.4f} AvgTaskLoss:N/A LR:{current_lr:.6f}")
+                    print(
+                        f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
+                        f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, "
+                        f"Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}, {time_summary}"
+                    )
+                    training_logger.info(
+                        f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
+                        f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} "
+                        f"AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f} {time_summary}"
+                    )
+                else:
+                    print(
+                        f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
+                        f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: N/A (no task tokens in window), "
+                        f"LR: {current_lr:.6f}, {time_summary}"
+                    )
+                    training_logger.info(
+                        f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
+                        f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:N/A LR:{current_lr:.6f} {time_summary}"
+                    )
 
                 # Reset accumulators for next logging window
                 batch_loss = 0
@@ -243,6 +310,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             if val_dataloader is not None and validate_every_n_steps is not None and validate_every_n_steps > 0:
                 if step % validate_every_n_steps == 0:
                     avg_val_loss = run_validation(model, val_dataloader, device=device, ignore_index=-100)
+                    clear_cuda_cache()
                     print(f"Step {step} - Validation Loss: {avg_val_loss:.4f}")
                     training_logger.info(f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f}")
                     if avg_val_loss < best_val_loss:
@@ -255,6 +323,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
         # After each epoch, run validation to compute average validation loss
         if val_dataloader is not None:
             avg_val_loss = run_validation(model, val_dataloader, device=device, ignore_index=-100)
+            clear_cuda_cache()
             print(f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}")
             training_logger.info(f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f}")
             if avg_val_loss < best_val_loss:

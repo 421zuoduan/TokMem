@@ -558,3 +558,12 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 - [atomic/logs/gpu_monitor_20260324_174830.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_20260324_174830.log)
 - [atomic/logs/watchdog_main_tokmem_fixed_split.log](/data/ruochen/tokmem/atomic/logs/watchdog_main_tokmem_fixed_split.log)
 - [atomic/saved_models/task_tokens_20260324_174833_best.pt](/data/ruochen/tokmem/atomic/saved_models/task_tokens_20260324_174833_best.pt)
+
+## 10. 几个模型的 embedding 维度
+
+后面如果需要改模型，这几个常用模型的 embedding 维度先记在这里：
+
+- `Qwen 2.5 0.5B`：`896`
+- `Llama 3.2 1B`：`2048`
+- `Llama 3.2 3B`：`3072`
+- `Llama 3.1 8B`：`4096`

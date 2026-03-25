@@ -4,7 +4,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${SCRIPT_DIR}"
 
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-STDOUT_LOG="${SCRIPT_DIR}/logs/main_tokmem_fixed_split_${RUN_ID}.log"
 GPU_LOG="${SCRIPT_DIR}/logs/gpu_monitor_${RUN_ID}.log"
 
 mkdir -p "${SCRIPT_DIR}/logs"
@@ -39,5 +38,4 @@ python -u "${SCRIPT_DIR}/main_in_domain_fixed_split.py" \
     --max_length 1280 \
     --max_instruction_tokens 1024 \
     --eval_batch_size 8 \
-    --validate_every_n_steps 1000 \
-    2>&1 | tee "${STDOUT_LOG}"
+    --validate_every_n_steps 1000
