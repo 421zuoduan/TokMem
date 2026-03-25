@@ -105,12 +105,16 @@ def load_or_create_split_cache(args, tokenizer):
     """Load a cached split if present, otherwise build and save it."""
     cache_path = os.path.abspath(args.split_cache_path)
     expected_metadata = build_split_metadata(args)
+    validation_metadata = dict(expected_metadata)
+
+    if args.ignore_model_name_in_split_cache:
+        validation_metadata.pop("model_name", None)
 
     if os.path.exists(cache_path) and not args.rebuild_split_cache:
         print(f"Loading cached split from: {cache_path}")
         payload = torch.load(cache_path, map_location="cpu")
         cached_metadata = payload.get("metadata", {})
-        validate_cached_split_metadata(cache_path, expected_metadata, cached_metadata)
+        validate_cached_split_metadata(cache_path, validation_metadata, cached_metadata)
         print(
             "Cached split loaded. "
             f"Train: {len(payload['train_data'])}, Val: {len(payload['val_data'])}, "
@@ -232,6 +236,11 @@ def main():
         action="store_true",
         help="Regenerate the split cache even if the file already exists",
     )
+    parser.add_argument(
+        "--ignore_model_name_in_split_cache",
+        action="store_true",
+        help="Reuse an existing split cache even if the cached model_name differs",
+    )
     args = parser.parse_args()
 
     set_random_seed(args.seed)
@@ -246,6 +255,7 @@ def main():
     print(f"Number of tasks to sample: {args.num_tasks}")
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
+    print(f"Ignore cache model_name mismatch: {args.ignore_model_name_in_split_cache}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(
             f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, "
