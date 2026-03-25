@@ -208,8 +208,8 @@ class TaskCallingModel(nn.Module):
         
         Sequence: [Instruction] [Reserved_Task_Token] [Response] <|eot_id|>
         """
-        # Use the model's forward method directly (our overrides handle the custom embeddings/logits)
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        # Disable KV cache during training/eval forward passes to reduce memory use.
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         return outputs.logits
 
     

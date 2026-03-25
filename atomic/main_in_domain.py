@@ -101,10 +101,17 @@ def main():
                         help='Validate every n steps')
     args = parser.parse_args()
     
+    stdout_prefix = "evaluation" if args.skip_training else "training"
+    training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+        stdout_prefix=stdout_prefix,
+    )
+
     # Set random seed first for full reproducibility
     set_random_seed(args.seed)
     print()
-    
+
     print("=" * 60)
     print("NATURAL INSTRUCTIONS TASK LEARNING")
     print("=" * 60)
@@ -118,12 +125,11 @@ def main():
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
     print(f"Random seed: {args.seed}")
     print()
-    
-    # Set up logging
+
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(model_name=args.model_name, num_tasks=args.num_tasks)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
+    print(f"   Stdout log: {stdout_log}")
     print()
     
     # Load tokenizer

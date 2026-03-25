@@ -567,3 +567,169 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 - `Llama 3.2 1B`：`2048`
 - `Llama 3.2 3B`：`3072`
 - `Llama 3.1 8B`：`4096`
+
+## 15. Qwen 2.5 0.5B 训练笔记
+
+### 当前入口
+
+当前 0.5B fixed-split 入口脚本是：
+
+- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+
+当前固定设置：
+
+- `CUDA_VISIBLE_DEVICES=4,5,6`
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- `model_name=/data/ruochen/tokmem/models/Qwen2.5-0.5B-Instruct`
+- `num_tasks=1000`
+- `train_size=500`
+- `val_size=10`
+- `test_size=50`
+- `num_epochs=1`
+- `batch_size=4`
+- `gradient_accumulation_steps=1`
+- `eval_batch_size=8`
+- `max_length=1280`
+- `max_instruction_tokens=1024`
+- `validate_every_n_steps=1000`
+- `seed=42`
+
+### 为了让 0.5B 跑起来，我已经做过的修改
+
+1. 新建了 0.5B fixed-split 脚本
+   - 位置：
+   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - 作用：
+   - 固定用本地 `Qwen2.5-0.5B-Instruct`
+   - 固定用 `CUDA_VISIBLE_DEVICES=4,5,6`
+
+2. 允许“换模型但不重建 split cache”
+   - 改动文件：
+   - [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+   - 新增参数：
+   - `--ignore_model_name_in_split_cache`
+   - 作用：
+   - 继续复用 `atomic/cached_splits/tokmem_atomic_fixed_split.pt`
+   - 只忽略 cached `model_name` 不一致，其它 split 元数据仍然校验
+
+3. validation 后主动清理 CUDA cache
+   - 改动文件：
+   - [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+   - 逻辑：
+   - 每次 step-based validation 和 epoch-end validation 后执行
+   - `gc.collect()`
+   - `torch.cuda.empty_cache()`
+   - 作用：
+   - 尽量减少 validation 之后的缓存残留和显存碎片
+
+4. 训练进度里增加“剩余时间 / 总时间”
+   - 改动文件：
+   - [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+   - 现在每 100 个 batch 会打印类似：
+
+```text
+Remaining/Total: 04:20:22/04:20:37
+```
+
+5. 统一日志命名规则
+   - 改动文件：
+   - [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+   - [atomic/main_in_domain.py](/data/ruochen/tokmem/atomic/main_in_domain.py)
+   - [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+   - [atomic/main_lora_baseline.py](/data/ruochen/tokmem/atomic/main_lora_baseline.py)
+   - 现在统一是：
+   - `training_<timestamp>_<model_name>_<num_tasks>tasks.log`
+   - `evaluation_<timestamp>_<model_name>_<num_tasks>tasks.log`
+   - 同时额外保存终端输出：
+   - `training_stdout_<timestamp>_<model_name>_<num_tasks>tasks.log`
+   - `evaluation_stdout_<timestamp>_<model_name>_<num_tasks>tasks.log`
+   - 不再依赖：
+   - `main_tokmem_fixed_split_<RUN_ID>.log`
+
+6. 0.5B 脚本内置 GPU 监控
+   - 改动文件：
+   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - 日志命名保持：
+   - `gpu_monitor_<RUN_ID>.log`
+   - 现在采样频率：
+   - 每 `10` 秒一次
+
+7. 训练前向显式关闭 `use_cache`
+   - 改动文件：
+   - [atomic/task_model.py](/data/ruochen/tokmem/atomic/task_model.py)
+   - 训练 / validation 前向现在是：
+   - `use_cache=False`
+   - 生成路径仍然保留：
+   - `use_cache=True`
+   - 作用：
+   - 避免训练时额外保留 KV cache，降低显存占用
+
+8. fixed-split 启动脚本加 allocator 配置
+   - 改动文件：
+   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - [atomic/main_tokmem_fixed_split.sh](/data/ruochen/tokmem/atomic/main_tokmem_fixed_split.sh)
+   - 新增：
+   - `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+   - 作用：
+   - 缓解 CUDA allocator 碎片化
+   - 不是增加显存总量，而是尽量减少“还有空闲显存但大块申请失败”的情况
+
+### 当前日志位置
+
+0.5B 训练相关日志都在：
+
+- `atomic/logs/`
+
+当前最重要的几类文件：
+
+- 结构化训练日志：
+  - `training_<timestamp>_Qwen2.5-0.5B-Instruct_1000tasks.log`
+- 结构化评测日志：
+  - `evaluation_<timestamp>_Qwen2.5-0.5B-Instruct_1000tasks.log`
+- 终端输出日志：
+  - `training_stdout_<timestamp>_Qwen2.5-0.5B-Instruct_1000tasks.log`
+- GPU 监控日志：
+  - `gpu_monitor_<RUN_ID>.log`
+- 后台运行完成标记：
+  - `qwen_fixed_<RUN_ID>.done`
+
+### 目前观察到的 0.5B 显存现象
+
+我已经跑过多次 0.5B fixed-split 训练，正式出错的几次现象非常接近：
+
+- 一次停在 `B13600/51263`
+- 一次停在 `B13700/51263`
+- 最新一次仍然停在 `B13700/102525`
+- 都先经过 `VALIDATION STEP 13000`
+- 然后又继续训练几百个 batch 才退出
+
+最新一次已经在 `training_stdout_*.log` 里确认到明确 traceback：
+
+- `torch.OutOfMemoryError`
+- 发生位置在 `loss.backward()`
+- 当时还尝试再申请约 `2.91 GiB`
+- 同时日志里还出现了较大的 `reserved by PyTorch but unallocated`
+
+这说明问题不是随机断开，而是稳定地集中在同一段训练区间，并且和显存峰值/碎片化高度相关。
+
+### 现在对 0.5B 的判断
+
+目前这条线已经具备：
+
+- 独立入口脚本
+- fixed split 复用
+- 更细的 GPU 监控
+- 结构化训练/评测日志
+- 单独的 stdout 存档
+- validation 后 cache 清理
+- 训练时 `use_cache=False`
+- allocator 的 `expandable_segments:True`
+
+所以后面继续排查时，重点不再是“日志不够”或“脚本不稳定”，而是：
+
+- `batch_size`
+- `eval_batch_size`
+- `max_length`
+- 长样本 batch
+- 多卡切分后哪张卡承担主要 logits / loss 压力
+- 是否需要进一步引入 gradient checkpointing

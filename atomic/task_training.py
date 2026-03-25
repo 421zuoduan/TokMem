@@ -2,10 +2,36 @@ import gc
 import logging
 import os
 import re
+import sys
 import time
 from datetime import datetime
 
 import torch
+
+
+class TeeStream:
+    """Mirror writes to the original stream and a log file."""
+
+    def __init__(self, primary_stream, log_stream):
+        self.primary_stream = primary_stream
+        self.log_stream = log_stream
+        self.encoding = getattr(primary_stream, "encoding", None)
+
+    def write(self, data):
+        self.primary_stream.write(data)
+        self.log_stream.write(data)
+        return len(data)
+
+    def flush(self):
+        self.primary_stream.flush()
+        self.log_stream.flush()
+
+    def isatty(self):
+        return self.primary_stream.isatty()
+
+    def writable(self):
+        return True
+
 
 def _normalize_model_label(model_name):
     """Convert a model name or path into a stable filename-safe label."""
@@ -25,17 +51,34 @@ def _format_duration(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def setup_logging(log_dir="logs", model_name=None, num_tasks=None):
+def _build_log_suffix(timestamp, model_name=None, num_tasks=None):
+    """Build a shared timestamp/model/task suffix for log filenames."""
+    model_label = _normalize_model_label(model_name)
+    task_label = f"{num_tasks}tasks" if num_tasks is not None else "unknowntasks"
+    return f"_{timestamp}_{model_label}_{task_label}.log"
+
+
+def _capture_stdout(log_path):
+    """Mirror stdout/stderr into a dedicated file while keeping terminal output."""
+    stdout_stream = open(log_path, "a", buffering=1)
+    sys.stdout = TeeStream(sys.stdout, stdout_stream)
+    sys.stderr = TeeStream(sys.stderr, stdout_stream)
+
+
+def setup_logging(log_dir="logs", model_name=None, num_tasks=None, stdout_prefix=None):
     """Set up logging configuration for training and evaluation."""
     os.makedirs(log_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_label = _normalize_model_label(model_name)
-    task_label = f"{num_tasks}tasks" if num_tasks is not None else "unknowntasks"
-    suffix = f"_{timestamp}_{model_label}_{task_label}.log"
+    suffix = _build_log_suffix(timestamp, model_name=model_name, num_tasks=num_tasks)
 
     training_log = os.path.join(log_dir, f"training{suffix}")
     evaluation_log = os.path.join(log_dir, f"evaluation{suffix}")
+    stdout_log = None
+
+    if stdout_prefix is not None:
+        stdout_log = os.path.join(log_dir, f"{stdout_prefix}_stdout{suffix}")
+        _capture_stdout(stdout_log)
 
     training_logger = logging.getLogger('training')
     training_logger.setLevel(logging.INFO)
@@ -57,7 +100,7 @@ def setup_logging(log_dir="logs", model_name=None, num_tasks=None):
     eval_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
     eval_logger.addHandler(eval_handler)
 
-    return training_logger, eval_logger, training_log, evaluation_log, timestamp
+    return training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp
 
 
 def extract_trained_token_state(model):

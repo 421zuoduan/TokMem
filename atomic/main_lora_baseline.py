@@ -556,10 +556,17 @@ def main():
     if args.continual_replay:
         args.shuffle_train = False
     
+    stdout_prefix = "evaluation" if args.skip_training else "training"
+    training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+        stdout_prefix=stdout_prefix,
+    )
+
     # Set random seed
     set_random_seed(args.seed)
     print()
-    
+
     print("=" * 60)
     print("LORA BASELINE FOR NATURAL INSTRUCTIONS")
     print("=" * 60)
@@ -569,12 +576,12 @@ def main():
     print(f"LoRA config: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
     print(f"Target modules: {args.target_modules}")
     print()
-    
+
     # Set up logging
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(model_name=args.model_name, num_tasks=args.num_tasks)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
+    print(f"   Stdout log: {stdout_log}")
     print()
     
     # Load tokenizer

@@ -243,6 +243,13 @@ def main():
     )
     args = parser.parse_args()
 
+    stdout_prefix = "evaluation" if args.skip_training else "training"
+    training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+        stdout_prefix=stdout_prefix,
+    )
+
     set_random_seed(args.seed)
     print()
 
@@ -265,9 +272,9 @@ def main():
     print()
 
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(model_name=args.model_name, num_tasks=args.num_tasks)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
+    print(f"   Stdout log: {stdout_log}")
     print()
 
     print("Loading tokenizer...")

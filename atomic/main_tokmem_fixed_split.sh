@@ -9,6 +9,7 @@ GPU_LOG="${SCRIPT_DIR}/logs/gpu_monitor_${RUN_ID}.log"
 mkdir -p "${SCRIPT_DIR}/logs"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 monitor_gpu() {
     while true; do
@@ -16,7 +17,7 @@ monitor_gpu() {
             echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
             nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader
         } >> "${GPU_LOG}"
-        sleep 60
+        sleep 10
     done
 }
 
