@@ -289,3 +289,272 @@ python atomic/utils/count_eligible_tasks.py --train_size 200 --val_size 10 --tes
 这个 `atomic tokmem` 实验本质上是：
 
 “冻结 Llama 3.2 3B，只训练每个 task 对应的特殊 token embedding，让模型先输出 task token，再输出答案。”
+
+## 14. `main_tokmem_fixed_split.sh` 实验记录
+
+### 我做了什么修改
+
+这次正式长跑对应的入口脚本是：
+
+- [atomic/main_tokmem_fixed_split.sh](/data/ruochen/tokmem/atomic/main_tokmem_fixed_split.sh)
+
+我对它做的主要修改有：
+
+1. 让脚本先 `cd atomic/`
+   - 这样后续相对路径日志和保存文件都会落在 `atomic/` 下面，而不是仓库根目录。
+
+2. 增加带时间戳的 stdout 日志
+   - 文件名形如：
+   - `atomic/logs/main_tokmem_fixed_split_<RUN_ID>.log`
+   - 作用：
+   - 保存整个外层脚本的 stdout/stderr，便于看模型加载、dataset 大小、batch 进度、异常退出等。
+
+3. 增加 GPU 监控日志
+   - 文件名形如：
+   - `atomic/logs/gpu_monitor_<RUN_ID>.log`
+   - 作用：
+   - 每 60 秒记录一次 `nvidia-smi`，用于观察 4 张 3090 的显存和利用率。
+
+4. 改成 `python -u ... | tee`
+   - `-u` 让日志更实时，`tee` 同时打印到终端和日志文件。
+
+5. 当前正式长跑参数固定为
+   - `CUDA_VISIBLE_DEVICES=0,1,2,3`
+   - `num_tasks=1000`
+   - `train_size=500`
+   - `val_size=10`
+   - `test_size=50`
+   - `num_epochs=1`
+   - `batch_size=4`
+   - `eval_batch_size=8`
+   - `gradient_accumulation_steps=2`
+   - `max_length=1280`
+   - `max_instruction_tokens=1024`
+   - `validate_every_n_steps=1000`
+
+另外我新建了：
+
+- [atomic/watchdog_main_tokmem_fixed_split.sh](/data/ruochen/tokmem/atomic/watchdog_main_tokmem_fixed_split.sh)
+
+这个脚本的作用不是训练本身，而是：
+
+- 每 5 分钟检查一次目标训练进程还在不在
+- 如果训练已经完成，就只记一条“completed”
+- 如果训练没完成但进程没了，就自动在 `tmux` 里重启 `main_tokmem_fixed_split.sh`
+
+注意：
+
+- 我没有改 [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py) 的训练主逻辑
+- 这次改动主要集中在“启动方式、日志记录、GPU 监控、自动保活”这几件事上
+
+### 新建脚本怎么用
+
+#### 手动直接跑 fixed split 长跑
+
+在仓库根目录执行：
+
+```bash
+conda activate tokmem
+bash atomic/main_tokmem_fixed_split.sh
+```
+
+这个命令会：
+
+- 启动 `main_in_domain_fixed_split.py`
+- 自动写 stdout 日志
+- 自动写 GPU 监控日志
+- 把 best task token 存到 `atomic/saved_models/`
+
+#### 推荐的长期运行方式：放到 tmux 里
+
+训练会持续很久，推荐用：
+
+```bash
+tmux new-session -d -s tokmem_atomic_run "bash /data/ruochen/tokmem/atomic/main_tokmem_fixed_split.sh"
+```
+
+查看会话：
+
+```bash
+tmux ls
+```
+
+进入会话：
+
+```bash
+tmux attach -t tokmem_atomic_run
+```
+
+#### 启动 watchdog
+
+如果希望训练掉了以后自动拉起：
+
+```bash
+tmux new-session -d -s tokmem_atomic_watchdog "bash /data/ruochen/tokmem/atomic/watchdog_main_tokmem_fixed_split.sh"
+```
+
+watchdog 默认行为：
+
+- 每 300 秒检查一次
+- 检查目标进程是否是：
+  - `python -u /data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py`
+- 如果训练缺失且未完成，就自动重启 `tokmem_atomic_run`
+
+#### 常用查看命令
+
+看当前训练日志尾部：
+
+```bash
+tail -n 50 atomic/logs/training_20260324_174833.log
+```
+
+看当前 stdout：
+
+```bash
+tail -n 50 atomic/logs/main_tokmem_fixed_split_20260324_174830.log
+```
+
+看 GPU 日志：
+
+```bash
+tail -n 50 atomic/logs/gpu_monitor_20260324_174830.log
+```
+
+看 watchdog 心跳：
+
+```bash
+tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
+```
+
+### 这次 fixed split 实验会产生哪些中间文件，它们都在哪
+
+#### 数据划分缓存
+
+- 文件：
+  - [atomic/cached_splits/tokmem_atomic_fixed_split.pt](/data/ruochen/tokmem/atomic/cached_splits/tokmem_atomic_fixed_split.pt)
+- 内容：
+  - `metadata`
+  - `train_data`
+  - `val_data`
+  - `test_data`
+  - `task_names`
+- 作用：
+  - 固定 train / val / test 划分
+  - 下次重跑不用重新筛任务和切分数据
+
+#### 外层脚本 stdout 日志
+
+- 目录：
+  - `atomic/logs/`
+- 文件名模式：
+  - `main_tokmem_fixed_split_<RUN_ID>.log`
+- 例子：
+  - [atomic/logs/main_tokmem_fixed_split_20260324_174830.log](/data/ruochen/tokmem/atomic/logs/main_tokmem_fixed_split_20260324_174830.log)
+- 内容：
+  - 模型路径
+  - tokenizer 加载
+  - cached split 加载
+  - dataloader 大小
+  - 训练进度打印
+  - 最终结果 summary
+- 作用：
+  - 最适合快速判断“脚本现在跑到哪了”
+
+#### 结构化训练日志
+
+- 目录：
+  - `atomic/logs/`
+- 文件名模式：
+  - `training_<TIMESTAMP>.log`
+- 例子：
+  - [atomic/logs/training_20260324_174833.log](/data/ruochen/tokmem/atomic/logs/training_20260324_174833.log)
+- 内容：
+  - `TRAINING START`
+  - 每 100 个 batch 的 loss
+  - `VALIDATION STEP ...`
+  - `NEW BEST VALIDATION LOSS ...`
+  - 保存 best task token 的路径
+- 作用：
+  - 最适合做速度统计、validation 时间统计、最佳 checkpoint 追踪
+
+#### 结构化评估日志
+
+- 目录：
+  - `atomic/logs/`
+- 文件名模式：
+  - `evaluation_<TIMESTAMP>.log`
+- 例子：
+  - [atomic/logs/evaluation_20260324_174833.log](/data/ruochen/tokmem/atomic/logs/evaluation_20260324_174833.log)
+- 内容：
+  - 评估阶段写入的结构化日志
+- 作用：
+  - 用于区分训练日志和最终测试评估日志
+- 注意：
+  - 在最终 comprehensive evaluation 开始之前，它可能基本是空的
+
+#### GPU 监控日志
+
+- 目录：
+  - `atomic/logs/`
+- 文件名模式：
+  - `gpu_monitor_<RUN_ID>.log`
+- 例子：
+  - [atomic/logs/gpu_monitor_20260324_174830.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_20260324_174830.log)
+- 内容：
+  - 每分钟一次的 `nvidia-smi`
+  - GPU index
+  - GPU name
+  - `memory.used`
+  - `memory.free`
+  - `utilization.gpu`
+- 作用：
+  - 观察训练阶段和 validation 阶段的显存波动
+  - 判断 batch size 是否太激进
+
+#### watchdog 日志
+
+- 文件：
+  - [atomic/logs/watchdog_main_tokmem_fixed_split.log](/data/ruochen/tokmem/atomic/logs/watchdog_main_tokmem_fixed_split.log)
+- 内容：
+  - watchdog 启动时间
+  - 每 5 分钟一次的 heartbeat
+  - 当前活跃训练进程 PID 和完整命令
+  - 是否触发自动重启
+- 作用：
+  - 判断训练是否曾中断
+  - 判断自动重启有没有发生
+
+#### 训练产物：best task tokens
+
+- 目录：
+  - `atomic/saved_models/`
+- 文件名模式：
+  - `task_tokens_<TIMESTAMP>_best.pt`
+- 例子：
+  - [atomic/saved_models/task_tokens_20260324_174833_best.pt](/data/ruochen/tokmem/atomic/saved_models/task_tokens_20260324_174833_best.pt)
+- 内容：
+  - `task_names`
+  - `reserved_token_ids`
+  - 训练得到的 task token embedding 参数
+- 作用：
+  - 这是当前实验最重要的模型产物
+  - 不是完整 3B 模型，而是“冻结 backbone + 单独训练出的 task token 权重”
+
+#### 旧产物和这次正式 run 的区别
+
+当前仓库里还能看到一些更早的：
+
+- `atomic/logs/training_20260324_174507.log`
+- `atomic/logs/main_tokmem_fixed_split_20260324_174504.log`
+- `atomic/logs/gpu_monitor_20260324_174504.log`
+
+这些是之前尝试的 run，主要用于对比显存和重启前的行为。
+
+当前真正持续在跑、并且被 watchdog 保活的这次 run，是以这组文件为主：
+
+- [atomic/logs/main_tokmem_fixed_split_20260324_174830.log](/data/ruochen/tokmem/atomic/logs/main_tokmem_fixed_split_20260324_174830.log)
+- [atomic/logs/training_20260324_174833.log](/data/ruochen/tokmem/atomic/logs/training_20260324_174833.log)
+- [atomic/logs/evaluation_20260324_174833.log](/data/ruochen/tokmem/atomic/logs/evaluation_20260324_174833.log)
+- [atomic/logs/gpu_monitor_20260324_174830.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_20260324_174830.log)
+- [atomic/logs/watchdog_main_tokmem_fixed_split.log](/data/ruochen/tokmem/atomic/logs/watchdog_main_tokmem_fixed_split.log)
+- [atomic/saved_models/task_tokens_20260324_174833_best.pt](/data/ruochen/tokmem/atomic/saved_models/task_tokens_20260324_174833_best.pt)
