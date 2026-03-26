@@ -12,8 +12,8 @@ python main_in_domain.py \
     --test_size 50 \
     --model_name "$ROOT_DIR/models/Qwen2.5-0.5B-Instruct" \
     --num_epochs 1 \
-    --batch_size 2 \
-    --gradient_accumulation_steps 2 \
+    --batch_size 8 \
+    --gradient_accumulation_steps 1 \
     --max_length 1280 \
     --max_instruction_tokens 1024 \
     --val_batch_size 16 \

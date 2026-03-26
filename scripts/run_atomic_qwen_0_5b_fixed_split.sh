@@ -34,14 +34,15 @@ python -u main_in_domain_fixed_split.py \
     --test_size 50 \
     --model_name "$ROOT_DIR/models/Qwen2.5-0.5B-Instruct" \
     --device_map balanced \
-    --split_cache_path "$ROOT_DIR/atomic/cached_splits/tokmem_atomic_fixed_split.pt" \
-    --ignore_model_name_in_split_cache \
+    --split_cache_path "$ROOT_DIR/atomic/cached_splits/tokmem_atomic_fixed_split_qwen2.5_0.5b.pt" \
+    --rebuild_split_cache \
     --num_epochs 1 \
-    --batch_size 4 \
+    --batch_size 8 \
     --gradient_accumulation_steps 1 \
-    --max_length 1280 \
+    --max_length 1024 \
     --max_instruction_tokens 1024 \
+    --lr 0.005 \
     --val_batch_size 16 \
-    --test_batch_size 64 \
+    --test_batch_size 256 \
     --validate_every_n_steps 1000 \
     --seed 42

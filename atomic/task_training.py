@@ -194,7 +194,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     
     # Only train the trainable task embedding parameters 
     trainable_params = model.get_trainable_parameters()
-    optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.01)
+    optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.0)
     
     total_steps = len(dataloader) * num_epochs
     

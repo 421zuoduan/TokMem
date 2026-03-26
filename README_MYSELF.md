@@ -39,9 +39,10 @@ bash atomic/main_tokmem.sh
 - `num_epochs=1`
 - `batch_size=2`
 - `gradient_accumulation_steps=2`
-- `max_length=1280`
+- `max_length=1024`
 - `max_instruction_tokens=1024`
-- `eval_batch_size=32`
+- `val_batch_size=16`
+- `test_batch_size=256`
 - `validate_every_n_steps=1000`
 
 ## 3. 运行脚本后实际会发生什么
@@ -326,7 +327,8 @@ python atomic/utils/count_eligible_tasks.py --train_size 200 --val_size 10 --tes
    - `test_size=50`
    - `num_epochs=1`
    - `batch_size=4`
-   - `eval_batch_size=8`
+   - `val_batch_size=16`
+   - `test_batch_size=64`
    - `gradient_accumulation_steps=2`
    - `max_length=1280`
    - `max_instruction_tokens=1024`
@@ -585,11 +587,14 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 - `train_size=500`
 - `val_size=10`
 - `test_size=50`
+- `device_map=balanced`
 - `num_epochs=1`
-- `batch_size=4`
+- `batch_size=8`
 - `gradient_accumulation_steps=1`
-- `eval_batch_size=8`
-- `max_length=1280`
+- `lr=0.005`
+- `val_batch_size=16`
+- `test_batch_size=256`
+- `max_length=1024`
 - `max_instruction_tokens=1024`
 - `validate_every_n_steps=1000`
 - `seed=42`
@@ -712,6 +717,66 @@ Remaining/Total: 04:20:22/04:20:37
 
 这说明问题不是随机断开，而是稳定地集中在同一段训练区间，并且和显存峰值/碎片化高度相关。
 
+### 当前设置下大概会用多少显存
+
+这里记录的是目前最有参考价值的一组配置：
+
+- 脚本：
+  - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- GPU：
+  - `CUDA_VISIBLE_DEVICES=4,5,6`
+- 模型：
+  - `Qwen2.5-0.5B-Instruct`
+- 关键参数：
+  - `batch_size=8`
+  - `gradient_accumulation_steps=1`
+  - `val_batch_size=16`
+  - `test_batch_size=64`
+  - `max_length=1280`
+
+按现有日志，可以先记这几个量级：
+
+1. 训练阶段
+   - 这是最吃显存的阶段。
+   - 从 [atomic/logs/gpu_monitor_20260325_151415.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_20260325_151415.log) 看，训练时主卡大致会到：
+   - `GPU 4 ≈ 10-13.5 GiB`
+   - `GPU 5 ≈ 2-4 GiB`
+   - `GPU 6 ≈ 2-3.5 GiB`
+   - 之前真正报错的几次也都发生在训练反向传播，不是 validation / test。
+
+2. 测试生成阶段
+   - 当前正在跑过的一次实测是 `test_batch_size=8`。
+   - 那次在测试阶段三张卡都只有大约：
+   - `GPU 4 ≈ 1.17 GiB`
+   - `GPU 5 ≈ 1.16 GiB`
+   - `GPU 6 ≈ 1.16 GiB`
+   - 也就是说测试生成显存远低于训练。
+
+3. 对 `test_batch_size=64` 的判断
+   - 目前仓库里没有一次真正把 `test_batch_size=64` 跑完的直接实测日志。
+   - 但按上面的 `test_batch_size=8` 实测和当前卡的剩余空间看，`test_batch_size=64` 大概率不会成为显存瓶颈。
+   - 更直白地说：
+   - 真正危险的是训练阶段，不是测试阶段。
+
+4. 对 `val_batch_size=16` 的判断
+   - 目前历史日志里多次成功跑过的是 `val_batch_size=8`。
+   - `validation` 没有反向传播，通常会比训练更省显存。
+   - 所以把默认值设成 `val_batch_size=16`，从现有日志判断也是大概率安全的。
+
+一句话记忆：
+
+- `Qwen 0.5B` 这条线当前显存压力主要来自训练。
+- `val_batch_size=16, test_batch_size=64` 这组设置更像是“推理/验证侧很宽松，训练侧才需要小心”。
+
+### 2026-03-26 最新变更
+
+- 当前 0.5B fixed-split 脚本使用 `device_map=balanced`。
+- 当前 0.5B fixed-split 脚本使用 `batch_size=8`、`max_length=1024`、`lr=0.005`。
+- 当前 0.5B fixed-split 脚本已把 `test_batch_size` 调到 `256`，用于加快 evaluation。
+- 这个 `test_batch_size=256` 的修改只会影响之后新启动的 run，不会动态改变已经在跑的进程。
+- 当前 0.5B 专属 split cache 路径是：`/data/ruochen/tokmem/atomic/cached_splits/tokmem_atomic_fixed_split_qwen2.5_0.5b.pt`。
+- 当前 0.5B 运行会固定 `--rebuild_split_cache`，因此会重新按 Qwen tokenizer 划分并保存 split。
+
 ### 现在对 0.5B 的判断
 
 目前这条线已经具备：
@@ -728,7 +793,8 @@ Remaining/Total: 04:20:22/04:20:37
 所以后面继续排查时，重点不再是“日志不够”或“脚本不稳定”，而是：
 
 - `batch_size`
-- `eval_batch_size`
+- `val_batch_size`
+- `test_batch_size`
 - `max_length`
 - 长样本 batch
 - 多卡切分后哪张卡承担主要 logits / loss 压力

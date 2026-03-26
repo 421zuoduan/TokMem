@@ -77,7 +77,7 @@ def main():
     parser.add_argument('--test_batch_size', type=int, default=64, help='Test batch size')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.005, help='Learning rate')
     parser.add_argument('--device', type=str, default="cuda", help='Device to use')
     parser.add_argument('--device_map', type=str, default=None,
                         choices=[None, "auto", "balanced", "balanced_low_0", "sequential"],
