@@ -12,7 +12,8 @@ python main_lora_baseline.py \
     --gradient_accumulation_steps 4 \
     --max_length 1280 \
     --max_instruction_tokens 1024 \
-    --eval_batch_size 8 \
+    --val_batch_size 16 \
+    --test_batch_size 64 \
     --validate_every_n_steps 1000 \
     --lr 5e-5 \
     --lora_r 8 \

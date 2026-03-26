@@ -722,7 +722,8 @@ def collate_fn(batch, tokenizer):
 
 
 def create_natural_instructions_dataloader(model, train_data=None, val_data=None, test_data=None,
-                                         tokenizer=None, batch_size=4, max_length=512, eval_batch_size=32):
+                                         tokenizer=None, batch_size=4, max_length=512,
+                                         val_batch_size=32, test_batch_size=32):
     """Create DataLoaders for Natural Instructions
     
     Args:
@@ -733,7 +734,8 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         tokenizer: Tokenizer to use
         batch_size: Batch size for training dataloader
         max_length: Maximum sequence length
-        eval_batch_size: Batch size for test dataloader
+        val_batch_size: Batch size for validation dataloader
+        test_batch_size: Batch size for test dataloader
     
     Returns:
         train_dataloader: Training DataLoader
@@ -776,7 +778,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         
         val_dataloader = DataLoader(
             val_dataset,
-            batch_size=eval_batch_size,
+            batch_size=val_batch_size,
             shuffle=False,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )
@@ -797,7 +799,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         
         test_dataloader = DataLoader(
             test_dataset,
-            batch_size=eval_batch_size,
+            batch_size=test_batch_size,
             shuffle=False,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )

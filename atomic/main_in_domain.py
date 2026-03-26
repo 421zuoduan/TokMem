@@ -73,7 +73,8 @@ def main():
     parser.add_argument('--num_tasks', type=int, default=5, help='Number of tasks to sample')
     # Remove ratio-based splitting in favor of absolute sizes
     parser.add_argument('--batch_size', type=int, default=4, help='Training batch size')
-    parser.add_argument('--eval_batch_size', type=int, default=16, help='Evaluation batch size')
+    parser.add_argument('--val_batch_size', type=int, default=16, help='Validation batch size')
+    parser.add_argument('--test_batch_size', type=int, default=64, help='Test batch size')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
@@ -121,6 +122,8 @@ def main():
     print(f"Number of tasks to sample: {args.num_tasks}")
     # Ratios removed; using sizes mode only
     print(f"Decouple embeddings: {args.decouple_embeddings}")
+    print(f"Validation batch size: {args.val_batch_size}")
+    print(f"Test batch size: {args.test_batch_size}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
     print(f"Random seed: {args.seed}")
@@ -199,7 +202,8 @@ def main():
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
-        eval_batch_size=args.eval_batch_size
+        val_batch_size=args.val_batch_size,
+        test_batch_size=args.test_batch_size
     )
     
     # Training

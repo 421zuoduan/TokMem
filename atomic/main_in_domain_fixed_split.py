@@ -177,7 +177,8 @@ def main():
     )
     parser.add_argument("--num_tasks", type=int, default=5, help="Number of tasks to sample")
     parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
-    parser.add_argument("--eval_batch_size", type=int, default=16, help="Evaluation batch size")
+    parser.add_argument("--val_batch_size", type=int, default=16, help="Validation batch size")
+    parser.add_argument("--test_batch_size", type=int, default=64, help="Test batch size")
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
@@ -261,6 +262,8 @@ def main():
     print(f"Device map: {args.device_map}")
     print(f"Number of tasks to sample: {args.num_tasks}")
     print(f"Decouple embeddings: {args.decouple_embeddings}")
+    print(f"Validation batch size: {args.val_batch_size}")
+    print(f"Test batch size: {args.test_batch_size}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
     print(f"Ignore cache model_name mismatch: {args.ignore_model_name_in_split_cache}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
@@ -330,7 +333,8 @@ def main():
             tokenizer=tokenizer,
             batch_size=args.batch_size,
             max_length=args.max_length,
-            eval_batch_size=args.eval_batch_size,
+            val_batch_size=args.val_batch_size,
+            test_batch_size=args.test_batch_size,
         )
     )
 
