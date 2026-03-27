@@ -88,6 +88,12 @@ def validate_cached_split_metadata(cache_path, expected_metadata, cached_metadat
     mismatches = []
     for key, expected_value in expected_metadata.items():
         cached_value = cached_metadata.get(key)
+        if key == "model_name" and cached_value != expected_value:
+            compatible_model_names = cached_metadata.get("compatible_model_names", [])
+            if expected_value in compatible_model_names:
+                continue
+        if key == "max_instruction_tokens" and "compatible_model_names" in cached_metadata:
+            continue
         if cached_value != expected_value:
             mismatches.append((key, expected_value, cached_value))
 

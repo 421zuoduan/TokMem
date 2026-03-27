@@ -63,6 +63,31 @@ There is no formal coverage target. For contributions, run the narrowest relevan
 
 Name new validation scripts as `test_*.py` when they are meant to be run directly.
 
+## Experiment Archival
+
+Successful experiment runs should be archived under `results/` in a dedicated run folder so future comparisons do not depend on files still living under `atomic/logs/` or other working directories.
+
+- create one subdirectory per archived run under `results/`
+- keep the archived layout consistent with existing runs in `results/`
+- include the main artifacts for that run when available:
+  - structured training log
+  - structured evaluation log
+  - stdout log
+  - GPU monitor log
+  - best checkpoint / saved weights
+  - exact script snapshot used for the run
+  - split cache or other run-specific cached data used by the experiment
+- add a `run_summary.md` file inside the run folder
+- write `run_summary.md` in concise Chinese and include at least:
+  - what experiment was run
+  - the main parameter settings
+  - the main results
+  - what was materially different from earlier archived runs
+  - any important caveats such as reused split cache, missing watchdog log, or nonzero outer exit code
+- update `results/README.md` after each newly archived successful run
+- keep `results/README.md` in concise Chinese and use it as a chronological index of archived experiments, focusing on the main differences between runs rather than duplicating full logs
+- if a run did not produce a file that normally exists, note that explicitly in `run_summary.md` instead of silently omitting the fact
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses short, direct messages such as `Update README.md`, `Update task_dataset.py`, and `docs: update ...`. Follow that style: concise, imperative, and scoped.
