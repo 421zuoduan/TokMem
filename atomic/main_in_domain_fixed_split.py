@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Natural Instructions task learning with a cached train/val/test split.
+Natural Instructions task learning with a precomputed cached train/val/test split.
 
-This variant is meant for quick reruns while keeping the exact same task/sample
-split across runs. On first run it creates a cached split file; later runs load
-that file directly instead of recomputing task filtering and splitting.
+This variant always loads an existing split cache file so repeated runs share
+the exact same task/sample split produced ahead of time.
 """
 
 import argparse
@@ -15,11 +14,11 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
+from run_layout import DEFAULT_RUNS_DIR, build_run_config, resolve_run_context, write_json
 from task_model import TaskCallingModel, print_model_info
 from task_dataset import (
     DEFAULT_TASKS_DIR,
     create_natural_instructions_dataloader,
-    sample_natural_instructions_tasks,
 )
 from task_training import (
     demo_task_calling,
@@ -30,7 +29,6 @@ from task_training import (
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SPLIT_CACHE_PATH = os.path.join(SCRIPT_DIR, "cached_splits", "tokmem_atomic_fixed_split.pt")
 
 
 def add_reserved_special_tokens(tokenizer, num_of_tasks, device="cuda"):
@@ -74,7 +72,6 @@ def build_split_metadata(args):
         "tasks_dir": os.path.abspath(args.tasks_dir),
         "model_name": args.model_name,
         "num_tasks": args.num_tasks,
-        "max_instruction_tokens": args.max_instruction_tokens,
         "train_size": args.train_size,
         "val_size": args.val_size,
         "test_size": args.test_size,
@@ -92,8 +89,6 @@ def validate_cached_split_metadata(cache_path, expected_metadata, cached_metadat
             compatible_model_names = cached_metadata.get("compatible_model_names", [])
             if expected_value in compatible_model_names:
                 continue
-        if key == "max_instruction_tokens" and "compatible_model_names" in cached_metadata:
-            continue
         if cached_value != expected_value:
             mismatches.append((key, expected_value, cached_value))
 
@@ -103,68 +98,41 @@ def validate_cached_split_metadata(cache_path, expected_metadata, cached_metadat
             lines.append(
                 f"  {key}: expected={expected_value!r}, cached={cached_value!r}"
             )
-        lines.append("Delete the cache file, change --split_cache_path, or rerun with --rebuild_split_cache.")
+        lines.append(
+            "Change --split_cache_path or regenerate the cache with "
+            "scripts/filter_atomic_tasks_all_paper_models.sh."
+        )
         raise ValueError("\n".join(lines))
 
 
-def load_or_create_split_cache(args, tokenizer):
-    """Load a cached split if present, otherwise build and save it."""
+def load_split_cache(args):
+    """Load and validate a precomputed split cache."""
     cache_path = os.path.abspath(args.split_cache_path)
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(
+            f"Split cache not found: {cache_path}\n"
+            "Generate it first with scripts/filter_atomic_tasks_all_paper_models.sh "
+            "or point --split_cache_path to an existing .pt file."
+        )
+
     expected_metadata = build_split_metadata(args)
-    validation_metadata = dict(expected_metadata)
 
-    if args.ignore_model_name_in_split_cache:
-        validation_metadata.pop("model_name", None)
-
-    if os.path.exists(cache_path) and not args.rebuild_split_cache:
-        print(f"Loading cached split from: {cache_path}")
-        payload = torch.load(cache_path, map_location="cpu")
-        cached_metadata = payload.get("metadata", {})
-        validate_cached_split_metadata(cache_path, validation_metadata, cached_metadata)
-        print(
-            "Cached split loaded. "
-            f"Train: {len(payload['train_data'])}, Val: {len(payload['val_data'])}, "
-            f"Test: {len(payload['test_data'])}, Tasks: {len(payload['task_names'])}"
-        )
-        return (
-            payload["train_data"],
-            payload["val_data"],
-            payload["test_data"],
-            payload["task_names"],
-        )
-
-    if args.rebuild_split_cache and os.path.exists(cache_path):
-        print(f"Rebuilding split cache, overwriting: {cache_path}")
-    else:
-        print(f"Creating split cache at: {cache_path}")
-
-    train_data, val_data, test_data, task_names = sample_natural_instructions_tasks(
-        tasks_dir=args.tasks_dir,
-        num_tasks=args.num_tasks,
-        max_instruction_tokens=args.max_instruction_tokens,
-        tokenizer=tokenizer,
-        stable_test_split=True,
-        train_size=args.train_size,
-        val_size=args.val_size,
-        test_size=args.test_size,
-        few_shot=args.few_shot,
-    )
-
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    payload = {
-        "metadata": expected_metadata,
-        "train_data": train_data,
-        "val_data": val_data,
-        "test_data": test_data,
-        "task_names": task_names,
-    }
-    torch.save(payload, cache_path)
+    print(f"Loading cached split from: {cache_path}")
+    payload = torch.load(cache_path, map_location="cpu")
+    cached_metadata = payload.get("metadata", {})
+    validate_cached_split_metadata(cache_path, expected_metadata, cached_metadata)
     print(
-        "Split cache saved. "
-        f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}, Tasks: {len(task_names)}"
+        "Cached split loaded. "
+        f"Train: {len(payload['train_data'])}, Val: {len(payload['val_data'])}, "
+        f"Test: {len(payload['test_data'])}, Tasks: {len(payload['task_names'])}"
     )
-
-    return train_data, val_data, test_data, task_names
+    return (
+        payload["train_data"],
+        payload["val_data"],
+        payload["test_data"],
+        payload["task_names"],
+        cached_metadata,
+    )
 
 
 def main():
@@ -202,12 +170,8 @@ def main():
         help="Use separate input/output embeddings for task tokens",
     )
     parser.add_argument(
-        "--max_instruction_tokens",
-        type=int,
-        default=1024,
-        help="Maximum token length for instructions",
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--skip_training", action="store_true", help="Skip training and only run evaluation")
     parser.add_argument("--demo", action="store_true", help="Only run demo on a few examples")
     parser.add_argument(
@@ -235,26 +199,45 @@ def main():
     parser.add_argument(
         "--split_cache_path",
         type=str,
-        default=DEFAULT_SPLIT_CACHE_PATH,
+        required=True,
         help="Path to a saved split cache file",
     )
     parser.add_argument(
-        "--rebuild_split_cache",
-        action="store_true",
-        help="Regenerate the split cache even if the file already exists",
+        "--run_root_dir",
+        type=str,
+        default=DEFAULT_RUNS_DIR,
+        help="Directory where atomic run folders will be created",
     )
     parser.add_argument(
-        "--ignore_model_name_in_split_cache",
-        action="store_true",
-        help="Reuse an existing split cache even if the cached model_name differs",
+        "--run_name",
+        type=str,
+        default=None,
+        help="Optional explicit run folder name",
+    )
+    parser.add_argument(
+        "--run_tag",
+        type=str,
+        default="fixed_split",
+        help="Short tag appended to auto-generated run names",
     )
     args = parser.parse_args()
 
+    run_context = resolve_run_context(
+        experiment_name="atomic_tokmem",
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+        run_root_dir=args.run_root_dir,
+        run_name=args.run_name,
+        run_tag=args.run_tag,
+    )
+
     stdout_prefix = "evaluation" if args.skip_training else "training"
     training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+        log_dir=run_context["run_dir"],
         model_name=args.model_name,
         num_tasks=args.num_tasks,
         stdout_prefix=stdout_prefix,
+        timestamp=run_context["timestamp"],
     )
 
     set_random_seed(args.seed)
@@ -270,8 +253,8 @@ def main():
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Validation batch size: {args.val_batch_size}")
     print(f"Test batch size: {args.test_batch_size}")
+    print(f"Run directory: {run_context['run_dir']}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
-    print(f"Ignore cache model_name mismatch: {args.ignore_model_name_in_split_cache}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(
             f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, "
@@ -298,9 +281,30 @@ def main():
     print(f"Tokenizer loaded with adjustments. Vocab size: {len(tokenizer)}")
     print()
 
-    print("Loading or creating cached split...")
-    train_data, val_data, test_data, task_names = load_or_create_split_cache(args, tokenizer)
+    print("Loading cached split...")
+    train_data, val_data, test_data, task_names, split_cache_metadata = load_split_cache(args)
     print()
+
+    write_json(
+        os.path.join(run_context["run_dir"], "run_config.json"),
+        build_run_config(
+            vars(args),
+            run_context,
+            extra={
+                "split_cache_path": os.path.abspath(args.split_cache_path),
+                "dataset_summary": {
+                    "train_examples": len(train_data),
+                    "val_examples": len(val_data),
+                    "test_examples": len(test_data),
+                    "task_count": len(task_names),
+                },
+            },
+        ),
+    )
+    write_json(
+        os.path.join(run_context["run_dir"], "split_cache_metadata.json"),
+        split_cache_metadata,
+    )
 
     print("Initializing Task Calling Model...")
     model = TaskCallingModel(
@@ -355,9 +359,18 @@ def main():
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             device=args.device,
             timestamp=timestamp,
+            save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
+        write_json(
+            os.path.join(run_context["run_dir"], "train_results.json"),
+            {
+                "avg_total_loss": train_results["avg_total_loss"],
+                "best_val_loss": train_results["best_val_loss"],
+                "best_model_path": train_results["best_model_path"],
+            },
+        )
 
         if train_results["best_model_state"] is not None:
             print(f"Loading best model state (validation loss: {train_results['best_val_loss']:.4f})")
@@ -387,6 +400,25 @@ def main():
         print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
         print(f"   Average Response Score: {results['avg_response_score']:.3f}")
         print("=" * 50)
+        write_json(
+            os.path.join(run_context["run_dir"], "evaluation_results.json"),
+            results,
+        )
+        write_json(
+            os.path.join(run_context["run_dir"], "run_summary.json"),
+            {
+                "run_name": run_context["run_name"],
+                "run_dir": run_context["run_dir"],
+                "split_cache_path": os.path.abspath(args.split_cache_path),
+                "model_name": args.model_name,
+                "num_tasks": len(task_names),
+                "train_examples": len(train_data),
+                "val_examples": len(val_data),
+                "test_examples": len(test_data),
+                "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "metrics": results,
+            },
+        )
 
     print("\nTask learning pipeline completed!")
 

@@ -15,7 +15,6 @@ python main_in_domain.py \
     --batch_size 8 \
     --gradient_accumulation_steps 1 \
     --max_length 1280 \
-    --max_instruction_tokens 1024 \
     --val_batch_size 16 \
     --test_batch_size 64 \
     --validate_every_n_steps 1000 \

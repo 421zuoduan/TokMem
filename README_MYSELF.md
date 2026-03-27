@@ -40,7 +40,6 @@ bash atomic/main_tokmem.sh
 - `batch_size=2`
 - `gradient_accumulation_steps=2`
 - `max_length=1024`
-- `max_instruction_tokens=1024`
 - `val_batch_size=16`
 - `test_batch_size=256`
 - `validate_every_n_steps=1000`
@@ -331,7 +330,6 @@ python atomic/utils/count_eligible_tasks.py --train_size 200 --val_size 10 --tes
    - `test_batch_size=64`
    - `gradient_accumulation_steps=2`
    - `max_length=1280`
-   - `max_instruction_tokens=1024`
    - `validate_every_n_steps=1000`
 
 另外我新建了：
@@ -595,7 +593,6 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 - `val_batch_size=16`
 - `test_batch_size=256`
 - `max_length=1024`
-- `max_instruction_tokens=1024`
 - `validate_every_n_steps=1000`
 - `seed=42`
 
@@ -774,8 +771,131 @@ Remaining/Total: 04:20:22/04:20:37
 - 当前 0.5B fixed-split 脚本使用 `batch_size=8`、`max_length=1024`、`lr=0.005`。
 - 当前 0.5B fixed-split 脚本已把 `test_batch_size` 调到 `256`，用于加快 evaluation。
 - 这个 `test_batch_size=256` 的修改只会影响之后新启动的 run，不会动态改变已经在跑的进程。
-- 当前 0.5B 专属 split cache 路径是：`/data/ruochen/tokmem/atomic/cached_splits/tokmem_atomic_fixed_split_qwen2.5_0.5b.pt`。
-- 当前 0.5B 运行会固定 `--rebuild_split_cache`，因此会重新按 Qwen tokenizer 划分并保存 split。
+- 当前 [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+  已不再使用 Qwen 专属 split cache。
+- 当前默认改为直接读取共享 cache 路径：
+  - `/data/ruochen/tokmem/atomic/cached_splits/paper_model_common_pool/tokmem_atomic_fixed_split_common_all_models_maxlen1024.pt`
+- 当前 [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+  也已去掉“运行时重建 split cache”的逻辑，默认就是只加载现成 `.pt`。
+
+### 2026-03-27 shared fixed-split 统计
+
+这次我专门把“任务总数”和“约束来源”拆开确认了一遍，避免后面再混淆。
+
+原始数据集：
+
+- `datasets/natural-instructions-2.8/tasks` 里一共有 `1613` 个 `task*.json`
+- 其中 `English-only` 任务有 `1071` 个
+- `mixed / partial English` 有 `274` 个
+- `non-English` 有 `268` 个
+
+当前共享筛选脚本：
+
+- [atomic/utils/filter_tasks_for_all_models.py](/data/ruochen/tokmem/atomic/utils/filter_tasks_for_all_models.py)
+- 目前仍然先做 `English-only` 过滤
+- 然后才叠加 tokenizer 长度约束和样本池约束
+
+如果保留语言要求，但完全不看 tokenizer 长度，只按样本数判断：
+
+- `train=500, val=10, test=50` 需要每个 task 至少 `560` 条原始样本
+  - 符合要求的 `English-only` task 数量：`766`
+- `train=400, val=10, test=50` 需要每个 task 至少 `460` 条原始样本
+  - 符合要求的 `English-only` task 数量：`786`
+
+如果继续加上当前共享 tokenizer 长度约束（`max_length=1024`）：
+
+- `500 / 10 / 50` 最终能进共同池的 task 数量：`763`
+- `400 / 10 / 50` 最终能进共同池的 task 数量：`783`
+
+一句话记忆：
+
+- 在当前 `max_length=1024` 下，tokenizer 长度约束实际只额外卡掉了很少的 task
+- 真正限制最大的还是 `English-only + 每 task 样本数门槛`
+- 所以即使去掉 tokenizer 长度约束，也还是达不到 `1000 task`
+
+更直观地说：
+
+- 第 `1000` 名 `English-only` task 的原始样本数只有 `120`
+- 如果坚持 `val=10, test=50`
+- 那么想保住 `1000 task`，训练样本最多只能是 `60`
+
+### 2026-03-27 Qwen 0.5B shared-split 实跑记录
+
+这次真正跑通的一组配置不是 `1000 task`，而是：
+
+- `783 task`
+- `train=400`
+- `val=10`
+- `test=50`
+- `max_length=1024`
+- `model=/data/ruochen/tokmem/models/Qwen2.5-0.5B-Instruct`
+
+对应共享 cache：
+
+- [atomic/cached_splits/paper_model_common_pool_400_10_50/tokmem_atomic_fixed_split_common_all_models_maxlen1024.pt](/data/ruochen/tokmem/atomic/cached_splits/paper_model_common_pool_400_10_50/tokmem_atomic_fixed_split_common_all_models_maxlen1024.pt)
+
+我已经确认过：
+
+- `task_names=783`
+- `train_data=313200`
+- `val_data=7830`
+- `test_data=39150`
+- 每个 task 都严格满足：
+  - `train=400`
+  - `val=10`
+  - `test=50`
+
+这次 0.5B 训练入口是：
+
+- [scripts/run_atomic_qwen_0_5b_fixed_split_train400.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split_train400.sh)
+
+这次我额外打开了：
+
+- `CUDA_LAUNCH_BLOCKING=1`
+- `TORCH_SHOW_CPP_STACKTRACES=1`
+- `NCCL_ASYNC_ERROR_HANDLING=1`
+- `NCCL_DEBUG=INFO`
+
+目的就是如果再出现 CUDA 异步报错，日志里能更接近真实报错点。
+
+这次实际情况是：
+
+- 没有出现 CUDA 异步崩溃
+- 训练过程中只有一个非致命 warning：
+  - `AccumulateGrad stream mismatch`
+- validation loss 轨迹明显恶化：
+  - `step 1000 = 13.2097`
+  - `step 2000 = 31.6470`
+  - `step 3000 = 39.6119`
+  - `step 4000 = 51.4064`
+  - `step 5000 = 49.1158`
+  - `step 6000 = 62.8995`
+
+因此我没有机械地烧完整个 epoch，而是在确认 best checkpoint 仍然停留在 `step 1000` 后，直接用 best checkpoint 单独跑了完整测试评估。
+
+这次最重要的产物：
+
+- best checkpoint：
+  - [atomic/saved_models/task_tokens_20260327_071646_best.pt](/data/ruochen/tokmem/atomic/saved_models/task_tokens_20260327_071646_best.pt)
+- 训练日志：
+  - [atomic/logs/training_20260327_071646_Qwen2.5-0.5B-Instruct_783tasks.log](/data/ruochen/tokmem/atomic/logs/training_20260327_071646_Qwen2.5-0.5B-Instruct_783tasks.log)
+- 训练 stdout：
+  - [atomic/logs/training_stdout_20260327_071646_Qwen2.5-0.5B-Instruct_783tasks.log](/data/ruochen/tokmem/atomic/logs/training_stdout_20260327_071646_Qwen2.5-0.5B-Instruct_783tasks.log)
+- 训练 GPU 监控：
+  - [atomic/logs/gpu_monitor_20260327_071642.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_20260327_071642.log)
+- 评测日志：
+  - [atomic/logs/evaluation_20260327_075814_Qwen2.5-0.5B-Instruct_783tasks.log](/data/ruochen/tokmem/atomic/logs/evaluation_20260327_075814_Qwen2.5-0.5B-Instruct_783tasks.log)
+- 评测 stdout：
+  - [atomic/logs/evaluation_stdout_20260327_075814_Qwen2.5-0.5B-Instruct_783tasks.log](/data/ruochen/tokmem/atomic/logs/evaluation_stdout_20260327_075814_Qwen2.5-0.5B-Instruct_783tasks.log)
+- 评测 GPU 监控：
+  - [atomic/logs/gpu_monitor_eval_20260327_075811.log](/data/ruochen/tokmem/atomic/logs/gpu_monitor_eval_20260327_075811.log)
+
+最终完整测试结果是：
+
+- `Task Prediction Accuracy = 0.009`
+- `Exact Match Accuracy = 0.041`
+- `Average Response Score = 0.098`
+- `ROUGE-L F1 = 9.82%`
 
 ### 现在对 0.5B 的判断
 
@@ -799,3 +919,131 @@ Remaining/Total: 04:20:22/04:20:37
 - 长样本 batch
 - 多卡切分后哪张卡承担主要 logits / loss 压力
 - 是否需要进一步引入 gradient checkpointing
+
+## 16. 2026-03-27 atomic 路径统一和脚本整理
+
+这一节专门记录：为什么我要再做一轮脚本和保存路径整理，以及这轮整理具体改了什么。
+
+### 为什么要做这轮修改
+
+这轮修改的核心原因不是“模型逻辑变了”，而是原来的实验流程已经出现了几个明显的工程问题：
+
+- `atomic` 的中间产物保存位置不统一
+  - 有的在 `atomic/logs/`
+  - 有的在 `atomic/saved_models/`
+  - split cache 在 `atomic/cached_splits/`
+  - 成功实验又会额外拷到 `results/`
+- `0.5B` 这条线之前既出现过“运行时重新构建 split”，也出现过“直接复用旧 cache”
+  - 后面回看时很容易搞混到底是哪份数据在训练
+- 训练和推理虽然有日志，但 run 本身缺少一个固定目录来收纳：
+  - 训练日志
+  - 评测日志
+  - stdout
+  - GPU 监控
+  - best checkpoint
+  - 本次运行参数
+  - 本次使用的 split cache 元信息
+- 后续如果要支持别的模型，流程应该固定成两阶段：
+  1. 先按 tokenizer 长度筛任务，整理成 `.pt`
+  2. 再从 `.pt` 训练 / 推理
+- 用户这次也明确要求：
+  - atomic 实验进行中，所有中间过程和结果先放在 `atomic/` 下
+  - 只有实验成功后，才用脚本或手动归档到 `results/`
+
+一句话说，这轮修改的目标是：
+
+- 把 atomic 这条线整理成“先筛 `.pt`，再训练；训练中的所有产物都留在 `atomic/`；成功后再归档”的稳定流程
+
+### 这轮具体改了什么
+
+1. 新增统一 run 目录逻辑
+
+- 新增文件：
+  - [atomic/run_layout.py](/data/ruochen/tokmem/atomic/run_layout.py)
+- 它不是单独执行的脚本，而是一个工具模块
+- 作用是统一生成 run 名称、run 目录，以及写出结构化 JSON
+- 现在 atomic 的一次训练 / 推理 run 会固定落在：
+  - `atomic/runs/<run_name>/`
+
+2. 统一训练 / 推理过程中的保存路径
+
+- [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+  - 现在要求显式传入 `--split_cache_path`
+  - 不再默认猜 cache 路径
+  - run 目录统一写到 `atomic/runs/`
+  - 会额外写出：
+    - `run_config.json`
+    - `split_cache_metadata.json`
+    - `train_results.json`
+    - `evaluation_results.json`
+    - `run_summary.json`
+- [atomic/main_in_domain.py](/data/ruochen/tokmem/atomic/main_in_domain.py)
+  - 也同步改成相同的 run 目录保存方式
+  - 避免 runtime-split 这条线继续用另一套路径
+
+3. best checkpoint 不再单独散落到 `atomic/saved_models/`
+
+- [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+  - 现在 `save_trained_model()` 的保存目录由入口显式传入
+  - fixed-split / runtime-split 训练时，best task token 会直接保存在对应 run 目录里
+- 这样每个 run 的：
+  - 日志
+  - checkpoint
+  - 评测结果
+  - 配置
+  都在一个目录下，不需要再到别处拼凑
+
+4. 0.5B 训练脚本改成“先有 PT，再训练”
+
+- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+  - 现在只做一件事：
+    - 从已经存在的 `.pt` split cache 加载数据并训练
+  - 如果 `.pt` 不存在，会直接报错退出
+  - 不再在训练脚本里偷偷重建 split
+
+5. 0.5B 数据来源明确固定下来
+
+- 当前目标是：
+  - 从满足 `500 / 10 / 50` 且 `max_length=1024` 的 `763` 个任务池里
+  - 用固定随机种子
+  - 随机选出 `700` 个任务
+  - 整理成训练用 `.pt`
+- 对应筛选脚本现在是：
+  - [scripts/filter_atomic_tasks_all_paper_models.sh](/data/ruochen/tokmem/scripts/filter_atomic_tasks_all_paper_models.sh)
+- 当前输出目录固定到：
+  - [atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42](/data/ruochen/tokmem/atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42)
+
+6. Llama fixed-split 入口也同步收束
+
+- [atomic/main_tokmem_fixed_split.sh](/data/ruochen/tokmem/atomic/main_tokmem_fixed_split.sh)
+  - 现在也把运行中的：
+    - GPU 监控
+    - 入口脚本快照
+    - Python 训练 / 推理输出
+  统一放到 `atomic/runs/<run_name>/`
+
+7. 新增“成功后归档到 results”的脚本
+
+- 新增文件：
+  - [scripts/archive_atomic_run.sh](/data/ruochen/tokmem/scripts/archive_atomic_run.sh)
+- 它的作用很简单：
+  - 训练过程先在 `atomic/runs/` 里完成
+  - 确认是成功实验后
+  - 再把整个 run 目录复制到 `results/`
+
+### 现在推荐的 atomic 流程
+
+后面我希望统一按下面这套来理解：
+
+1. 先筛任务并生成 `.pt`
+   - 输出放在 `atomic/cached_splits/`
+2. 再从 `.pt` 启动训练 / 推理
+   - 运行过程全部放在 `atomic/runs/`
+3. 只要 run 还没确认成功，就不要急着往 `results/` 搬
+4. 确认成功后，再把完整 run 归档到 `results/`
+
+一句话记忆：
+
+- `atomic/cached_splits/` 放可复用数据缓存
+- `atomic/runs/` 放当前实验全过程
+- `results/` 只放已经确认成功、值得长期保存的 run

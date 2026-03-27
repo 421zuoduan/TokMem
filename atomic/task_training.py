@@ -65,11 +65,12 @@ def _capture_stdout(log_path):
     sys.stderr = TeeStream(sys.stderr, stdout_stream)
 
 
-def setup_logging(log_dir="logs", model_name=None, num_tasks=None, stdout_prefix=None):
+def setup_logging(log_dir="logs", model_name=None, num_tasks=None, stdout_prefix=None, timestamp=None):
     """Set up logging configuration for training and evaluation."""
     os.makedirs(log_dir, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = _build_log_suffix(timestamp, model_name=model_name, num_tasks=num_tasks)
 
     training_log = os.path.join(log_dir, f"training{suffix}")
@@ -180,6 +181,7 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
 
 def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01, 
                            gradient_accumulation_steps=1, device="cuda", timestamp=None,
+                           save_dir="saved_models",
                            validate_every_n_steps=1000):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
@@ -360,7 +362,12 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                         best_val_loss = avg_val_loss
                         # Save best token state for later use
                         best_model_state = extract_trained_token_state(model)
-                        best_model_path = save_trained_model(model, timestamp=timestamp, suffix='best')
+                        best_model_path = save_trained_model(
+                            model,
+                            save_dir=save_dir,
+                            timestamp=timestamp,
+                            suffix='best',
+                        )
                         training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
 
         # After each epoch, run validation to compute average validation loss
@@ -373,7 +380,12 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 best_val_loss = avg_val_loss
                 # Save best token state for later use
                 best_model_state = extract_trained_token_state(model)
-                best_model_path = save_trained_model(model, timestamp=timestamp, suffix='best')
+                best_model_path = save_trained_model(
+                    model,
+                    save_dir=save_dir,
+                    timestamp=timestamp,
+                    suffix='best',
+                )
                 training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
     
     avg_total_loss = total_loss / (len(dataloader) * num_epochs)

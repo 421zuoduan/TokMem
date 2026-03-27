@@ -33,14 +33,44 @@ DEFAULT_TASKS_DIR = REPO_ROOT / "datasets" / "natural-instructions-2.8" / "tasks
 DEFAULT_OUTPUT_DIR = ATOMIC_DIR / "cached_splits" / "paper_model_common_pool"
 
 
-def default_tokenizers():
-    candidates = [
-        (REPO_ROOT / "models" / "Qwen2.5-0.5B-Instruct", "Qwen/Qwen2.5-0.5B-Instruct"),
-        (REPO_ROOT / "models" / "Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct"),
-        (REPO_ROOT / "models" / "Llama-3.2-3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-        (REPO_ROOT / "models" / "Llama-3.1-8B-Instruct", "meta-llama/Llama-3.1-8B-Instruct"),
+def default_tokenizer_specs():
+    qwen_local = REPO_ROOT / "models" / "Qwen2.5-0.5B-Instruct"
+    llama_local_candidates = [
+        REPO_ROOT / "models" / "Llama-3.2-1B-Instruct",
+        REPO_ROOT / "models" / "Llama-3.2-3B-Instruct",
+        REPO_ROOT / "models" / "Llama-3.1-8B-Instruct",
     ]
-    return [str(local if local.exists() else remote) for local, remote in candidates]
+    llama_remote_aliases = [
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ]
+    llama_local = next((path for path in llama_local_candidates if path.exists()), None)
+
+    specs = [
+        {
+            "source": str(qwen_local) if qwen_local.exists() else "Qwen/Qwen2.5-0.5B-Instruct",
+            "compatible_names": [
+                str(qwen_local),
+                "Qwen/Qwen2.5-0.5B-Instruct",
+            ] if qwen_local.exists() else ["Qwen/Qwen2.5-0.5B-Instruct"],
+        }
+    ]
+
+    if llama_local is not None:
+        specs.append(
+            {
+                "source": str(llama_local),
+                "compatible_names": [
+                    str(path) for path in llama_local_candidates if path.exists()
+                ] + llama_remote_aliases,
+            }
+        )
+    else:
+        for alias in llama_remote_aliases:
+            specs.append({"source": alias, "compatible_names": [alias]})
+
+    return specs
 
 
 def is_english_only(task_data):
@@ -72,7 +102,22 @@ def load_tokenizer(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=os.path.isdir(model_name))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.bos_token
+    # The filtering pass only measures token counts, so allow very long texts without warnings.
+    tokenizer.model_max_length = max(int(getattr(tokenizer, "model_max_length", 0)), 10**9)
     return tokenizer
+
+
+def encode_lengths(tokenizer, texts):
+    """Batch-tokenize texts and return token counts."""
+    if not texts:
+        return []
+    encoded = tokenizer(
+        texts,
+        add_special_tokens=False,
+        truncation=False,
+        return_attention_mask=False,
+    )
+    return [len(token_ids) for token_ids in encoded["input_ids"]]
 
 
 def build_sample(task_name, definition, instance, instance_index):
@@ -100,14 +145,30 @@ def main():
     parser.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
-    tokenizer_sources = args.tokenizer or default_tokenizers()
+    if args.tokenizer:
+        tokenizer_specs = [{"source": name, "compatible_names": [name]} for name in args.tokenizer]
+    else:
+        tokenizer_specs = default_tokenizer_specs()
+
+    tokenizer_sources = [spec["source"] for spec in tokenizer_specs]
     tokenizers = [load_tokenizer(name) for name in tokenizer_sources]
     tokenizer_names = [tok.name_or_path for tok in tokenizers]
-    compatible_model_names = list(dict.fromkeys(tokenizer_sources + tokenizer_names))
+    eos_lengths = {
+        tokenizer_name: len(tokenizer.encode(tokenizer.eos_token or "", add_special_tokens=False))
+        for tokenizer, tokenizer_name in zip(tokenizers, tokenizer_names)
+    }
+    compatible_model_names = list(
+        dict.fromkeys(
+            tokenizer_sources
+            + tokenizer_names
+            + [name for spec in tokenizer_specs for name in spec["compatible_names"]]
+        )
+    )
     required_pool = args.train_size + args.eval_size + args.test_size
     tasks_dir = Path(args.tasks_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    split_cache_filename = f"tokmem_atomic_fixed_split_common_all_models_maxlen{args.max_length}.pt"
 
     english_task_files = []
     for task_file in sorted(tasks_dir.glob("task*.json")):
@@ -117,7 +178,8 @@ def main():
             english_task_files.append(task_file)
 
     task_rows = []
-    for task_file in english_task_files:
+    total_english_tasks = len(english_task_files)
+    for task_idx, task_file in enumerate(english_task_files, start=1):
         with open(task_file, "r") as f:
             task_data = json.load(f)
 
@@ -127,35 +189,72 @@ def main():
         valid_by_model = {name: 0 for name in tokenizer_names}
         common_instances = []
 
+        instance_rows = []
         for index, instance in enumerate(instances):
-            query = instance.get("input", "")
             response = instance["output"][0] if isinstance(instance.get("output", ""), list) else instance.get("output", "")
-            coarse_text = f"{definition}\n\n{query}"
+            instance_rows.append(
+                {
+                    "index": index,
+                    "query": instance.get("input", ""),
+                    "response": str(response),
+                    "rank": instance_rank(instance, index),
+                }
+            )
+
+        if task_idx == 1 or task_idx % 50 == 0 or task_idx == total_english_tasks:
+            print(
+                f"[{task_idx}/{total_english_tasks}] Processing {task_name} "
+                f"with {len(instance_rows)} instances..."
+            )
+
+        per_model_lengths = []
+        for tokenizer, tokenizer_name in zip(tokenizers, tokenizer_names):
+            coarse_lengths = encode_lengths(
+                tokenizer,
+                [f"{definition}\n\n{row['query']}" for row in instance_rows],
+            )
+            prompt_lengths = encode_lengths(
+                tokenizer,
+                [format_prompt(tokenizer_name, definition, row["query"]) for row in instance_rows],
+            )
+            response_lengths = encode_lengths(
+                tokenizer,
+                [row["response"] for row in instance_rows],
+            )
+            full_lengths = [
+                prompt_len + 1 + response_len + eos_lengths[tokenizer_name]
+                for prompt_len, response_len in zip(prompt_lengths, response_lengths)
+            ]
+            valid_by_model[tokenizer_name] = sum(full_len <= args.max_length for full_len in full_lengths)
+            per_model_lengths.append(
+                {
+                    "tokenizer_name": tokenizer_name,
+                    "coarse_lengths": coarse_lengths,
+                    "full_lengths": full_lengths,
+                }
+            )
+
+        for row_idx, row in enumerate(instance_rows):
             coarse_lengths_by_model = {}
             full_lengths_by_model = {}
             is_common_valid = True
 
-            for tokenizer, tokenizer_name in zip(tokenizers, tokenizer_names):
-                coarse_len = len(tokenizer.encode(coarse_text, add_special_tokens=False))
-                prompt_len = len(tokenizer.encode(format_prompt(tokenizer_name, definition, query), add_special_tokens=False))
-                response_len = len(tokenizer.encode(str(response), add_special_tokens=False))
-                eos_len = len(tokenizer.encode(tokenizer.eos_token or "", add_special_tokens=False))
-                full_len = prompt_len + 1 + response_len + eos_len
+            for model_lengths in per_model_lengths:
+                tokenizer_name = model_lengths["tokenizer_name"]
+                coarse_len = model_lengths["coarse_lengths"][row_idx]
+                full_len = model_lengths["full_lengths"][row_idx]
                 coarse_lengths_by_model[tokenizer_name] = coarse_len
                 full_lengths_by_model[tokenizer_name] = full_len
-
-                if full_len <= args.max_length:
-                    valid_by_model[tokenizer_name] += 1
-                else:
+                if full_len > args.max_length:
                     is_common_valid = False
 
             if is_common_valid:
                 common_instances.append(
                     {
-                        "index": index,
-                        "rank": instance_rank(instance, index),
-                        "query_preview": query[:200],
-                        "response_preview": str(response)[:200],
+                        "index": row["index"],
+                        "rank": row["rank"],
+                        "query_preview": row["query"][:200],
+                        "response_preview": row["response"][:200],
                         "coarse_lengths_by_model": coarse_lengths_by_model,
                         "full_lengths_by_model": full_lengths_by_model,
                     }
@@ -308,7 +407,7 @@ def main():
         for row in audit_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    torch.save(payload, output_dir / "tokmem_atomic_fixed_split_common_all_models.pt")
+    torch.save(payload, output_dir / split_cache_filename)
 
     print(f"Tokenizers: {tokenizer_names}")
     print(f"English tasks: {len(english_task_files)}")
@@ -319,7 +418,7 @@ def main():
     print(f"Saved: {output_dir / 'task_stats.json'}")
     print(f"Saved: {output_dir / 'common_pool_manifest.json'}")
     print(f"Saved: {output_dir / 'long_context_samples.jsonl'}")
-    print(f"Saved: {output_dir / 'tokmem_atomic_fixed_split_common_all_models.pt'}")
+    print(f"Saved: {output_dir / split_cache_filename}")
 
 
 if __name__ == "__main__":

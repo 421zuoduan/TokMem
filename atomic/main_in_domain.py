@@ -19,6 +19,7 @@ import os
 import random
 import numpy as np
 
+from run_layout import DEFAULT_RUNS_DIR, build_run_config, resolve_run_context, write_json
 # Import our custom modules
 from task_model import TaskCallingModel, print_model_info
 from task_dataset import (
@@ -64,6 +65,28 @@ def set_random_seed(seed):
     
     print(f"Random seed set to: {seed}")
 
+
+def build_runtime_split_payload(args, train_data, val_data, test_data, task_names):
+    metadata = {
+        "tasks_dir": os.path.abspath(args.tasks_dir),
+        "model_name": args.model_name,
+        "num_tasks": args.num_tasks,
+        "train_size": args.train_size,
+        "val_size": args.val_size,
+        "test_size": args.test_size,
+        "few_shot": args.few_shot,
+        "seed": args.seed,
+        "source": "runtime_split",
+        "max_length": args.max_length,
+    }
+    return {
+        "metadata": metadata,
+        "train_data": train_data,
+        "val_data": val_data,
+        "test_data": test_data,
+        "task_names": task_names,
+    }
+
 def main():
     parser = argparse.ArgumentParser(description='Natural Instructions Task Learning')
     parser.add_argument('--tasks_dir', type=str, default=DEFAULT_TASKS_DIR, 
@@ -84,8 +107,6 @@ def main():
                         help='Optional Hugging Face device_map for sharding the frozen backbone across multiple GPUs')
     parser.add_argument('--decouple_embeddings', action='store_true', 
                         help='Use separate input/output embeddings for task tokens')
-    parser.add_argument('--max_instruction_tokens', type=int, default=1024, 
-                        help='Maximum token length for instructions (default: 1000)')
     parser.add_argument('--seed', type=int, default=42, 
                         help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--skip_training', action='store_true', help='Skip training and only run evaluation')
@@ -100,13 +121,30 @@ def main():
     parser.add_argument('--few_shot', action='store_true', help='Use few-shot instructions')
     parser.add_argument('--validate_every_n_steps', type=int, default=1000, 
                         help='Validate every n steps')
+    parser.add_argument('--run_root_dir', type=str, default=DEFAULT_RUNS_DIR,
+                        help='Directory where atomic run folders will be created')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Optional explicit run folder name')
+    parser.add_argument('--run_tag', type=str, default='runtime_split',
+                        help='Short tag appended to auto-generated run names')
     args = parser.parse_args()
+
+    run_context = resolve_run_context(
+        experiment_name="atomic_tokmem",
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+        run_root_dir=args.run_root_dir,
+        run_name=args.run_name,
+        run_tag=args.run_tag,
+    )
     
     stdout_prefix = "evaluation" if args.skip_training else "training"
     training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+        log_dir=run_context["run_dir"],
         model_name=args.model_name,
         num_tasks=args.num_tasks,
         stdout_prefix=stdout_prefix,
+        timestamp=run_context["timestamp"],
     )
 
     # Set random seed first for full reproducibility
@@ -124,6 +162,7 @@ def main():
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Validation batch size: {args.val_batch_size}")
     print(f"Test batch size: {args.test_batch_size}")
+    print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
     print(f"Random seed: {args.seed}")
@@ -150,17 +189,45 @@ def main():
     
     # Sample tasks from Natural Instructions dataset
     print(f"Sampling {args.num_tasks} tasks from Natural Instructions dataset...")
-    print(f"   Max instruction length: {args.max_instruction_tokens} tokens")
     train_data, val_data, test_data, task_names = sample_natural_instructions_tasks(
         tasks_dir=args.tasks_dir,
         num_tasks=args.num_tasks,
-        max_instruction_tokens=args.max_instruction_tokens,
+        max_length=args.max_length,
         tokenizer=tokenizer,
         stable_test_split=True,
         train_size=args.train_size,
         val_size=args.val_size,
         test_size=args.test_size,
         few_shot=args.few_shot,
+    )
+    split_payload = build_runtime_split_payload(
+        args,
+        train_data,
+        val_data,
+        test_data,
+        task_names,
+    )
+    split_cache_path = os.path.join(run_context["run_dir"], "split_cache.pt")
+    torch.save(split_payload, split_cache_path)
+    write_json(
+        os.path.join(run_context["run_dir"], "split_cache_metadata.json"),
+        split_payload["metadata"],
+    )
+    write_json(
+        os.path.join(run_context["run_dir"], "run_config.json"),
+        build_run_config(
+            vars(args),
+            run_context,
+            extra={
+                "split_cache_path": split_cache_path,
+                "dataset_summary": {
+                    "train_examples": len(train_data),
+                    "val_examples": len(val_data),
+                    "test_examples": len(test_data),
+                    "task_count": len(task_names),
+                },
+            },
+        ),
     )
     
     # Initialize model
@@ -218,9 +285,18 @@ def main():
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             device=args.device,
             timestamp=timestamp,
+            save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
+        write_json(
+            os.path.join(run_context["run_dir"], "train_results.json"),
+            {
+                "avg_total_loss": train_results["avg_total_loss"],
+                "best_val_loss": train_results["best_val_loss"],
+                "best_model_path": train_results["best_model_path"],
+            },
+        )
         
         # Load best model state if validation was performed and best model was found
         if train_results['best_model_state'] is not None:
@@ -257,6 +333,25 @@ def main():
         print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
         print(f"   Average Response Score: {results['avg_response_score']:.3f}")
         print("=" * 50)
+        write_json(
+            os.path.join(run_context["run_dir"], "evaluation_results.json"),
+            results,
+        )
+        write_json(
+            os.path.join(run_context["run_dir"], "run_summary.json"),
+            {
+                "run_name": run_context["run_name"],
+                "run_dir": run_context["run_dir"],
+                "split_cache_path": split_cache_path,
+                "model_name": args.model_name,
+                "num_tasks": len(task_names),
+                "train_examples": len(train_data),
+                "val_examples": len(val_data),
+                "test_examples": len(test_data),
+                "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "metrics": results,
+            },
+        )
         
         # # Optional: Ground truth task evaluation for comparison
         # print("\nRunning ground truth task evaluation for comparison...")

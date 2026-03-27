@@ -270,21 +270,22 @@ def count_training_tasks(train_tasks_file=DEFAULT_TRAIN_TASKS_FILE):
 def sample_natural_instructions_tasks(
     tasks_dir=DEFAULT_TASKS_DIR,
     num_tasks=5,
-    max_instruction_tokens=1000,
+    max_length=1000,
     tokenizer=None,
     stable_test_split: bool = True,
     train_size: Optional[int] = None,
     val_size: Optional[int] = None,
     test_size: Optional[int] = None,
     few_shot: bool = False,
+    max_instruction_tokens: Optional[int] = None,
 ):
     """Sample a few tasks from Natural Instructions dataset and split with absolute sizes per task
     
     Args:
         tasks_dir: Directory containing Natural Instructions task files
         num_tasks: Number of tasks to sample
-        max_instruction_tokens: Maximum token length for instructions (default 1000)
-        tokenizer: Tokenizer to use for token length filtering (required if max_instruction_tokens is used)
+        max_length: Maximum token length for instructions
+        tokenizer: Tokenizer to use for token length filtering
         stable_test_split: If True, select test examples first deterministically so test remains stable when train/val sizes change
         train_size: Absolute number of training samples per task
         val_size: Absolute number of validation samples per task
@@ -296,6 +297,9 @@ def sample_natural_instructions_tasks(
     """
     if not os.path.exists(tasks_dir):
         raise FileNotFoundError(f"Tasks directory not found: {tasks_dir}")
+
+    if max_instruction_tokens is not None:
+        max_length = max_instruction_tokens
     
     # Get all task files
     all_task_files = [f for f in os.listdir(tasks_dir) if f.startswith('task') and f.endswith('.json')]
@@ -383,7 +387,7 @@ def sample_natural_instructions_tasks(
                 if tokenizer is None:
                     return True  # No filtering if no tokenizer provided
                 token_count = len(tokenizer.encode(instruction, add_special_tokens=False))
-                return token_count <= max_instruction_tokens
+                return token_count <= max_length
             
             # Filter all instances upfront
             filtered_instances = []
@@ -471,7 +475,7 @@ def sample_natural_instructions_tasks(
             
             total_filtered += task_filtered
             if task_filtered > 0:
-                print(f"  Filtered {task_filtered} samples with instructions > {max_instruction_tokens} tokens")
+                print(f"  Filtered {task_filtered} samples with instructions > {max_length} tokens")
             
             print(f"  Split - Train: {len(train_instances)}, Val: {len(val_instances)}, Test: {len(test_instances)}")
             
@@ -481,7 +485,7 @@ def sample_natural_instructions_tasks(
     
     print(f"\nInitial samples - Train: {len(all_train_data)}, Val: {len(all_val_data)}, Test: {len(all_test_data)}")
     if total_filtered > 0:
-        print(f"🔧 Filtered out {total_filtered} samples with instructions longer than {max_instruction_tokens} tokens")
+        print(f"🔧 Filtered out {total_filtered} samples with instructions longer than {max_length} tokens")
     
     # Extract train tasks as the authoritative task list
     train_tasks = set()
