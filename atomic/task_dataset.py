@@ -538,11 +538,21 @@ def sample_natural_instructions_tasks(
 class NaturalInstructionsTaskDataset(Dataset):
     """Dataset for Natural Instructions using native reserved special tokens as task tokens"""
     
-    def __init__(self, data_path=None, data=None, tokenizer=None, max_length=512, model=None, mode="train"):
+    def __init__(
+        self,
+        data_path=None,
+        data=None,
+        tokenizer=None,
+        max_length=512,
+        model=None,
+        mode="train",
+        include_instruction_in_prompt=True,
+    ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.model = model  # Need model for reserved token mappings
         self.mode = mode  # "train" or "eval"
+        self.include_instruction_in_prompt = include_instruction_in_prompt
         
         if data is not None:
             self.data = data
@@ -567,11 +577,28 @@ class NaturalInstructionsTaskDataset(Dataset):
     
     def __len__(self):
         return len(self.data)
+
+    def _format_user_content(self, item, content, include_instruction):
+        content_text = "" if content is None else str(content)
+        if include_instruction:
+            return f"{item['instruction']}\n\n{content_text}"
+        return content_text
+
+    def _format_qwen_user_turn(self, item, content, include_instruction):
+        user_content = self._format_user_content(item, content, include_instruction)
+        return f"<|im_start|>user\n{user_content}<|im_end|>\n"
+
+    def _format_llama_user_turn(self, item, content, include_instruction):
+        content_text = "" if content is None else str(content)
+        if include_instruction:
+            return f"<|start_header_id|>user<|end_header_id|>\n{item['instruction']}\n\n{content_text}<|eot_id|>"
+        return f"<|start_header_id|>user<|end_header_id|>\n\n{content_text}<|eot_id|>"
     
     def _format_instruction(self, item):
         """Format few-shot examples into a single instruction"""
         # Build multiturn conversation with positive examples
         conversation_parts = []
+        include_instruction = self.include_instruction_in_prompt
         
         # Detect model type for chat format
         is_qwen = 'qwen' in self.tokenizer.name_or_path.lower()
@@ -582,19 +609,34 @@ class NaturalInstructionsTaskDataset(Dataset):
             if 'few_shot_examples' in item and len(item['few_shot_examples']) > 0:
                 for i, example in enumerate(item['few_shot_examples']):
                     # User turn with example input
-                    if i == 0:
-                        conversation_parts.append(f"<|im_start|>user\n{item['instruction']}\n\n{example.get('input', '')}<|im_end|>\n")
-                    else:
-                        conversation_parts.append(f"<|im_start|>user\n{example.get('input', '')}<|im_end|>\n")
+                    conversation_parts.append(
+                        self._format_qwen_user_turn(
+                            item,
+                            example.get('input', ''),
+                            include_instruction=(i == 0 and include_instruction),
+                        )
+                    )
                     # Assistant turn with example output  
                     conversation_parts.append(f"<|im_start|>assistant\n{example.get('output', '')}<|im_end|>\n")
             
                 # Finally add the actual query in user turn and start assistant response
-                conversation_parts.append(f"<|im_start|>user\n{item['query']}<|im_end|>\n")
+                conversation_parts.append(
+                    self._format_qwen_user_turn(
+                        item,
+                        item['query'],
+                        include_instruction=include_instruction,
+                    )
+                )
                 conversation_parts.append("<|im_start|>assistant\n")    
             
             else:
-                conversation_parts.append(f"<|im_start|>user\n{item['instruction']}\n\n{item['query']}<|im_end|>\n")
+                conversation_parts.append(
+                    self._format_qwen_user_turn(
+                        item,
+                        item['query'],
+                        include_instruction=include_instruction,
+                    )
+                )
                 conversation_parts.append("<|im_start|>assistant\n")
         else:
             # Llama chat format (original)
@@ -604,19 +646,34 @@ class NaturalInstructionsTaskDataset(Dataset):
             if 'few_shot_examples' in item and len(item['few_shot_examples']) > 0:
                 for i, example in enumerate(item['few_shot_examples']):
                     # User turn with example input
-                    if i == 0:
-                        conversation_parts.append(f"<|start_header_id|>user<|end_header_id|>\n{item['instruction']}\n\n{example.get('input', '')}<|eot_id|>")
-                    else:
-                        conversation_parts.append(f"<|start_header_id|>user<|end_header_id|>\n\n{example.get('input', '')}<|eot_id|>")
+                    conversation_parts.append(
+                        self._format_llama_user_turn(
+                            item,
+                            example.get('input', ''),
+                            include_instruction=(i == 0 and include_instruction),
+                        )
+                    )
                     # Assistant turn with example output  
                     conversation_parts.append(f"<|start_header_id|>assistant<|end_header_id|>\n\n{example.get('output', '')}<|eot_id|>")
             
                 # Finally add the actual query in user turn and start assistant response
-                conversation_parts.append(f"<|start_header_id|>user<|end_header_id|>\n\n{item['query']}<|eot_id|>")
+                conversation_parts.append(
+                    self._format_llama_user_turn(
+                        item,
+                        item['query'],
+                        include_instruction=include_instruction,
+                    )
+                )
                 conversation_parts.append(f"<|start_header_id|>assistant<|end_header_id|>")    
             
             else:
-                conversation_parts.append(f"<|start_header_id|>user<|end_header_id|>\n{item['instruction']}\n\n{item['query']}<|eot_id|>")
+                conversation_parts.append(
+                    self._format_llama_user_turn(
+                        item,
+                        item['query'],
+                        include_instruction=include_instruction,
+                    )
+                )
                 conversation_parts.append(f"<|start_header_id|>assistant<|end_header_id|>")
             
         instruction_text = "".join(conversation_parts)
@@ -631,7 +688,7 @@ class NaturalInstructionsTaskDataset(Dataset):
         # Tokenize instruction input
         instruction_tokens = self.tokenizer(instruction_text, add_special_tokens=False)['input_ids']
         
-        # If eval mode, return just the instruction input
+        # If eval mode, return just the inference prompt input
         if self.mode == "eval":
             instruction_tokens = instruction_tokens[:self.max_length]
             
@@ -727,7 +784,8 @@ def collate_fn(batch, tokenizer):
 
 def create_natural_instructions_dataloader(model, train_data=None, val_data=None, test_data=None,
                                          tokenizer=None, batch_size=4, max_length=512,
-                                         val_batch_size=32, test_batch_size=32):
+                                         val_batch_size=32, test_batch_size=32,
+                                         test_prompt_mode="both"):
     """Create DataLoaders for Natural Instructions
     
     Args:
@@ -744,7 +802,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
     Returns:
         train_dataloader: Training DataLoader
         val_dataloader: Validation DataLoader (if val_data provided)
-        test_dataloader: Test DataLoader
+        test_dataloaders: Test DataLoaders keyed by prompt mode
         tokenizer: Tokenizer used
         test_examples: List of raw test examples for demo
     """
@@ -757,6 +815,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
             tokenizer=tokenizer,
             max_length=max_length,
             model=model,
+            include_instruction_in_prompt=True,
         )
         
         train_dataloader = DataLoader(
@@ -778,6 +837,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
             tokenizer=tokenizer,
             max_length=max_length,
             model=model,
+            include_instruction_in_prompt=True,
         )
         
         val_dataloader = DataLoader(
@@ -790,27 +850,41 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         print(f"Validation dataset created: {len(val_dataset)} samples")
     
     # Create test dataset and dataloader
-    test_dataloader = None
+    test_dataloaders = {}
     test_examples = []
     if test_data is not None:
-        test_dataset = NaturalInstructionsTaskDataset(
-            data=test_data,
-            tokenizer=tokenizer,
-            max_length=max_length,
-            model=model,
-            mode="eval"
-        )
-        
-        test_dataloader = DataLoader(
-            test_dataset,
-            batch_size=test_batch_size,
-            shuffle=False,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer)
-        )
-        
-        test_examples = test_dataset.data.copy()
-        print(f"Test dataset created: {len(test_dataset)} samples")
+        if test_prompt_mode == "both":
+            prompt_modes = [
+                ("instruction_and_query", True),
+                ("query_only", False),
+            ]
+        elif test_prompt_mode == "instruction_and_query":
+            prompt_modes = [("instruction_and_query", True)]
+        elif test_prompt_mode == "query_only":
+            prompt_modes = [("query_only", False)]
+        else:
+            raise ValueError(f"Unsupported test_prompt_mode: {test_prompt_mode}")
+
+        for prompt_mode_name, include_instruction in prompt_modes:
+            test_dataset = NaturalInstructionsTaskDataset(
+                data=test_data,
+                tokenizer=tokenizer,
+                max_length=max_length,
+                model=model,
+                mode="eval",
+                include_instruction_in_prompt=include_instruction,
+            )
+            
+            test_dataloaders[prompt_mode_name] = DataLoader(
+                test_dataset,
+                batch_size=test_batch_size,
+                shuffle=False,
+                collate_fn=lambda batch: collate_fn(batch, tokenizer)
+            )
+            print(f"Test dataset created ({prompt_mode_name}): {len(test_dataset)} samples")
+
+        test_examples = test_data.copy()
     else:
         print(f"Warning: No test data provided")
     
-    return train_dataloader, val_dataloader, test_dataloader, tokenizer, test_examples
+    return train_dataloader, val_dataloader, test_dataloaders, tokenizer, test_examples

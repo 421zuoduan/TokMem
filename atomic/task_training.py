@@ -526,6 +526,7 @@ def eval_task_calling(
     device="cuda",
     use_ground_truth_tasks=False,
     predictions_output_path=None,
+    prompt_mode_label=None,
 ):
     """Comprehensive evaluation of task calling model using Natural Instructions metrics"""
     import time
@@ -546,6 +547,8 @@ def eval_task_calling(
     # Calculate total examples from dataloader
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Task Inference" if use_ground_truth_tasks else "Normal Task Prediction"
+    if prompt_mode_label is not None:
+        mode_desc = f"{mode_desc} | Prompt: {prompt_mode_label}"
     print(f"\n=== Task Calling Evaluation ({mode_desc}) ===")
     print(f"Evaluating on {total_examples} test examples")
     print()
@@ -613,6 +616,7 @@ def eval_task_calling(
         row = {
             "example_index": len(prediction_rows),
             "mode": "ground_truth_tasks" if use_ground_truth_tasks else "normal_task_prediction",
+            "prompt_mode": prompt_mode_label,
             "prediction_status": prediction_status,
             "instruction": example.get("instruction", ""),
             "query": example.get("query", ""),
@@ -813,6 +817,7 @@ def eval_task_calling(
     
     # Return results compatible with existing code
     return {
+        'prompt_mode': prompt_mode_label,
         'exact_accuracy': ni_results['exact_match'] / 100.0,  # Convert percentage to decimal
         'task_accuracy': task_accuracy,
         'avg_response_score': ni_results['rougeL'] / 100.0,  # Use ROUGE-L as response score

@@ -1484,3 +1484,369 @@ bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
 - 先在同一条 all-models common-pool fixed-split 链路上跑 `100-task`
 - 再跑 `200-task`
 - 确认 routing 实现正确后，再重新上 `700-task`
+
+## 18. 2026-03-28 继续修改后的当前状态
+
+这一节记录的是：
+
+- 上面 `17.10` 对应的 **归档 run 当时状态**
+- 和当前仓库代码已经继续改动后的 **最新状态**
+
+避免后面把“旧 run 的诊断结论”和“当前代码行为”混在一起。
+
+### 18.1 当前 `Qwen 0.5B` 脚本已经补齐了哪些点
+
+当前固定入口脚本是：
+
+- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b.sh)
+
+相对 `17.10` 里那个 `700-task` 归档 run，当时缺的几个关键点，现在已经补了：
+
+1. 推理 routing
+
+- 当前脚本已经显式传：
+  - `--generation_routing first_step_routing`
+- 代码里也已经支持两种推理模式：
+  - `first_step_routing`
+  - `full_vocab_generation`
+- 实现在：
+  - [atomic/task_model.py](/data/ruochen/tokmem/atomic/task_model.py)
+  - [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+  - [atomic/main_in_domain.py](/data/ruochen/tokmem/atomic/main_in_domain.py)
+
+2. 新增 task token 初始化
+
+- 当前本地代码已经改成：
+  - 先取 pretrained embedding 的均值
+  - 再用这个均值初始化新增词表行和 trainable task token
+- 这是按论文文字实现的
+- 实现在：
+  - [atomic/task_model.py](/data/ruochen/tokmem/atomic/task_model.py)
+
+3. 学习率
+
+- 当前 `Qwen 0.5B fixed-split` 脚本已经是：
+  - `lr = 5e-3`
+- runtime-split 入口没有显式写 `--lr`，但 Python 入口默认值也是：
+  - `0.005`
+
+### 18.2 当前还没有补齐的点
+
+下面这些仍然还没补齐，或者没有完全对齐论文 / 成功 run：
+
+1. `task` 数本身仍更大
+
+- 当前 fixed-split 脚本还是：
+  - `700 tasks`
+- runtime-split 脚本还是：
+  - `1000 tasks`
+- 而效果较好的 `Llama 3.2 3B` 那次归档 run 只有：
+  - `100 tasks`
+
+2. `query-only` 训练 prompt
+
+- 当前训练 prompt 仍然是：
+  - `instruction + query`
+- 没改成 Llama 成功 run 那次的 `query-only` 训练
+
+3. `shuffle` / replay
+
+- 当前 DataLoader 仍然是：
+  - `shuffle=False`
+- replay 也还没接进 `Qwen fixed-split` 这条 TokMem 训练路径
+
+4. 独立 `task loss` 加权
+
+- 当前这条 TokMem 训练路径还没有像成功的 `Llama 3B` 那次那样加：
+  - `task_loss_weight = 5.0`
+
+5. 评测 checkpoint
+
+- 当前训练结束后虽然会保存：
+  - `final.pt`
+- 但后续评测前仍会回载：
+  - `best_model_state`
+
+6. 论文 batch size
+
+- 当前 fixed-split 脚本还是：
+  - `batch_size = 8`
+- 没对齐成论文里的：
+  - `batch_size = 4`
+
+### 18.3 当前训练 / 测试 prompt 的真实行为
+
+当前数据构造逻辑在：
+
+- [atomic/task_dataset.py](/data/ruochen/tokmem/atomic/task_dataset.py)
+
+现在已经明确区分成两层：
+
+1. 训练时
+
+- 保留：
+  - `instruction + query`
+- 对 Qwen 来说，训练 prompt 大致是：
+
+```text
+<|im_start|>user
+[instruction]
+
+[query]<|im_end|>
+<|im_start|>assistant
+```
+
+然后训练序列是：
+
+```text
+[instruction/query prompt] [task_token] [response] [eot]
+```
+
+2. 测试时
+
+- 现在支持三种模式：
+  - `instruction_and_query`
+  - `query_only`
+  - `both`
+- 默认是：
+  - `both`
+
+也就是说，当前测试时可以：
+
+- 用 `instruction + query` 跑一遍
+- 再用 `query-only` 跑一遍
+- 两套结果分别保存，方便直接比较
+
+相关参数和输出：
+
+- 参数：
+  - `--test_prompt_mode`
+- 结果文件：
+  - `evaluation_results_instruction_and_query.json`
+  - `evaluation_results_query_only.json`
+  - `evaluation_predictions_instruction_and_query.jsonl`
+  - `evaluation_predictions_query_only.jsonl`
+
+### 18.4 现在的 routing 参数设计
+
+当前没有再把 routing 写死成唯一行为，而是恢复成了显式参数，方便做对比实验。
+
+参数名：
+
+- `--generation_routing`
+
+可选值：
+
+- `first_step_routing`
+- `full_vocab_generation`
+
+当前两个 `Qwen 0.5B` 启动脚本都显式使用：
+
+- `--generation_routing first_step_routing`
+
+这只是为了默认跑论文式 routing；如果后续想做 ablation，对比 full vocab，不需要再改代码结构，只要改参数即可。
+
+### 18.5 `full_vocab_generation` 和 `first_step_routing` 的区别
+
+这里再用一句人话固定下来：
+
+1. `full_vocab_generation`
+
+- 第一 token 直接在 **整个词表** 里选
+- memory token 只是全词表里的一小部分候选
+- 模型第一步可能直接生成普通回答词，而不先出 task token
+
+2. `first_step_routing`
+
+- 第一步先只在 **memory / task token 子集** 里选
+- 选中一个 task token 之后
+- 再继续正常自回归生成 response
+
+从论文方法看，atomic TokMem 更接近第二种。
+
+### 18.6 论文、官方 GitHub 源码、当前本地代码的差异
+
+这个点之前反复容易混，所以单独记一下。
+
+先用一张总表固定下来。
+
+这里的“官方 GitHub 当前源码”指：
+
+- `MANGA-UOFA/TokMem` 当前 `main` 分支可见实现
+
+| 维度 | 论文 | 官方 GitHub 当前源码 | 当前本地代码 |
+| --- | --- | --- | --- |
+| 推理第一步 routing | 先根据 `q` 在 memory token 上做 routing，再得到 `[q ; MEM*]` 继续生成 response | `atomic` 默认更接近 `full_vocab_generation`，不是先限制到 memory 子集 | 已支持 `first_step_routing` / `full_vocab_generation`，当前脚本默认 `first_step_routing` |
+| memory token 很弱时怎么办 | 文中允许 memory logits 都低时“默认生成 regular text” | 没看到显式低置信度门控；由于是 full-vocab generate，可以自然出现“不生成 task token” | 还没有独立低置信度门控；`full_vocab_generation` 下会自然出现 no-task，`first_step_routing` 下会强制先选一个 task token |
+| task token 初始化 | procedure IDs 用 pretrained embeddings 的平均值初始化 | 更接近 `resize_token_embeddings(...)` 后直接使用新增 reserved token 行 | 已改成显式 average-pretrained-embeddings 初始化 |
+| 训练输入里的 `q` | 公式写 `q ⊕ MEM ⊕ response`，`q` 是抽象上下文，不等于“只有 query 字段” | SNI 代码实现更接近 `instruction + query` | 训练明确是 `instruction + query` |
+| 测试输入里的 `q` | 推理仍从 `q` 出发，再决定是否召回 memory token | 更接近 `instruction + query` | 已支持三种测试模式：`instruction_and_query` / `query_only` / `both` |
+| 数据顺序 / `shuffle` | 论文没直接写 `shuffle`，但 replay 描述更接近“跨 task 混合 batch”而不是纯顺序 block | 当前 `main` 里 `train_dataloader` 是 `shuffle=False` | 当前本地也是 `shuffle=False` |
+| 与论文的一致性 | 方法定义的目标基线 | 不是所有实现细节都和论文文字完全一致 | 当前本地在 routing / 初始化 / 测试 prompt 上做了额外改动，整体更接近论文，但也加入了本地实验用开关 |
+
+#### 18.6.1 routing
+
+1. 论文
+
+- atomic 推理写的是 memory routing：
+  - 先根据 `q` 预测 memory token
+  - 再拼成 `[q ; MEM*]`
+  - 然后继续生成 response
+- 这更接近：
+  - `first_step_routing`
+
+2. 官方 GitHub 当前源码
+
+- 官方 `atomic` 路径的默认生成逻辑更接近：
+  - `full_vocab_generation`
+- 不是先只在 memory token 子集里选
+
+3. 当前本地代码
+
+- 已经支持两种模式
+- 默认脚本走：
+  - `first_step_routing`
+
+#### 18.6.2 task token 初始化
+
+1. 论文
+
+- 明确写了：
+  - procedure IDs 用 pretrained embeddings 的平均值初始化
+
+2. 官方 GitHub 当前源码
+
+- 当前源码不是显式“平均初始化”
+- 更接近：
+  - 先 `resize_token_embeddings(...)`
+  - 再直接使用新增 reserved token 行作为 task token 初值
+
+3. 当前本地代码
+
+- 当前本地已经改成：
+  - 显式平均 pretrained embeddings
+  - 再初始化新增 token 和 task token
+
+所以：
+
+- **当前本地实现更接近论文**
+- **但不完全等于官方 GitHub 当前 main 分支源码**
+
+#### 18.6.3 训练 / 推理输入里的 instruction
+
+论文公式里经常只写：
+
+- `q ⊕ MEM ⊕ response`
+
+这里的 `q` 是抽象记号，不应简单理解成“只有 instance query，不含 instruction definition”。
+
+按官方源码和当前本地实现，SNI 这条线的 `q` 更接近：
+
+- `instruction + query`
+
+当前本地又进一步做了一个实验设置改动：
+
+- 训练：
+  - `instruction + query`
+- 测试：
+  - 可以选 `instruction + query`
+  - 也可以选 `query-only`
+
+### 18.7 关于官方 issue #1 和 `shuffle`
+
+官方 issue：
+
+- <https://github.com/MANGA-UOFA/TokMem/issues/1>
+
+这个 issue 的问题是：
+
+- 提问者观察到当前 SNI TokMem 训练“看起来像是 shuffled multi-task training over all tasks”
+- 然后问作者有没有：
+  - sequential training over tasks
+
+这个 issue 说明两点：
+
+1. 从外部阅读者视角
+
+- released TokMem / SNI 设置会被理解成：
+  - 不是 task-by-task 的 sequential continual learning
+  - 而是跨 task 的多任务训练
+
+2. 但当前官方 `main` 分支源码里
+
+- `train_dataloader` 其实写的是：
+  - `shuffle=False`
+
+所以单看 issue #1：
+
+- **不能直接推出“官方明确要求现在必须 shuffle”**
+- 但它至少说明：
+  - 纯 sequential task-by-task 训练并不是这条公开 SNI 路线的直观理解
+
+对我当前这套 `700-task fixed-split` Qwen 实验来说：
+
+- 是否需要 `shuffle`，主要还是由本地实验里明显的顺序遗忘来决定
+- 而不是由 issue #1 单独决定
+
+### 18.8 为什么 `Llama 3.2 3B` 那次效果明显比 `Qwen 0.5B` 好
+
+这里也固定一下结论，避免后面再把它简化成“只是模型大小差异”。
+
+主要原因不是一个，而是多因素叠加：
+
+1. 模型容量差很多
+
+- `Qwen 2.5 0.5B` hidden size：
+  - `896`
+- `Llama 3.2 3B` hidden size：
+  - `3072`
+
+2. 任务数量完全不同
+
+- 成功的 `Llama 3B` run：
+  - `100 tasks`
+- 当前 `Qwen fixed-split`：
+  - `700 tasks`
+
+3. 成功的 `Llama 3B` run 当时还同时用了：
+
+- `query-only` prompt
+- `first-step routing`
+- `task_loss_weight = 5.0`
+- 随机打乱 loader
+- 最终评测直接看 `final checkpoint`
+
+而 `Qwen 0.5B` 那条旧 run 当时没有同时满足这些条件。
+
+所以：
+
+- 不能简单把旧结果解读成“Qwen 不行”
+- 更准确的说法是：
+  - `Llama 3B` 那次实验条件更有利
+  - `Qwen 0.5B` 旧 run 同时吃了模型更小、task 更多、routing 更弱、初始化更弱、顺序遗忘更强等多个亏
+
+### 18.9 现在如果要继续做 `Qwen 0.5B` 对比实验，最方便的可控开关
+
+当前最方便直接做 ablation 的开关是：
+
+1. routing
+
+- `--generation_routing first_step_routing`
+- `--generation_routing full_vocab_generation`
+
+2. test prompt
+
+- `--test_prompt_mode instruction_and_query`
+- `--test_prompt_mode query_only`
+- `--test_prompt_mode both`
+
+也就是说，现在最容易直接做的对比是：
+
+- 同一个 checkpoint
+- 同一个 test split
+- 比较：
+  - `first_step_routing` vs `full_vocab_generation`
+  - `instruction+query` vs `query-only`
+
+在不改训练权重的情况下，先把推理层面对结果的影响分离出来。

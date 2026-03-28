@@ -40,7 +40,8 @@ class TaskCallingModel(nn.Module):
     
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tasks=100, task_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, is_extended=False, device_map=None):
+                 decouple_embeddings=False, is_extended=False, device_map=None,
+                 generation_routing="first_step_routing"):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         # self.num_tasks = min(num_tasks, 248)  # Max 248 reserved tokens available
@@ -49,6 +50,7 @@ class TaskCallingModel(nn.Module):
         self.dtype = dtype
         self.decouple_embeddings = decouple_embeddings
         self.device_map = device_map
+        self.generation_routing = generation_routing
         self._reserved_token_tensor_cache = {}
         
         # Load tokenizer to get reserved token mappings
@@ -70,6 +72,17 @@ class TaskCallingModel(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_load_kwargs)
         if device_map is None:
             self.model = self.model.to(device)
+
+        pretrained_input_embeddings = self.model.model.embed_tokens.weight
+        pretrained_vocab_size = pretrained_input_embeddings.shape[0]
+        output_embeddings = self.model.get_output_embeddings()
+        with torch.no_grad():
+            pretrained_input_mean = pretrained_input_embeddings.detach().mean(dim=0, keepdim=True)
+            if output_embeddings is not None:
+                pretrained_output_mean = output_embeddings.weight.detach().mean(dim=0, keepdim=True)
+            else:
+                pretrained_output_mean = pretrained_input_mean
+
         if is_extended:
             self.model.resize_token_embeddings(len(tokenizer))
 
@@ -80,26 +93,36 @@ class TaskCallingModel(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         
-        # Get original embedding parameters for initialization
-        original_embeddings = self.model.model.embed_tokens.weight.data
+        self._initialize_added_token_rows_with_pretrained_average(
+            pretrained_vocab_size=pretrained_vocab_size,
+            input_average=pretrained_input_mean,
+            output_average=pretrained_output_mean,
+        )
         reserved_on_input_device = self.get_reserved_token_tensor(self.input_device)
+        task_input_init = pretrained_input_mean.to(
+            device=self.input_device, dtype=self.model.model.embed_tokens.weight.dtype
+        ).repeat(len(reserved_on_input_device), 1)
+        task_output_init = pretrained_output_mean.to(
+            device=self.output_device, dtype=self.model.lm_head.weight.dtype
+        ).repeat(len(reserved_on_input_device), 1)
         
         if self.decouple_embeddings:
             # Separate parameters for input and output layers
             self.trainable_task_input_embeddings = nn.Parameter(
-                original_embeddings[reserved_on_input_device].clone().to(self.input_device)
+                task_input_init
             )
             self.trainable_task_output_embeddings = nn.Parameter(
-                original_embeddings[reserved_on_input_device].clone().to(self.output_device)
+                task_output_init
             )
         else:
             # Shared parameter for both input and output layers
             self.trainable_task_embeddings = nn.Parameter(
-                original_embeddings[reserved_on_input_device].clone().to(self.output_device)
+                task_input_init.to(self.output_device)
             )
             # Create aliases for backward compatibility
             self.trainable_task_input_embeddings = self.trainable_task_embeddings
             self.trainable_task_output_embeddings = self.trainable_task_embeddings
+        print("Task token initialization: average of pretrained embeddings")
         
         # Task name mapping
         self.task_names = task_names or [f"task_{i}" for i in range(self.num_tasks)]
@@ -184,6 +207,35 @@ class TaskCallingModel(nn.Module):
         if len(self.reserved_token_ids) > 5:
             print(f"  ... and {len(self.reserved_token_ids) - 5} more")
         print(f"Embedding coupling mode: {'Decoupled' if self.decouple_embeddings else 'Coupled'}")
+        if self.generation_routing == "first_step_routing":
+            print("Generation routing mode: First-step restricted")
+        else:
+            print("Generation routing mode: Full-vocab generation")
+
+    def _initialize_added_token_rows_with_pretrained_average(
+        self,
+        pretrained_vocab_size,
+        input_average,
+        output_average,
+    ):
+        """Initialize any newly added tokenizer rows with the average pretrained embedding."""
+        current_input_embeddings = self.model.model.embed_tokens.weight.data
+        if current_input_embeddings.shape[0] > pretrained_vocab_size:
+            current_input_embeddings[pretrained_vocab_size:] = input_average.to(
+                device=current_input_embeddings.device,
+                dtype=current_input_embeddings.dtype,
+            ).repeat(current_input_embeddings.shape[0] - pretrained_vocab_size, 1)
+
+        output_embeddings = self.model.get_output_embeddings()
+        if output_embeddings is None:
+            return
+
+        current_output_embeddings = output_embeddings.weight.data
+        if current_output_embeddings.shape[0] > pretrained_vocab_size:
+            current_output_embeddings[pretrained_vocab_size:] = output_average.to(
+                device=current_output_embeddings.device,
+                dtype=current_output_embeddings.dtype,
+            ).repeat(current_output_embeddings.shape[0] - pretrained_vocab_size, 1)
     
     def get_reserved_token_tensor(self, device):
         """Return reserved token IDs as a tensor on the requested device."""
@@ -201,6 +253,43 @@ class TaskCallingModel(nn.Module):
     def get_output_device(self):
         """Return the device where logits/labels should be placed."""
         return self.output_device
+
+    def _sample_restricted_token_positions(self, restricted_logits, temperature=0.6, top_p=0.9, do_sample=False):
+        """Select positions from logits restricted to a candidate token subset."""
+        if not do_sample:
+            return torch.argmax(restricted_logits, dim=-1)
+
+        temperature = max(float(temperature), 1e-5)
+        restricted_logits = restricted_logits / temperature
+
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(restricted_logits, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = False
+            sorted_logits = sorted_logits.masked_fill(sorted_indices_to_remove, -float("inf"))
+            probs = torch.softmax(sorted_logits, dim=-1)
+            sampled_sorted_indices = torch.multinomial(probs, num_samples=1)
+            return sorted_indices.gather(-1, sampled_sorted_indices).squeeze(-1)
+
+        probs = torch.softmax(restricted_logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+    def _select_first_task_tokens(self, instruction_tokens, instruction_mask, temperature=0.6, top_p=0.9, do_sample=False):
+        """Select the first task token using only the reserved task-token subset."""
+        outputs = self.model(input_ids=instruction_tokens, attention_mask=instruction_mask, use_cache=False)
+        logits = outputs.logits[:, -1, :]
+        reserved_token_tensor = self.get_reserved_token_tensor(logits.device)
+        restricted_logits = logits.index_select(dim=-1, index=reserved_token_tensor)
+        selected_positions = self._sample_restricted_token_positions(
+            restricted_logits,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        selected_tokens = reserved_token_tensor[selected_positions]
+        return selected_tokens.to(instruction_tokens.device)
     
     def forward(self, input_ids, attention_mask):
         """
@@ -219,17 +308,53 @@ class TaskCallingModel(nn.Module):
         self.eval()
         
         with torch.no_grad():
-            # Use native generation - our overrides make the custom embeddings/logits transparent
-            generated = self.model.generate(
-                input_ids=instruction_tokens,
-                attention_mask=instruction_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True
-            )
+            if self.generation_routing == "full_vocab_generation":
+                generated = self.model.generate(
+                    input_ids=instruction_tokens,
+                    attention_mask=instruction_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True
+                )
+            else:
+                first_task_tokens = self._select_first_task_tokens(
+                    instruction_tokens,
+                    instruction_mask,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
+                routed_input_ids = torch.cat([instruction_tokens, first_task_tokens.unsqueeze(-1)], dim=-1)
+                routed_attention_mask = torch.cat(
+                    [
+                        instruction_mask,
+                        torch.ones(
+                            instruction_mask.size(0),
+                            1,
+                            device=instruction_mask.device,
+                            dtype=instruction_mask.dtype,
+                        ),
+                    ],
+                    dim=-1,
+                )
+
+                remaining_new_tokens = max(0, max_new_tokens - 1)
+                if remaining_new_tokens > 0:
+                    generated = self.model.generate(
+                        input_ids=routed_input_ids,
+                        attention_mask=routed_attention_mask,
+                        max_new_tokens=remaining_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                        pad_token_id=tokenizer.eos_token_id,
+                        use_cache=True
+                    )
+                else:
+                    generated = routed_input_ids
             
             # Parse the generated sequences
             return self._parse_generated_sequences(generated, instruction_tokens, tokenizer)
@@ -257,6 +382,25 @@ class TaskCallingModel(nn.Module):
             input_ids = instruction_tokens.clone()
             attention_mask = instruction_mask.clone()
             task_replacement_count = [0] * batch_size  # Track how many tasks replaced per example
+
+            if gt_task_token_ids:
+                first_gt_token = gt_task_token_ids[0]
+                first_gt_tensor = torch.full(
+                    (batch_size, 1),
+                    first_gt_token,
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+                input_ids = torch.cat([input_ids, first_gt_tensor], dim=-1)
+                attention_mask = torch.cat(
+                    [
+                        attention_mask,
+                        torch.ones(batch_size, 1, device=attention_mask.device, dtype=attention_mask.dtype),
+                    ],
+                    dim=-1,
+                )
+                task_replacement_count = [1] * batch_size
+                max_new_tokens = max(0, max_new_tokens - 1)
             
             for step in range(max_new_tokens):
                 # Get model predictions

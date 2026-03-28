@@ -52,7 +52,8 @@ python -u main_in_domain_fixed_split.py \
     --batch_size 8 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
-    --lr 0.001 \
+    --lr 5e-3 \
+    --generation_routing full_vocab_generation \
     --val_batch_size 16 \
     --test_batch_size 256 \
     --validate_every_n_steps 1000 \

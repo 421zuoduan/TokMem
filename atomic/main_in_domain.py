@@ -99,9 +99,23 @@ def main():
     parser.add_argument('--batch_size', type=int, default=4, help='Training batch size')
     parser.add_argument('--val_batch_size', type=int, default=16, help='Validation batch size')
     parser.add_argument('--test_batch_size', type=int, default=64, help='Test batch size')
+    parser.add_argument(
+        '--test_prompt_mode',
+        type=str,
+        default='both',
+        choices=['instruction_and_query', 'query_only', 'both'],
+        help='Which prompt format(s) to use during test-time evaluation'
+    )
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.005, help='Learning rate')
+    parser.add_argument(
+        '--generation_routing',
+        type=str,
+        default='first_step_routing',
+        choices=['full_vocab_generation', 'first_step_routing'],
+        help='How to handle the first generated token during inference'
+    )
     parser.add_argument('--device', type=str, default="cuda", help='Device to use')
     parser.add_argument('--device_map', type=str, default=None,
                         choices=[None, "auto", "balanced", "balanced_low_0", "sequential"],
@@ -163,6 +177,8 @@ def main():
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Validation batch size: {args.val_batch_size}")
     print(f"Test batch size: {args.test_batch_size}")
+    print(f"Test prompt mode: {args.test_prompt_mode}")
+    print(f"Generation routing mode: {args.generation_routing}")
     print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
@@ -242,6 +258,7 @@ def main():
         decouple_embeddings=args.decouple_embeddings,
         is_extended=is_extended,
         device_map=args.device_map,
+        generation_routing=args.generation_routing,
     )
     
     print("\nModel Information:")
@@ -262,7 +279,7 @@ def main():
     
     # Create data loaders
     print("Creating data loaders...")
-    train_dataloader, val_dataloader, test_dataloader, tokenizer, test_examples = create_natural_instructions_dataloader(
+    train_dataloader, val_dataloader, test_dataloaders, tokenizer, test_examples = create_natural_instructions_dataloader(
         model=model,
         train_data=train_data,
         val_data=val_data,
@@ -271,7 +288,8 @@ def main():
         batch_size=args.batch_size,
         max_length=args.max_length,
         val_batch_size=args.val_batch_size,
-        test_batch_size=args.test_batch_size
+        test_batch_size=args.test_batch_size,
+        test_prompt_mode=args.test_prompt_mode,
     )
     
     # Training
@@ -323,31 +341,43 @@ def main():
         print()
     
     # Evaluation
-    if test_dataloader:
-        print("Running comprehensive evaluation...")
-        predictions_output_path = os.path.join(
-            run_context["run_dir"], "evaluation_predictions.jsonl"
-        )
-        
-        # Normal task prediction evaluation
-        results = eval_task_calling(
-            model=model,
-            tokenizer=tokenizer,
-            test_dataloader=test_dataloader,
-            device=args.device,
-            use_ground_truth_tasks=False,
-            predictions_output_path=predictions_output_path,
-        )
+    if test_dataloaders:
+        all_eval_results = {}
+        evaluation_prediction_paths = {}
+
+        for prompt_mode_name, test_dataloader in test_dataloaders.items():
+            print(f"Running comprehensive evaluation ({prompt_mode_name})...")
+            predictions_output_path = os.path.join(
+                run_context["run_dir"], f"evaluation_predictions_{prompt_mode_name}.jsonl"
+            )
+            
+            results = eval_task_calling(
+                model=model,
+                tokenizer=tokenizer,
+                test_dataloader=test_dataloader,
+                device=args.device,
+                use_ground_truth_tasks=False,
+                predictions_output_path=predictions_output_path,
+                prompt_mode_label=prompt_mode_name,
+            )
+            all_eval_results[prompt_mode_name] = results
+            evaluation_prediction_paths[prompt_mode_name] = results.get("predictions_output_path")
+            write_json(
+                os.path.join(run_context["run_dir"], f"evaluation_results_{prompt_mode_name}.json"),
+                results,
+            )
         
         print("\n" + "=" * 50)
         print("FINAL RESULTS SUMMARY:")
-        print(f"   Task Prediction Accuracy: {results['task_accuracy']:.3f}")
-        print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
-        print(f"   Average Response Score: {results['avg_response_score']:.3f}")
+        for prompt_mode_name, results in all_eval_results.items():
+            print(f"   Prompt mode: {prompt_mode_name}")
+            print(f"   Task Prediction Accuracy: {results['task_accuracy']:.3f}")
+            print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
+            print(f"   Average Response Score: {results['avg_response_score']:.3f}")
         print("=" * 50)
         write_json(
             os.path.join(run_context["run_dir"], "evaluation_results.json"),
-            results,
+            all_eval_results,
         )
         write_json(
             os.path.join(run_context["run_dir"], "run_summary.json"),
@@ -363,8 +393,8 @@ def main():
                 "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
                 "best_task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
                 "final_task_tokens_path": final_model_path if not args.skip_training and train_dataloader else None,
-                "evaluation_predictions_path": results.get("predictions_output_path"),
-                "metrics": results,
+                "evaluation_predictions_paths": evaluation_prediction_paths,
+                "metrics_by_prompt_mode": all_eval_results,
             },
         )
         
