@@ -1165,19 +1165,21 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 
 - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
 
-它现在读取的是：
+它现在支持传第一个参数指定 `NUM_TASKS`，默认是 `700`。
 
-- `atomic/cached_splits/all-models-task700-500-10-50-seed42/tokmem_atomic_fixed_split_maxlen1024.pt`
+它读取的是：
+
+- `atomic/cached_splits/all-models-task<NUM_TASKS>-500-10-50-seed42/tokmem_atomic_fixed_split_maxlen1024.pt`
 
 如果这份 `.pt` 不存在，它会自动调用：
 
-- `bash scripts/sample_atomic_all_models_fixed_split.sh 700`
+- `bash scripts/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>`
 
 也就是说，Qwen fixed split 这条线目前已经不再依赖旧的 Qwen 命名任务池，而是直接依赖“三模型共享交集池 -> 固定抽样”这条链路。
 
 它当前的 run 目录命名也已经跟这套 split 对齐，形式是：
 
-- `atomic/runs/atomic_qwen2.5_0.5b_all-models-task700-500-10-50-seed42_<timestamp>`
+- `atomic/runs/atomic_qwen2.5_0.5b_all-models-task<NUM_TASKS>-500-10-50-seed42_<timestamp>`
 
 ### 17.5 Qwen runtime split 入口仍然是另一条线
 
@@ -1234,7 +1236,7 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 - task pool：
   - `<范围>-pool-500-10-50-seed42`
 - sampled split：
-  - `<范围>-task700-500-10-50-seed42`
+  - `<范围>-task<NUM_TASKS>-500-10-50-seed42`
 
 这里的“范围”可以是：
 
@@ -1260,7 +1262,7 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 ```bash
 bash scripts/build_atomic_all_models_task_pool.sh
 bash scripts/sample_atomic_all_models_fixed_split.sh 700
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 700
 ```
 
 如果只是想快速跑一下 Qwen runtime split：
@@ -1273,3 +1275,212 @@ bash scripts/run_atomic_qwen_0_5b.sh
 
 - 做严格对比：`build all-models pool -> sample fixed split -> run fixed split`
 - 做快速试跑：`run runtime split`
+
+### 17.9 如果我的目标是“完整跑通 atomic 全流程”
+
+如果你的目标明确是：
+
+- 先按三模型 tokenizer 共同约束筛出可用任务池
+- 再固定随机抽样指定数量任务
+- 再用 `Qwen2.5-0.5B-Instruct` 跑 TokMem 训练和测试
+
+那现在推荐直接按下面顺序执行，不要从：
+
+- [atomic/main_tokmem.sh](/data/ruochen/tokmem/atomic/main_tokmem.sh)
+
+开始。
+
+原因是：
+
+- `atomic/main_tokmem.sh` 现在还是旧的 `Llama-3.2-3B-Instruct + runtime split` 入口
+- 它直接调用的是 [atomic/main_in_domain.py](/data/ruochen/tokmem/atomic/main_in_domain.py)
+- 不是“先 build 共享任务池，再 fixed split，再跑 Qwen 0.5B”这条链路
+
+如果你要的是当前推荐的完整流程，按这个三步走：
+
+1. 建三模型共享任务池
+
+```bash
+bash scripts/build_atomic_all_models_task_pool.sh
+```
+
+它会调用：
+
+- [atomic/utils/filter_tasks_for_all_models.py](/data/ruochen/tokmem/atomic/utils/filter_tasks_for_all_models.py)
+
+作用是：
+
+- 从 `datasets/natural-instructions-2.8/tasks` 里扫描原始任务
+- 只保留英文任务
+- 只保留对 `Qwen 0.5B / Llama 3.2 3B / Llama 3.1 8B` 三个 tokenizer 都不过长的样本
+- 只保留每个任务都还能凑够 `train=500 / val=10 / test=50` 共同样本池的任务
+
+输出目录默认是：
+
+- `atomic/cached_splits/all-models-pool-500-10-50-seed42`
+
+2. 从共享池里固定随机抽样你想要的任务数
+
+例如抽 `300` 个任务：
+
+```bash
+bash scripts/sample_atomic_all_models_fixed_split.sh 300
+```
+
+例如抽 `700` 个任务：
+
+```bash
+bash scripts/sample_atomic_all_models_fixed_split.sh 700
+```
+
+它会调用：
+
+- [atomic/utils/sample_tasks_from_task_pool.py](/data/ruochen/tokmem/atomic/utils/sample_tasks_from_task_pool.py)
+
+作用是：
+
+- 从上一步的 pool 里按 `seed=42` 固定随机抽任务
+- 导出 fixed split 所需的 `.pt`
+
+对应输出目录是：
+
+- `atomic/cached_splits/all-models-task300-500-10-50-seed42`
+- 或 `atomic/cached_splits/all-models-task700-500-10-50-seed42`
+
+里面最重要的是：
+
+- `tokmem_atomic_fixed_split_maxlen1024.pt`
+
+3. 用同一个 `NUM_TASKS` 跑 Qwen 0.5B 的 TokMem 训练和测试
+
+如果上一步抽的是 `300`：
+
+```bash
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 300
+```
+
+如果上一步抽的是 `700`：
+
+```bash
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 700
+```
+
+这个脚本会进入：
+
+- [atomic/main_in_domain_fixed_split.py](/data/ruochen/tokmem/atomic/main_in_domain_fixed_split.py)
+
+并且会：
+
+- 读取你刚才抽样得到的 `.pt`
+- 先训练 task token
+- 训练结束后自动做完整 evaluation
+- 把日志、checkpoint、预测和指标都写到 `atomic/runs/<run_name>/`
+
+也就是说，当前最清晰的完整顺序就是：
+
+```bash
+bash scripts/build_atomic_all_models_task_pool.sh
+bash scripts/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh <NUM_TASKS>
+```
+
+补充两点：
+
+- 如果只是想省一步，`run_atomic_qwen_0_5b_fixed_split.sh <NUM_TASKS>` 在 split cache 不存在时，会自动先调用 `sample_atomic_all_models_fixed_split.sh <NUM_TASKS>`
+- 而 `sample_atomic_all_models_fixed_split.sh <NUM_TASKS>` 在 task pool 不存在时，又会自动先调用 `build_atomic_all_models_task_pool.sh`
+
+但为了确认每一步产物、方便排查问题，实际第一次跑通时仍然建议显式按三步执行。
+
+### 17.10 2026-03-28 `700-task` all-models fixed split 实跑结果与诊断
+
+这次已经实际跑通了一条完整链路：
+
+```bash
+bash scripts/build_atomic_all_models_task_pool.sh
+bash scripts/sample_atomic_all_models_fixed_split.sh 700
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
+```
+
+对应归档在：
+
+- [results/atomic_qwen2.5_0.5b_20260328_065526](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_20260328_065526)
+- 更完整的归档说明在：
+  - [results/atomic_qwen2.5_0.5b_20260328_065526/run_summary.md](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_20260328_065526/run_summary.md)
+
+这次的关键设置是：
+
+- `Qwen2.5-0.5B-Instruct`
+- 三模型共享任务池 fixed split
+- `700 tasks`
+- `train/val/test = 500/10/50`
+- `batch_size = 8`
+- `max_length = 1024`
+- `lr = 0.001`
+- `shuffle=False`
+- 按本轮要求，没有额外加入独立 `task loss`
+
+这次的关键结果是：
+
+- `Task Prediction Accuracy = 0.4685`
+- `Exact Match = 0.2663`
+- `Average Response Score = 0.3896`
+- 没达到 `routing accuracy > 80%`
+
+我回看了训练日志、评测日志、预测文件和代码路径之后，目前对“为什么效果会这么差”的判断是：
+
+1. 当前推理 routing 方式和论文不一致
+
+- 现在不是“先只在 task token 子集里选一个 task token，再继续生成 response”
+- 当前 `Qwen` 路径还是直接在全词表上 `generate`
+- 结果是第一步经常直接生成普通回答词，而不是 task token
+- 实测有 `4567 / 35000 = 13.05%` 的测试样本根本没有生成 task token
+
+2. 当前错误是明显的 task collapse，不是均匀噪声
+
+- `task392_inverse_causal_relationship` 的 `50/50` 全部被路由到 `task391_causal_relationship`
+- 大量 `task12xx_atomic_classification_*` 被集中路由到 `task1203_atomic_classification_xreact`
+- 多个 sentiment / polarity 任务被集中路由到 `task746_yelp_restaurant_review_classification` 或 `task476_cls_english_books_classification`
+
+3. `shuffle=False` 配合当前 split 排序，带来了很明显的顺序遗忘
+
+- 这份 `700-task` split cache 里的 `train_data` 不是打散的，而是 `700` 个连续 block
+- 每个 block 正好 `500` 条，同一个 task 连着喂完再切下一个
+- 在这种设置下，前面 task 很容易被后面 task 覆盖
+- 实测前 `100` 个 task 的 routing accuracy 只有 `27.34%`
+- 最后 `100` 个 task 是 `59.34%`
+
+4. Qwen 这条线的 task token 起点比 Llama 更弱
+
+- 原始 `Qwen2.5-0.5B-Instruct` tokenizer 里没有内建 `reserved_special_token`
+- 这次是运行时新增 `700` 个 task token
+- 当前代码没有实现论文里“用 pretrained embedding 平均值初始化 procedure IDs”的做法
+
+5. 这次和论文 atomic setting 还有几个关键差异
+
+- 论文 Table 2 里 `Qwen 2.5 0.5B` 在 `1000 tasks` 上 routing accuracy 是 `94.7%`
+- 论文 atomic setting 明确写了 `20% replay`
+- 论文还写了 procedure IDs 用 pretrained embeddings 的平均值初始化
+- 论文 TokMem atomic 超参是 `batch_size=4`、`max_length=1024`、`lr=5e-3`
+- 当前这次 run 没有 replay，没有平均初始化，`lr` 也只用了 `1e-3`
+
+我现在认为，当前最值得优先做的改动顺序是：
+
+1. 先把推理改成论文式 first-step restricted routing
+2. 再补齐 atomic setting 的 replay
+3. 再把 Qwen 新增 task token 的初始化改成平均 embedding 初始化
+4. 再对齐论文 atomic 超参，例如先试 `lr=5e-3`
+
+额外说明：
+
+- 这次“不额外加 task loss”是按本轮实验要求保留的
+- 但从结果看，当前主问题不只是有没有独立 `task loss`
+- 如果目标是逼近论文 routing accuracy，更关键的是先补齐：
+  - routing 方式
+  - replay
+  - task token 初始化
+
+如果我下一轮只是想先验证“实现有没有走对”，而不是立刻冲 `700-task`，更稳妥的顺序是：
+
+- 先在同一条 all-models common-pool fixed-split 链路上跑 `100-task`
+- 再跑 `200-task`
+- 确认 routing 实现正确后，再重新上 `700-task`
