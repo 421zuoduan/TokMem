@@ -237,6 +237,7 @@ def main():
     )
     args = parser.parse_args()
 
+    # ---- Run context and logging ----
     run_context = resolve_run_context(
         experiment_name="atomic_tokmem",
         model_name=args.model_name,
@@ -247,7 +248,7 @@ def main():
     )
 
     stdout_prefix = "evaluation" if args.skip_training else "training"
-    training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+    _, _, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
         log_dir=run_context["run_dir"],
         model_name=args.model_name,
         num_tasks=args.num_tasks,
@@ -255,6 +256,7 @@ def main():
         timestamp=run_context["timestamp"],
     )
 
+    # ---- Reproducibility and startup summary ----
     set_random_seed(args.seed)
     print()
 
@@ -286,6 +288,7 @@ def main():
     print(f"   Stdout log: {stdout_log}")
     print()
 
+    # ---- Tokenizer and cached split loading ----
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
@@ -323,6 +326,7 @@ def main():
         split_cache_metadata,
     )
 
+    # ---- Model and dataloaders ----
     print("Initializing Task Calling Model...")
     model = TaskCallingModel(
         model_name=args.model_name,
@@ -367,6 +371,7 @@ def main():
         )
     )
 
+    # ---- Training ----
     if not args.skip_training and train_dataloader:
         print("Starting Training...")
         train_results = train_task_calling_model(
@@ -406,12 +411,14 @@ def main():
             model.load_state_dict(best_state, strict=False)
         print()
 
+    # ---- Optional demo ----
     if args.demo:
         print("Running demo on sample examples...")
         demo_examples = random.sample(test_examples, min(5, len(test_examples)))
         demo_task_calling(model, tokenizer, demo_examples, device=args.device)
         print()
 
+    # ---- Evaluation ----
     if test_dataloaders:
         all_eval_results = {}
         evaluation_prediction_paths = {}

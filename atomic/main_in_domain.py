@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Example script for Natural Instructions Task Learning
+Entry point for atomic TokMem runs with a runtime-sampled split.
 
-This script demonstrates how to train and evaluate a model with task tokens
-for Natural Instructions tasks, where each task learns its own token.
-
-The approach is similar to function calling, but instead of learning tool tokens
-for different functions, we learn task tokens for different instruction tasks.
-
-Usage:
-    python example_natural_task_learning.py --num_tasks 5 --num_epochs 3
+This script samples English Natural Instructions tasks on the fly, saves the
+resulting split into the run folder, trains task-token embeddings, and then
+evaluates with one or more prompt modes.
 """
 
 import torch
@@ -144,6 +139,7 @@ def main():
                         help='Short tag appended to auto-generated run names')
     args = parser.parse_args()
 
+    # ---- Run context and logging ----
     run_context = resolve_run_context(
         experiment_name="atomic_tokmem",
         model_name=args.model_name,
@@ -154,7 +150,7 @@ def main():
     )
     
     stdout_prefix = "evaluation" if args.skip_training else "training"
-    training_logger, eval_logger, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
+    _, _, training_log, evaluation_log, stdout_log, timestamp = setup_logging(
         log_dir=run_context["run_dir"],
         model_name=args.model_name,
         num_tasks=args.num_tasks,
@@ -162,6 +158,7 @@ def main():
         timestamp=run_context["timestamp"],
     )
 
+    # ---- Reproducibility and startup summary ----
     # Set random seed first for full reproducibility
     set_random_seed(args.seed)
     print()
@@ -191,7 +188,7 @@ def main():
     print(f"   Stdout log: {stdout_log}")
     print()
     
-    # Load tokenizer
+    # ---- Tokenizer and task sampling ----
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
@@ -247,7 +244,7 @@ def main():
         ),
     )
     
-    # Initialize model
+    # ---- Model and dataloaders ----
     print("Initializing Task Calling Model...")
     model = TaskCallingModel(
         model_name=args.model_name,
@@ -292,7 +289,7 @@ def main():
         test_prompt_mode=args.test_prompt_mode,
     )
     
-    # Training
+    # ---- Training ----
     if not args.skip_training and train_dataloader:
         print("Starting Training...")
         train_results = train_task_calling_model(
@@ -332,7 +329,7 @@ def main():
             model.load_state_dict(best_state, strict=False)
         print()
     
-    # Demo on a few examples
+    # ---- Optional demo ----
     if args.demo:
         print("Running demo on sample examples...")
         # Show up to 5 examples
@@ -340,7 +337,7 @@ def main():
         demo_task_calling(model, tokenizer, demo_examples, device=args.device)
         print()
     
-    # Evaluation
+    # ---- Evaluation ----
     if test_dataloaders:
         all_eval_results = {}
         evaluation_prediction_paths = {}

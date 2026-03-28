@@ -1850,3 +1850,101 @@ bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
   - `instruction+query` vs `query-only`
 
 在不改训练权重的情况下，先把推理层面对结果的影响分离出来。
+
+## 19. 代码巡检后的统一口径（新增）
+
+这一节是这次“为了后续人工检查更方便”而补的总说明。
+
+注意：**这一节里的“原始代码库”统一指本仓库在本地改造前的最后一个上游代码提交 `94fa1dd`**。  
+如果要看“论文 vs 官方 GitHub 当前 main 分支”的对照，继续参考上面的 **18.6**。
+
+### 19.1 这次实际做了哪些可读性整理
+
+这次我没有大改算法逻辑，主要做的是**读代码时更容易定位含义**的整理。
+
+| 文件 | 这次整理的点 | 目的 |
+| --- | --- | --- |
+| `atomic/task_dataset.py` | 增加模块级命名说明；补了 `build_instruction_query_text` / `extract_primary_output` / `build_atomic_sample` 这类共享 helper；把 `definition` / `instruction` / `query` 的含义拆开写清楚 | 避免后续再把“task definition”和“真正送进 tokenizer 的 prompt”混成一件事 |
+| `atomic/main_in_domain.py` | 统一入口说明和分段注释，明确这是 **runtime split** 路径 | 以后看 atomic 主入口时能一眼分清“随机采样运行” |
+| `atomic/main_in_domain_fixed_split.py` | 统一入口说明和分段注释，明确这是 **fixed split cache** 路径 | 以后看 fixed-split 运行时，不会和 runtime split 混掉 |
+| `atomic/task_model.py` | 在 embedding override / lm head override 处，把 `reserved_token_tensor` 这类变量名改成更明确的 `reserved_token_ids_on_device`、`task_*_embedding_rows` | 看 routing / logits 替换逻辑时，不容易搞混“token id 张量”和“embedding 行” |
+| `compositional/dataset.py` | 把 `item`、`tools` 这类宽泛名字改成 `sample_row`、`tool_names` | 读 tool-calling 数据路径时更容易区分“整行样本”和“工具列表” |
+| `memorization/main_memorization.py` | 增加模块级术语说明，把 `texts` / `all_tokens` / `all_id_tokens` 改成 `batch_texts` / `text_token_batches` / `id_token_batches` | 后续看 memorization 实验时，更容易区分“原文文本”和“token 后的 batch 张量” |
+
+统一后的注释风格也尽量固定成两层：
+
+1. **模块顶部 docstring**：先说这个文件是干什么的；
+2. **`# ---- 分段标题 ----` 注释**：只标结构边界，不重复翻译代码。
+
+### 19.2 我后续自己检查代码时，统一按这个词表理解
+
+下面这些词，后续统一按这个口径理解：
+
+- `task_definition`
+  - 指 Natural Instructions 任务级定义；
+  - 对应 sample 里的旧字段名 `instruction`。
+- `task_query`
+  - 指单条样本的 `input`。
+- `prompt_text`
+  - 指真正参与长度过滤或送进 tokenizer 的拼接文本：
+  - `task_definition + "\n\n" + task_query`
+- `task token` / `reserved token` / `memory token`
+  - 在 `atomic` 这条线上，本质上指的是同一类东西；
+  - 只是论文里多写 `memory token`，代码里更多写 `reserved token` 或 `task token`。
+- `runtime split`
+  - 指运行时现采任务、现切 train/val/test；
+  - 入口是 `atomic/main_in_domain.py`。
+- `fixed split`
+  - 指先离线构建任务池和 split cache，再读取缓存跑训练/评测；
+  - 入口是 `atomic/main_in_domain_fixed_split.py`。
+- `val_batch_size` / `test_batch_size`
+  - 现在 atomic 里已经显式拆开；
+  - 老代码里的 `eval_batch_size` 不再是最准确的说法。
+
+### 19.3 现在仍然最容易混淆的点
+
+| 容易混淆的点 | 现在统一解释 | 我自己后续要特别注意什么 |
+| --- | --- | --- |
+| `instruction` 字段 | **不是**完整 prompt；只是 task definition | 真正送进 tokenizer 的常常是 `instruction + query` |
+| `max_length` | 在大多数入口里表示模型序列上限 | 在 `task_dataset.py` 的采样过滤里，常被顺手拿来当 prompt 过滤阈值，要看上下文 |
+| `query_only` | 只是测试时 prompt 形式 | 不是训练数据格式；训练仍然默认 `instruction + query` |
+| `generation_routing` | 控制“第一步是否只在 task token 子集里选” | `first_step_routing` 更接近论文；`full_vocab_generation` 更接近旧公开实现 |
+| `split_cache.pt` | 既可能是 runtime run 目录里临时存的，也可能是 fixed-split 正式缓存 | 看它所在目录：`run_dir/` 下的是运行产物，`atomic/cached_splits/` 下的是长期复用缓存 |
+| `task_names` 顺序 | 当前最终映射一般来自训练集任务名的排序结果 | 不要默认它等于“论文里的 task ID 顺序”或“采样时原始顺序” |
+| `shuffle=False` | 当前 atomic dataloader 还是不打乱 | 这跟论文里“按 task 顺序引入、但 task 内样本可 shuffle”并不完全等价 |
+| `compatible_model_names` | fixed-split cache 允许多个兼容 tokenizer / model 名称共用同一池子 | 校验 split cache 时，不要只盯着单个 `model_name` 字符串 |
+
+### 19.4 当前代码库 / 原始代码库 / 原论文：主差异表
+
+先固定基线：
+
+- **当前代码库**：`HEAD = 3f00b12`
+- **原始代码库**：`94fa1dd`
+- **原论文**：仓库根目录 `paper.pdf`
+
+| 对比维度 | 当前代码库（`HEAD`） | 原始代码库（`94fa1dd`） | 原论文 |
+| --- | --- | --- | --- |
+| 主要变化集中在哪里 | 主要集中在 `atomic/`，新增 fixed-split、run 归档、脚本化任务池和更多评测开关；`compositional/`、`memorization/` 基本沿用原结构 | 以官方公开实现为主，atomic 只有 runtime-sampling 主路径 | 只描述方法与实验设定，不关心本地运行归档结构 |
+| atomic 数据切分 | 同时支持 **runtime split** 和 **fixed split cache**；还新增跨模型公共任务池构建与采样脚本 | 只有运行时采样/切分主路径 | 文字上是 1000 English tasks，按 task ID 逐步引入，500 train / 50 test，并在若干 checkpoint 评测 |
+| atomic routing | 已支持 `first_step_routing` 和 `full_vocab_generation`；本地实验脚本可显式选 | 实现上更接近 `full_vocab_generation`，没有显式 first-step 开关 | 先基于 `q` 对 memory token 做 routing，再接着生成；并允许“不召回任何 memory token” |
+| task token 初始化 | 显式用 **pretrained embedding 平均值** 初始化新增 task token | 更接近“扩词表后直接取新增 reserved token 行 / clone 当前行” | 明确写了用 pretrained embeddings 的平均值初始化 |
+| 测试 prompt 形式 | 支持 `instruction_and_query` / `query_only` / `both` | 基本只有 `instruction + query` 这一路 | 论文用抽象符号 `q`，没有把这两种 prompt 形式单独做成公开代码开关 |
+| 训练与评测日志 | 每次 run 会保存 `run_config.json`、`split_cache.pt`、`split_cache_metadata.json`、stdout log、结果 JSON | 只有较简化的 training/evaluation log | 论文只给实验设定，不涉及代码级 run artifact 设计 |
+| 脚本默认运行环境 | 已明显本地化：本地模型路径、`device_map`、多卡/平衡分布脚本、额外归档脚本 | 更接近原始 Hugging Face 路径 + 单机单脚本运行 | 论文报告的是单张 A6000 48GB、bf16 |
+| `main_tokmem.sh` 默认设置 | 当前脚本偏本地机器可跑：本地 `Llama-3.2-3B-Instruct`、`CUDA_VISIBLE_DEVICES=0,1,2,3`、`device_map=balanced`、`batch_size=1`、`grad_acc=2`、`max_length=1280` | 原脚本是单卡、HF model name、`batch_size=2`、`eval_batch_size=32`、`max_instruction_tokens=1024` | 论文写的是 1 epoch、batch size 4、max length 1024、单张 A6000 |
+| dataloader 顺序 | 当前 atomic 还是 `shuffle=False`，但又额外加入 fixed-split 和更多对照开关 | `94fa1dd` 时 atomic 也已是 `shuffle=False` | 论文描述更接近“按 task 顺序引入，但 task 内样本做 shuffle” |
+| 与论文的一致性 | 在 **routing 开关** 和 **平均初始化** 上比原始代码更接近论文；但本地脚本默认硬件/批大小/长度设定又和论文不完全一致 | 方法大体一致，但若按源码细节看，routing 和初始化都没完全贴论文 | 论文是方法论与实验口径基线，不等于任一版本源码逐行实现 |
+
+### 19.5 一句话总结这三者的关系
+
+可以直接记成三句话：
+
+1. **原始代码库** 更像“官方公开可运行实现”。  
+2. **当前代码库** 更像“为了本地可复现对照实验而扩展过的 atomic 工作流”。  
+3. **原论文** 是方法和实验设定基线，当前代码在部分地方更接近论文，但当前脚本默认值又不等于论文原始设置。  
+
+如果后面我再继续改代码，优先保持下面这条判断顺序：
+
+1. 先问：这是不是论文方法本身；
+2. 再问：这是不是原始公开代码的实现细节；
+3. 最后再问：这是不是我本地为了实验可复现而额外加的工程层改动。

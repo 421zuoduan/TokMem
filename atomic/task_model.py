@@ -1,3 +1,5 @@
+"""Task-token model used by the atomic TokMem experiments."""
+
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -142,39 +144,36 @@ class TaskCallingModel(nn.Module):
         self.original_embed_forward = self.model.model.embed_tokens.forward
         self.original_lm_head_forward = self.model.lm_head.forward
         
-        # Override embedding layer
+        # ---- Embedding override ----
         def custom_embed_forward(input_ids):
-            # Get standard embeddings
+            # Get standard embeddings.
             embeddings = self.original_embed_forward(input_ids)
-            reserved_token_tensor = self.get_reserved_token_tensor(input_ids.device)
-            task_input_embeddings = self.trainable_task_input_embeddings.to(embeddings.device)
+            reserved_token_ids_on_device = self.get_reserved_token_tensor(input_ids.device)
+            task_input_embedding_rows = self.trainable_task_input_embeddings.to(embeddings.device)
             
-            # Create mask for any reserved tokens in input_ids
-            is_reserved = torch.isin(input_ids, reserved_token_tensor)
+            # Replace only the reserved-token rows with trainable task embeddings.
+            is_reserved = torch.isin(input_ids, reserved_token_ids_on_device)
             if is_reserved.any():
-                # Find which reserved token each position corresponds to
                 for i, reserved_token_id in enumerate(self.reserved_token_ids):
                     mask = (input_ids == reserved_token_id)
                     if mask.any():
-                        embeddings[mask] = task_input_embeddings[i]
+                        embeddings[mask] = task_input_embedding_rows[i]
             
             return embeddings
         
-        # Override lm_head  
+        # ---- LM-head override ----
         def custom_lm_head_forward(hidden_states):
-            # Get standard logits
+            # Get standard logits.
             logits = self.original_lm_head_forward(hidden_states)
-            reserved_token_tensor = self.get_reserved_token_tensor(logits.device)
-            task_output_embeddings = self.trainable_task_output_embeddings.to(hidden_states.device)
+            reserved_token_ids_on_device = self.get_reserved_token_tensor(logits.device)
+            task_output_embedding_rows = self.trainable_task_output_embeddings.to(hidden_states.device)
             
-            # Efficiently replace reserved token logits using batch matmul
-            # Shape: hidden_states (..., hidden_dim), task_embeddings (num_tasks, hidden_dim)
-            task_logits = torch.matmul(hidden_states, task_output_embeddings.T)  # (..., num_tasks)
+            # Efficiently replace reserved-token logits using batch matmul.
+            task_logits = torch.matmul(hidden_states, task_output_embedding_rows.T)
             if task_logits.device != logits.device:
                 task_logits = task_logits.to(logits.device)
             
-            # Replace the specific reserved token positions with our computed logits
-            logits[..., reserved_token_tensor] = task_logits
+            logits[..., reserved_token_ids_on_device] = task_logits
             
             return logits
         
@@ -280,15 +279,15 @@ class TaskCallingModel(nn.Module):
         """Select the first task token using only the reserved task-token subset."""
         outputs = self.model(input_ids=instruction_tokens, attention_mask=instruction_mask, use_cache=False)
         logits = outputs.logits[:, -1, :]
-        reserved_token_tensor = self.get_reserved_token_tensor(logits.device)
-        restricted_logits = logits.index_select(dim=-1, index=reserved_token_tensor)
+        reserved_token_ids_on_device = self.get_reserved_token_tensor(logits.device)
+        restricted_logits = logits.index_select(dim=-1, index=reserved_token_ids_on_device)
         selected_positions = self._sample_restricted_token_positions(
             restricted_logits,
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
         )
-        selected_tokens = reserved_token_tensor[selected_positions]
+        selected_tokens = reserved_token_ids_on_device[selected_positions]
         return selected_tokens.to(instruction_tokens.device)
     
     def forward(self, input_ids, attention_mask):
