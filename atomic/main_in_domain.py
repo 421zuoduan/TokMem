@@ -31,7 +31,8 @@ from task_training import (
     train_task_calling_model,
     demo_task_calling,
     eval_task_calling,
-    setup_logging
+    setup_logging,
+    save_trained_model,
 )
 
 def add_reserved_special_tokens(tokenizer, num_of_tasks, device="cuda"):
@@ -289,20 +290,27 @@ def main():
             validate_every_n_steps=args.validate_every_n_steps
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
+        final_model_path = save_trained_model(
+            model,
+            save_dir=run_context["run_dir"],
+            timestamp=timestamp,
+            suffix="final",
+        )
         write_json(
             os.path.join(run_context["run_dir"], "train_results.json"),
             {
                 "avg_total_loss": train_results["avg_total_loss"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
+                "final_model_path": final_model_path,
             },
         )
+        print(f"Final model saved to: {final_model_path}")
         
-        # Load best model state if validation was performed and best model was found
+        # Restore best validation checkpoint for downstream demo/evaluation consistency.
         if train_results['best_model_state'] is not None:
             print(f"Loading best model state (validation loss: {train_results['best_val_loss']:.4f})")
             best_state = train_results['best_model_state']
-            # Load only the available keys (token embeddings) without requiring full state
             model.load_state_dict(best_state, strict=False)
         print()
     
@@ -317,6 +325,9 @@ def main():
     # Evaluation
     if test_dataloader:
         print("Running comprehensive evaluation...")
+        predictions_output_path = os.path.join(
+            run_context["run_dir"], "evaluation_predictions.jsonl"
+        )
         
         # Normal task prediction evaluation
         results = eval_task_calling(
@@ -324,7 +335,8 @@ def main():
             tokenizer=tokenizer,
             test_dataloader=test_dataloader,
             device=args.device,
-            use_ground_truth_tasks=False
+            use_ground_truth_tasks=False,
+            predictions_output_path=predictions_output_path,
         )
         
         print("\n" + "=" * 50)
@@ -349,6 +361,9 @@ def main():
                 "val_examples": len(val_data),
                 "test_examples": len(test_data),
                 "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "best_task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "final_task_tokens_path": final_model_path if not args.skip_training and train_dataloader else None,
+                "evaluation_predictions_path": results.get("predictions_output_path"),
                 "metrics": results,
             },
         )

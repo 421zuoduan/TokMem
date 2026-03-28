@@ -1,4 +1,5 @@
 import gc
+import json
 import logging
 import os
 import re
@@ -439,6 +440,14 @@ def save_trained_model(model, save_dir="saved_models", timestamp=None, suffix=No
     return filepath
 
 
+def write_jsonl(path, rows):
+    """Write rows to a UTF-8 JSONL file."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def demo_task_calling(model, tokenizer, test_examples, device="cuda", use_ground_truth_tasks=False):
     """Demo of task calling using held-out test examples"""
     
@@ -510,11 +519,24 @@ def demo_task_calling(model, tokenizer, test_examples, device="cuda", use_ground
         print("-" * 50)
         print()
 
-def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_ground_truth_tasks=False):
+def eval_task_calling(
+    model,
+    tokenizer,
+    test_dataloader,
+    device="cuda",
+    use_ground_truth_tasks=False,
+    predictions_output_path=None,
+):
     """Comprehensive evaluation of task calling model using Natural Instructions metrics"""
     import time
     from collections import defaultdict
-    from natural_instructions_eval import evaluate_predictions, print_evaluation_results
+    from natural_instructions_eval import (
+        evaluate_predictions,
+        exact_match,
+        metric_max_over_ground_truths,
+        print_evaluation_results,
+        rouge_score,
+    )
     
     # Get evaluation logger
     eval_logger = logging.getLogger('evaluation')
@@ -536,6 +558,7 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
     all_predictions = []
     all_references = []
     all_task_names = []
+    prediction_rows = []
     
     # Legacy metrics for compatibility
     task_correct = 0
@@ -544,6 +567,74 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
     # Evaluation loop with batches
     start_time = time.time()
     print("🔄 Running batch evaluation...")
+
+    def build_prediction_row(
+        example,
+        result,
+        predicted_tasks,
+        predicted_responses,
+        expected_tasks,
+        expected_responses,
+        task_match,
+        error=None,
+    ):
+        expected_task = expected_tasks[0] if expected_tasks else None
+        predicted_task = predicted_tasks[0] if predicted_tasks else None
+        expected_response = expected_responses[0] if expected_responses else ""
+        predicted_response = predicted_responses[0] if predicted_responses else ""
+        has_task_prediction = len(predicted_tasks) > 0
+
+        if error is not None:
+            prediction_status = "error"
+        elif has_task_prediction:
+            prediction_status = "task_and_response"
+        elif predicted_response:
+            prediction_status = "response_only_no_task_token"
+        else:
+            prediction_status = "empty_prediction"
+
+        response_exact_match = bool(
+            metric_max_over_ground_truths(
+                lambda prediction, ground_truth, xlingual=False: (
+                    1.0 if exact_match(prediction, ground_truth, xlingual) else 0.0
+                ),
+                predicted_response,
+                expected_responses,
+                xlingual=False,
+            )
+        )
+        response_rouge_l = metric_max_over_ground_truths(
+            rouge_score,
+            predicted_response,
+            expected_responses,
+            xlingual=False,
+        )
+
+        row = {
+            "example_index": len(prediction_rows),
+            "mode": "ground_truth_tasks" if use_ground_truth_tasks else "normal_task_prediction",
+            "prediction_status": prediction_status,
+            "instruction": example.get("instruction", ""),
+            "query": example.get("query", ""),
+            "expected_task": expected_task,
+            "predicted_task": predicted_task,
+            "expected_tasks": expected_tasks,
+            "predicted_tasks": predicted_tasks,
+            "has_task_prediction": has_task_prediction,
+            "task_match": task_match,
+            "expected_response": expected_response,
+            "predicted_response": predicted_response,
+            "expected_responses": expected_responses,
+            "predicted_responses": predicted_responses,
+            "response_exact_match": response_exact_match,
+            "response_rouge_l": round(response_rouge_l, 4),
+            "full_generated_sequence": result.get("full_generated_sequence", ""),
+            "task_token_used": result.get("task_token_used"),
+            "source_instance_index": example.get("source_instance_index"),
+        }
+        if error is not None:
+            row["error"] = error
+        return row
     
     processed_examples = 0
     for batch_idx, batch in enumerate(test_dataloader):
@@ -635,14 +726,39 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
                 # Use the first expected task for per-task breakdown
                 task_name = expected_tasks[0] if expected_tasks else "unknown"
                 all_task_names.append(task_name)
+
+                prediction_rows.append(
+                    build_prediction_row(
+                        example=example,
+                        result=result,
+                        predicted_tasks=predicted_tasks,
+                        predicted_responses=predicted_responses,
+                        expected_tasks=expected_tasks,
+                        expected_responses=expected_responses,
+                        task_match=task_match,
+                    )
+                )
                         
         except Exception as e:
             print(f"   Error processing batch {batch_idx + 1}: {str(e)}")
             # Add empty predictions for failed batch
             for i in range(batch_size):
+                example = batch['raw_data'][i]
                 all_predictions.append("")
                 all_references.append([""])
                 all_task_names.append("error")
+                prediction_rows.append(
+                    build_prediction_row(
+                        example=example,
+                        result={},
+                        predicted_tasks=[],
+                        predicted_responses=[],
+                        expected_tasks=example.get("tasks", ["unknown"]),
+                        expected_responses=example.get("responses", [""]),
+                        task_match=False,
+                        error=str(e),
+                    )
+                )
             continue
     
     eval_time = time.time() - start_time
@@ -689,6 +805,11 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
             stats = task_breakdown[task_name]
             task_acc = stats['task_correct'] / stats['total'] if stats['total'] > 0 else 0.0
             print(f"   {task_name}: {task_acc:.3f} ({stats['total']} examples)")
+
+    if predictions_output_path is not None:
+        write_jsonl(predictions_output_path, prediction_rows)
+        print(f"Saved per-example evaluation predictions to: {predictions_output_path}")
+        eval_logger.info(f"PREDICTIONS SAVED:{predictions_output_path}")
     
     # Return results compatible with existing code
     return {
@@ -699,5 +820,6 @@ def eval_task_calling(model, tokenizer, test_dataloader, device="cuda", use_grou
         'ni_exact_match': ni_results['exact_match'],
         'ni_rouge_l': ni_results['rougeL'],
         'ni_per_task': ni_results.get('per_task', {}),
-        'task_breakdown': dict(task_breakdown)
+        'task_breakdown': dict(task_breakdown),
+        'predictions_output_path': predictions_output_path,
     }

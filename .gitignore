@@ -43,6 +43,7 @@ results/
 logs/
 atomic/saved_models
 atomic/cached_splits
+atomic/runs
 saved_models
 
 nohup.out

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Filter Natural Instructions tasks to a common pool that satisfies all paper-model
-tokenizer requirements for atomic TokMem.
+Build an eligible atomic task pool from raw Natural Instructions tasks.
 
 The script:
 1. keeps English-only tasks,
@@ -9,9 +8,9 @@ The script:
 3. keeps only tasks whose common instance pool can satisfy the requested
    train/eval/test sizes,
 4. optionally samples a fixed number of eligible tasks with a seed,
-5. saves a fixed-split cache with the same payload structure used by
-   `main_in_domain_fixed_split.py`,
-6. saves extra files for manual long-context inspection.
+5. saves pool metadata for later fixed-split sampling,
+6. when --num_tasks is provided, can still export a sampled fixed-split cache
+   for backwards compatibility.
 """
 
 import argparse
@@ -19,6 +18,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -30,7 +30,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ATOMIC_DIR = SCRIPT_DIR.parent
 REPO_ROOT = ATOMIC_DIR.parent
 DEFAULT_TASKS_DIR = REPO_ROOT / "datasets" / "natural-instructions-2.8" / "tasks"
-DEFAULT_OUTPUT_DIR = ATOMIC_DIR / "cached_splits" / "paper_model_common_pool"
+DEFAULT_OUTPUT_ROOT = ATOMIC_DIR / "cached_splits"
 
 
 def default_tokenizer_specs():
@@ -132,8 +132,27 @@ def build_sample(task_name, definition, instance, instance_index):
     }
 
 
+def normalize_model_label(model_name):
+    """Convert a tokenizer/model name into a short folder-friendly label."""
+    label = Path(str(model_name).rstrip("/")).name or str(model_name)
+    label = label.lower()
+    label = re.sub(r"[-_]?instruct$", "", label)
+    label = re.sub(r"[^a-z0-9._-]+", "-", label).strip("-._")
+    return label or "model"
+
+
+def build_default_output_dir(primary_model_name, num_tasks, train_size, eval_size, test_size, seed):
+    """Build a concise cache directory name under atomic/cached_splits."""
+    task_label = "pool" if num_tasks is None else f"task{num_tasks}"
+    dir_name = (
+        f"{normalize_model_label(primary_model_name)}-"
+        f"{task_label}-{train_size}-{eval_size}-{test_size}-seed{seed}"
+    )
+    return DEFAULT_OUTPUT_ROOT / dir_name
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Filter atomic tasks to a common valid pool across all paper models")
+    parser = argparse.ArgumentParser(description="Build an eligible atomic task pool across all paper-model tokenizers")
     parser.add_argument("--tasks_dir", type=str, default=str(DEFAULT_TASKS_DIR))
     parser.add_argument("--tokenizer", action="append", default=None, help="Tokenizer path or model name; repeatable")
     parser.add_argument("--train_size", type=int, default=500)
@@ -142,7 +161,12 @@ def main():
     parser.add_argument("--max_length", type=int, default=1024)
     parser.add_argument("--num_tasks", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Optional output directory. Defaults to atomic/cached_splits/<model>-taskN-train-val-test-seedS",
+    )
     args = parser.parse_args()
 
     if args.tokenizer:
@@ -166,9 +190,21 @@ def main():
     )
     required_pool = args.train_size + args.eval_size + args.test_size
     tasks_dir = Path(args.tasks_dir)
-    output_dir = Path(args.output_dir)
+    primary_model_name = tokenizer_sources[0] if tokenizer_sources else "model"
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir is not None
+        else build_default_output_dir(
+            primary_model_name,
+            args.num_tasks,
+            args.train_size,
+            args.eval_size,
+            args.test_size,
+            args.seed,
+        )
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    split_cache_filename = f"tokmem_atomic_fixed_split_common_all_models_maxlen{args.max_length}.pt"
+    split_cache_filename = f"tokmem_atomic_fixed_split_maxlen{args.max_length}.pt"
 
     english_task_files = []
     for task_file in sorted(tasks_dir.glob("task*.json")):
@@ -312,13 +348,20 @@ def main():
         print(f"Saved: {output_dir / 'task_stats.json'}")
         raise SystemExit(1)
 
-    random.seed(args.seed)
-    random.shuffle(eligible_rows)
-    if args.num_tasks is not None:
-        eligible_rows = eligible_rows[:args.num_tasks]
+    tasks_list_filename = "eligible_task_pool.txt"
+    manifest_filename = "task_pool_manifest.json"
+    selected_rows = eligible_rows
 
-    selected_task_names = [row["task_name"] for row in eligible_rows]
-    row_by_task = {row["task_name"]: row for row in eligible_rows}
+    if args.num_tasks is not None:
+        selected_rows = eligible_rows.copy()
+        random.seed(args.seed)
+        random.shuffle(selected_rows)
+        selected_rows = selected_rows[:args.num_tasks]
+        tasks_list_filename = "selected_tasks.txt"
+        manifest_filename = "sample_manifest.json"
+
+    selected_task_names = [row["task_name"] for row in selected_rows]
+    row_by_task = {row["task_name"]: row for row in selected_rows}
     train_data = []
     val_data = []
     test_data = []
@@ -388,18 +431,21 @@ def main():
             "num_tasks": args.num_tasks,
             "english_tasks": len(english_task_files),
             "eligible_tasks_before_sampling": eligible_before_sampling,
-            "selected_tasks": len(eligible_rows),
+            "selected_tasks": len(selected_rows),
+            "selection_mode": "sampled_split" if args.num_tasks is not None else "task_pool",
         },
         "selected_task_names": selected_task_names,
-        "selected_tasks": eligible_rows,
+        "selected_tasks": selected_rows,
+        "eligible_task_names": [row["task_name"] for row in eligible_rows],
+        "eligible_tasks": eligible_rows,
         "all_task_stats": task_rows,
     }
 
-    with open(output_dir / "eligible_tasks.txt", "w") as f:
+    with open(output_dir / tasks_list_filename, "w") as f:
         for task_name in selected_task_names:
             f.write(f"{task_name}\n")
 
-    with open(output_dir / "common_pool_manifest.json", "w") as f:
+    with open(output_dir / manifest_filename, "w") as f:
         json.dump(manifest, f, indent=2)
 
     audit_rows.sort(key=lambda row: row["max_full_length"], reverse=True)
@@ -407,18 +453,19 @@ def main():
         for row in audit_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    torch.save(payload, output_dir / split_cache_filename)
-
     print(f"Tokenizers: {tokenizer_names}")
     print(f"English tasks: {len(english_task_files)}")
     print(f"Eligible tasks before sampling: {eligible_before_sampling}")
-    print(f"Selected tasks: {len(eligible_rows)}")
+    print(f"Selected tasks: {len(selected_rows)}")
     print(f"Required common pool per task: {required_pool}")
-    print(f"Saved: {output_dir / 'eligible_tasks.txt'}")
+    print(f"Saved: {output_dir / tasks_list_filename}")
     print(f"Saved: {output_dir / 'task_stats.json'}")
-    print(f"Saved: {output_dir / 'common_pool_manifest.json'}")
+    print(f"Saved: {output_dir / manifest_filename}")
     print(f"Saved: {output_dir / 'long_context_samples.jsonl'}")
-    print(f"Saved: {output_dir / split_cache_filename}")
+
+    if args.num_tasks is not None:
+        torch.save(payload, output_dir / split_cache_filename)
+        print(f"Saved: {output_dir / split_cache_filename}")
 
 
 if __name__ == "__main__":

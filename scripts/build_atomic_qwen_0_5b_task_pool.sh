@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+POOL_DIR="$ROOT_DIR/atomic/cached_splits/qwen2.5-0.5b-pool-500-10-50-seed42"
 
 cd "$ROOT_DIR"
 
@@ -11,7 +12,6 @@ python -u "$ROOT_DIR/atomic/utils/filter_tasks_for_all_models.py" \
     --train_size 500 \
     --eval_size 10 \
     --test_size 50 \
-    --num_tasks 700 \
     --max_length 1024 \
     --seed 42 \
-    --output_dir "$ROOT_DIR/atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42"
+    --output_dir "$POOL_DIR"

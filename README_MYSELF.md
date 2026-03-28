@@ -922,6 +922,12 @@ Remaining/Total: 04:20:22/04:20:37
 
 ## 16. 2026-03-27 atomic 路径统一和脚本整理
 
+注：
+
+- 这一节主要记录 `2026-03-27` 当时那一轮整理
+- 后面脚本又继续演进过一轮
+- 当前实际使用方式、最新脚本入口和最新命名规则，以第 `17` 节为准
+
 这一节专门记录：为什么我要再做一轮脚本和保存路径整理，以及这轮整理具体改了什么。
 
 ### 为什么要做这轮修改
@@ -1008,8 +1014,9 @@ Remaining/Total: 04:20:22/04:20:37
   - 用固定随机种子
   - 随机选出 `700` 个任务
   - 整理成训练用 `.pt`
-- 对应筛选脚本现在是：
-  - [scripts/filter_atomic_tasks_all_paper_models.sh](/data/ruochen/tokmem/scripts/filter_atomic_tasks_all_paper_models.sh)
+- 对应脚本现在拆成两步：
+  - 先用 [scripts/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_all_models_task_pool.sh) 生成三模型 tokenizer 交集任务池
+  - 再用 [scripts/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_qwen_0_5b_fixed_split.sh) 从池里固定抽样并导出 `.pt`
 - 当前输出目录固定到：
   - [atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42](/data/ruochen/tokmem/atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42)
 
@@ -1047,3 +1054,222 @@ Remaining/Total: 04:20:22/04:20:37
 - `atomic/cached_splits/` 放可复用数据缓存
 - `atomic/runs/` 放当前实验全过程
 - `results/` 只放已经确认成功、值得长期保存的 run
+
+## 17. 2026-03-28 当前 build / sample / run 脚本分工
+
+这一节单独记录目前最新的 atomic 脚本职责。上面旧笔记里提到的一些旧路径、旧脚本名、旧默认行为，后面都以这一节为准。
+
+### 17.1 现在把流程明确拆成三类脚本
+
+我现在希望把脚本分成三种，不再混用：
+
+1. `build_*`
+   - 作用是从 `1600+` 个原始任务里重新筛选任务池
+   - 过滤条件包括：
+     - 只保留英文任务
+     - 只保留满足 tokenizer 长度约束的样本
+     - 只保留能满足 `train / val / test` 最小样本数要求的任务
+   - 输出是一个 task pool 目录
+   - 这里还不会导出训练用 `.pt`
+
+2. `sample_*`
+   - 作用是从已经建好的 task pool 里固定随机抽样
+   - 抽样后再导出训练用 `.pt`
+   - 这是 fixed split 的真正数据准备阶段
+
+3. `run_*`
+   - 作用是启动训练 / 评测
+   - `fixed_split` 入口应该直接读取现成 `.pt`
+   - `runtime_split` 入口则是在运行时临时采样
+
+一句话记忆：
+
+- `build` 负责“重筛原始任务”
+- `sample` 负责“从池里抽任务并导出 `.pt`”
+- `run` 负责“真正开始训练 / 推理”
+
+### 17.2 当前推荐的共享任务池：三模型 tokenizer 交集
+
+当前最重要的新入口是：
+
+- [scripts/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_all_models_task_pool.sh)
+
+它会对下面三个模型的 tokenizer 筛选结果取交集：
+
+- `Qwen2.5-0.5B-Instruct`
+- `Llama-3.2-3B-Instruct`
+- `Llama-3.1-8B-Instruct`
+
+当前默认配置是：
+
+- `train_size=500`
+- `val_size=10`
+- `test_size=50`
+- `max_length=1024`
+- `seed=42`
+
+输出目录固定为：
+
+- `atomic/cached_splits/all-models-pool-500-10-50-seed42`
+
+这个目录表示的是：
+
+- 这些任务先通过了三模型 tokenizer 的共同长度约束
+- 并且每个任务都至少还有一组共同可用的 `500 / 10 / 50` 样本池
+
+注意：
+
+- 这个 `pool` 还不是训练 cache
+- 它只是“候选任务池”
+- 里面最重要的是 `task_pool_manifest.json`
+
+### 17.3 从三模型交集池里抽样的脚本
+
+现在对应的抽样入口是：
+
+- [scripts/sample_atomic_all_models_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_all_models_fixed_split.sh)
+
+这个脚本会：
+
+1. 检查 `all-models-pool-500-10-50-seed42` 是否已经存在
+2. 如果不存在，就先调用 `build_atomic_all_models_task_pool.sh`
+3. 再从这个 pool 里按固定随机种子抽取任务
+4. 导出训练用 `.pt`
+
+它的默认行为是：
+
+- 默认抽 `700` 个任务
+- 如果手动传第一个参数，就按你传入的任务数抽样
+
+例如：
+
+```bash
+bash scripts/sample_atomic_all_models_fixed_split.sh
+bash scripts/sample_atomic_all_models_fixed_split.sh 300
+```
+
+对应输出目录会是：
+
+- `atomic/cached_splits/all-models-task700-500-10-50-seed42`
+- 或 `atomic/cached_splits/all-models-task300-500-10-50-seed42`
+
+当前会导出的核心文件有：
+
+- `selected_tasks.txt`
+- `sample_manifest.json`
+- `tokmem_atomic_fixed_split_maxlen1024.pt`
+
+### 17.4 现在 Qwen fixed split 入口已经改成走 all-models 交集
+
+当前 Qwen 0.5B 的 fixed split 训练入口是：
+
+- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+
+它现在读取的是：
+
+- `atomic/cached_splits/all-models-task700-500-10-50-seed42/tokmem_atomic_fixed_split_maxlen1024.pt`
+
+如果这份 `.pt` 不存在，它会自动调用：
+
+- `bash scripts/sample_atomic_all_models_fixed_split.sh 700`
+
+也就是说，Qwen fixed split 这条线目前已经不再依赖旧的 Qwen 命名任务池，而是直接依赖“三模型共享交集池 -> 固定抽样”这条链路。
+
+它当前的 run 目录命名也已经跟这套 split 对齐，形式是：
+
+- `atomic/runs/atomic_qwen2.5_0.5b_all-models-task700-500-10-50-seed42_<timestamp>`
+
+### 17.5 Qwen runtime split 入口仍然是另一条线
+
+另一个入口是：
+
+- [scripts/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b.sh)
+
+这条线和 fixed split 不一样：
+
+- 它不会读取预先保存好的 `.pt`
+- 它会在 `main_in_domain.py` 里运行时直接采样任务
+- 更适合快速试跑或临时实验
+- 不适合拿来做严格可复现的跨模型对比
+
+它现在也已经把 run 目录命名统一了，形式是：
+
+- `atomic/runs/atomic_qwen2.5_0.5b_runtime-split-task1000-500-10-50-seed42_<timestamp>`
+
+所以这里要严格区分：
+
+- `run_atomic_qwen_0_5b_fixed_split.sh`：读取现成 `.pt`
+- `run_atomic_qwen_0_5b.sh`：运行时现场采样
+
+### 17.6 目前保留的其他 build / sample 脚本怎么理解
+
+仓库里现在还有这些脚本：
+
+- [scripts/build_atomic_qwen_0_5b_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_qwen_0_5b_task_pool.sh)
+- [scripts/build_atomic_llama_3b_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_llama_3b_task_pool.sh)
+- [scripts/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_qwen_0_5b_fixed_split.sh)
+
+这些脚本还保留着，主要是为了：
+
+- 保留按模型线命名的局部入口和旧路径兼容
+- 方便对照以前的流程
+- 避免一下子把历史脚本全部删空
+
+但如果目标是：
+
+- 用同一份任务集合对比 `llama8b / llama3b / qwen0.5b`
+- 保证 tokenizer 长度约束口径一致
+- 保证抽样口径一致
+
+那么后面推荐优先使用的还是：
+
+1. `build_atomic_all_models_task_pool.sh`
+2. `sample_atomic_all_models_fixed_split.sh`
+3. 再接对应模型自己的 `run_*_fixed_split.sh`
+
+### 17.7 当前命名规则
+
+现在 `atomic/cached_splits/` 下面的目录名尽量统一成短格式：
+
+- task pool：
+  - `<范围>-pool-500-10-50-seed42`
+- sampled split：
+  - `<范围>-task700-500-10-50-seed42`
+
+这里的“范围”可以是：
+
+- `all-models`
+- `qwen2.5-0.5b`
+- `llama-3.2-3b`
+
+训练 cache 文件名则统一成：
+
+- `tokmem_atomic_fixed_split_maxlen1024.pt`
+- 或别的 `maxlen` 版本
+
+不再在文件名里写：
+
+- `common_all_models`
+
+因为“是否来自 all-models 交集”这个信息已经由目录名表达，不需要再在文件名里重复写一遍。
+
+### 17.8 当前推荐命令
+
+如果目标是“用三模型共享交集任务做固定 split 实验”，现在建议按下面顺序：
+
+```bash
+bash scripts/build_atomic_all_models_task_pool.sh
+bash scripts/sample_atomic_all_models_fixed_split.sh 700
+bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
+```
+
+如果只是想快速跑一下 Qwen runtime split：
+
+```bash
+bash scripts/run_atomic_qwen_0_5b.sh
+```
+
+一句话总记忆：
+
+- 做严格对比：`build all-models pool -> sample fixed split -> run fixed split`
+- 做快速试跑：`run runtime split`

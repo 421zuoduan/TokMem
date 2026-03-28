@@ -24,6 +24,7 @@ from task_training import (
     demo_task_calling,
     eval_task_calling,
     setup_logging,
+    save_trained_model,
     train_task_calling_model,
 )
 
@@ -99,8 +100,8 @@ def validate_cached_split_metadata(cache_path, expected_metadata, cached_metadat
                 f"  {key}: expected={expected_value!r}, cached={cached_value!r}"
             )
         lines.append(
-            "Change --split_cache_path or regenerate the cache with "
-            "scripts/filter_atomic_tasks_all_paper_models.sh."
+            "Change --split_cache_path or rebuild/resample it with the corresponding "
+            "scripts/build_atomic_*_task_pool.sh and scripts/sample_atomic_*_fixed_split*.sh scripts."
         )
         raise ValueError("\n".join(lines))
 
@@ -111,8 +112,8 @@ def load_split_cache(args):
     if not os.path.exists(cache_path):
         raise FileNotFoundError(
             f"Split cache not found: {cache_path}\n"
-            "Generate it first with scripts/filter_atomic_tasks_all_paper_models.sh "
-            "or point --split_cache_path to an existing .pt file."
+            "Generate it first with the corresponding scripts/sample_atomic_*_fixed_split*.sh "
+            "script or point --split_cache_path to an existing .pt file."
         )
 
     expected_metadata = build_split_metadata(args)
@@ -363,15 +364,24 @@ def main():
             validate_every_n_steps=args.validate_every_n_steps,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
+        final_model_path = save_trained_model(
+            model,
+            save_dir=run_context["run_dir"],
+            timestamp=timestamp,
+            suffix="final",
+        )
         write_json(
             os.path.join(run_context["run_dir"], "train_results.json"),
             {
                 "avg_total_loss": train_results["avg_total_loss"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
+                "final_model_path": final_model_path,
             },
         )
+        print(f"Final model saved to: {final_model_path}")
 
+        # Restore best validation checkpoint for downstream demo/evaluation consistency.
         if train_results["best_model_state"] is not None:
             print(f"Loading best model state (validation loss: {train_results['best_val_loss']:.4f})")
             best_state = train_results["best_model_state"]
@@ -386,12 +396,16 @@ def main():
 
     if test_dataloader:
         print("Running comprehensive evaluation...")
+        predictions_output_path = os.path.join(
+            run_context["run_dir"], "evaluation_predictions.jsonl"
+        )
         results = eval_task_calling(
             model=model,
             tokenizer=tokenizer,
             test_dataloader=test_dataloader,
             device=args.device,
             use_ground_truth_tasks=False,
+            predictions_output_path=predictions_output_path,
         )
 
         print("\n" + "=" * 50)
@@ -416,6 +430,9 @@ def main():
                 "val_examples": len(val_data),
                 "test_examples": len(test_data),
                 "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "best_task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
+                "final_task_tokens_path": final_model_path if not args.skip_training and train_dataloader else None,
+                "evaluation_predictions_path": results.get("predictions_output_path"),
                 "metrics": results,
             },
         )
