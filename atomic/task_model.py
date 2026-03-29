@@ -3,8 +3,35 @@
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.utils import is_accelerate_available
 import json
+
+
+class FirstStepTaskTokenLogitsProcessor(LogitsProcessor):
+    """Restrict only the first generated token to the reserved task-token set."""
+
+    def __init__(self, allowed_token_ids, prompt_length):
+        self.allowed_token_ids = tuple(int(token_id) for token_id in allowed_token_ids)
+        self.prompt_length = int(prompt_length)
+        self._allowed_mask_cache = {}
+
+    def _get_allowed_mask(self, scores):
+        device = scores.device
+        if device not in self._allowed_mask_cache:
+            mask = torch.zeros(scores.shape[-1], dtype=torch.bool, device=device)
+            mask[list(self.allowed_token_ids)] = True
+            self._allowed_mask_cache[device] = mask
+        return self._allowed_mask_cache[device]
+
+    def __call__(self, input_ids, scores):
+        if input_ids.shape[1] != self.prompt_length:
+            return scores
+
+        allowed_mask = self._get_allowed_mask(scores)
+        scores = scores.clone()
+        scores[:, ~allowed_mask] = -float("inf")
+        return scores
 
 def count_parameters(model):
     """Count trainable and total parameters in a model"""
@@ -319,41 +346,25 @@ class TaskCallingModel(nn.Module):
                     use_cache=True
                 )
             else:
-                first_task_tokens = self._select_first_task_tokens(
-                    instruction_tokens,
-                    instruction_mask,
+                logits_processor = LogitsProcessorList(
+                    [
+                        FirstStepTaskTokenLogitsProcessor(
+                            allowed_token_ids=self.reserved_token_ids,
+                            prompt_length=instruction_tokens.shape[1],
+                        )
+                    ]
+                )
+                generated = self.model.generate(
+                    input_ids=instruction_tokens,
+                    attention_mask=instruction_mask,
+                    max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
                     do_sample=do_sample,
+                    pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                    logits_processor=logits_processor,
                 )
-                routed_input_ids = torch.cat([instruction_tokens, first_task_tokens.unsqueeze(-1)], dim=-1)
-                routed_attention_mask = torch.cat(
-                    [
-                        instruction_mask,
-                        torch.ones(
-                            instruction_mask.size(0),
-                            1,
-                            device=instruction_mask.device,
-                            dtype=instruction_mask.dtype,
-                        ),
-                    ],
-                    dim=-1,
-                )
-
-                remaining_new_tokens = max(0, max_new_tokens - 1)
-                if remaining_new_tokens > 0:
-                    generated = self.model.generate(
-                        input_ids=routed_input_ids,
-                        attention_mask=routed_attention_mask,
-                        max_new_tokens=remaining_new_tokens,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                        pad_token_id=tokenizer.eos_token_id,
-                        use_cache=True
-                    )
-                else:
-                    generated = routed_input_ids
             
             # Parse the generated sequences
             return self._parse_generated_sequences(generated, instruction_tokens, tokenizer)
