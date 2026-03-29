@@ -1,5 +1,6 @@
 """Task-token model used by the atomic TokMem experiments."""
 
+import copy
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -334,16 +335,24 @@ class TaskCallingModel(nn.Module):
         self.eval()
         
         with torch.no_grad():
+            generation_config = copy.deepcopy(self.model.generation_config)
+            generation_config.pad_token_id = tokenizer.eos_token_id
+            generation_config.use_cache = True
+            generation_config.max_new_tokens = max_new_tokens
+            generation_config.do_sample = do_sample
+            if do_sample:
+                generation_config.temperature = temperature
+                generation_config.top_p = top_p
+            else:
+                generation_config.temperature = 1.0
+                generation_config.top_p = 1.0
+                generation_config.top_k = 50
+
             if self.generation_routing == "full_vocab_generation":
                 generated = self.model.generate(
                     input_ids=instruction_tokens,
                     attention_mask=instruction_mask,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                    pad_token_id=tokenizer.eos_token_id,
-                    use_cache=True
+                    generation_config=generation_config,
                 )
             else:
                 logits_processor = LogitsProcessorList(
@@ -357,12 +366,7 @@ class TaskCallingModel(nn.Module):
                 generated = self.model.generate(
                     input_ids=instruction_tokens,
                     attention_mask=instruction_mask,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                    pad_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
+                    generation_config=generation_config,
                     logits_processor=logits_processor,
                 )
             

@@ -265,7 +265,6 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             
             # Calculate overall loss (ignore -100 labels)
             loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)            
-            batch_loss += loss.item()
             
             # Calculate task token loss
             task_mask = torch.isin(shift_labels, model.get_reserved_token_tensor(shift_labels.device))
@@ -278,6 +277,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             else:
                 task_loss = torch.tensor(0.0)  # No need for device since it's just used for .item()
                 batch_task_count += 0
+
+            batch_loss += loss.item()
             batch_task_loss += task_loss.item()
             
             # Backward pass

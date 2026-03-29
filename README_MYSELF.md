@@ -196,6 +196,153 @@ effective batch size = batch_size * gradient_accumulation_steps = 2 * 2 = 4
 | `task prediction acc` 低，同时回答指标也低 | 问题首先出在 routing |
 | `instruction_and_query` 高、`query_only` 低 | 模型仍然强依赖 instruction prompt，query-only routing 不稳 |
 
+## 6.5 first_step_routing 的当前实现和几个坑
+
+现在 `atomic/task_model.py` 里的 `generation_routing` 有两种常用模式：
+
+- `full_vocab_generation`
+- `first_step_routing`
+
+### 当前 first_step_routing 到底在做什么
+
+当前实现已经改成：
+
+- prompt 只做一次前向 / prefill
+- 只在“第一个新生成 token”上限制采样范围
+- 这个第一个新生成 token 必须从 reserved memory tokens 里选
+- 从第二个新生成 token 开始，后续生成过程与 `full_vocab_generation` 一致
+
+这里的“第一个 token”不是 chat template 里的 `<|begin_of_text|>` 这类 prompt token，而是：
+
+- 模型在 prompt 之后开始续写时
+- 真正生成出来的第一个新 token
+- 也就是 task / memory token 应该出现的那个位置
+
+### 为什么之前 first_step_routing 会 OOM
+
+之前旧实现不是在一次 `generate()` 里改首步采样，而是：
+
+1. 先对 prompt 单独做一次前向，拿最后位置 logits，从 memory token 子集里选第一个 token
+2. 再把这个 token 拼回 prompt，重新调用一次 `generate()`
+
+问题在于：
+
+- 这会让 prompt 实际跑两次前向
+- 对 `instruction_and_query` 这种较长 prompt，配合大 `test_batch_size` 时显存峰值会明显升高
+- 因此会出现“训练正常，但评测阶段 OOM”的情况
+
+现在已经改成：
+
+- 使用 `LogitsProcessor`
+- 在一次 `generate()` 里只约束首个新生成 token
+- 不再重复对 prompt 做两次前向
+
+### 如果看到 generation flags warning 是什么意思
+
+如果日志里出现：
+
+```text
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']
+```
+
+通常意思是：
+
+- 当前是 `do_sample=False`
+- 但 `generation_config` 里还带着采样参数
+- Hugging Face 会提醒这些参数在贪心解码下会被忽略
+
+Qwen 本地模型默认 `generation_config` 自带：
+
+- `do_sample=true`
+- `temperature=0.7`
+- `top_p=0.8`
+- `top_k=20`
+
+所以即使代码不显式传这些参数，也可能触发 warning。
+
+当前代码已经做了清理：
+
+- `do_sample=False` 时会复制一份 `generation_config`
+- 把采样相关参数重置成贪心解码兼容值
+- 避免继续刷这条 warning
+
+### 如果看到 ROUGE-L 后面有 `(fallback)` 是什么意思
+
+如果评测日志出现：
+
+```text
+ROUGE-L F1: xx.xx% (fallback)
+```
+
+说明：
+
+- 当前运行环境没有成功导入 `rouge-score`
+- 代码无法计算真正的 `ROUGE-L`
+- 会退化成用 `exact match` 代替
+
+这时要注意：
+
+- 日志里的 `ROUGE-L` 不是标准 ROUGE-L
+- `avg_response_score` 也不再是真正的 ROUGE-L 解释
+
+### 当前应该用哪个 Python 环境跑评测
+
+当前仓库机器上至少有两个 Python：
+
+- `base`: `/data/ruochen/anaconda/bin/python`
+- `tokmem`: `/data/ruochen/anaconda/envs/tokmem/bin/python`
+
+实验实际应该使用：
+
+- `tokmem` 环境
+
+原因：
+
+- 训练和评测日志里实际用的是 Python 3.10 的 `tokmem`
+- `rouge-score` 也已经安装到这个环境里
+
+如果直接用 base 的 `python`，可能出现：
+
+- 包版本不一致
+- `ROUGE-L fallback`
+- 结果和正式实验环境不一致
+
+## 6.6 近期 0.5B fixed-split 测试汇总
+
+下面只汇总我最近反复对比过、后续最可能参考的 `Qwen2.5-0.5B` fixed-split 实验。
+
+### 10-task 对比
+
+| Run | `lr` | `generation_routing` | `validate_every_n_steps` | `best_val_loss` | `instruction_and_query` task acc | `query_only` task acc | 结果解读 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `atomic_qwen2.5_0.5b_20260329_052425` | `5e-4` | `full_vocab_generation` | `1000` | `1.4390` | `79.8%` | `25.6%` | 第一条可用 10-task 基线。`instruction_and_query` 已接近 `80%`。当时 `ROUGE-L` 还是 fallback。 |
+| `atomic_qwen2.5_0.5b_10tasks_20260329_054659` | `5e-4` | `full_vocab_generation` | `100` | `1.4409` | `80.0%` | `25.6%` | 与上一条几乎一致，说明把验证频率从 `1000` 改到 `100` 有利于观察曲线，但没有改变结论。 |
+| `atomic_qwen2.5_0.5b_10tasks_20260329_060026` | `1e-4` | `full_vocab_generation` | `100` | `2.4072` | `14.6%` | `0.0%` | 学习率降过头。大量样本直接 `response_only_no_task_token`，routing 没学起来。 |
+| `atomic_qwen2.5_0.5b_10tasks_20260329_061819` | `5e-4` | `first_step_routing` | `100` | `1.4653` | 原始评测无效 | `48.6%` | 旧实现下 `instruction_and_query` 评测 OOM，原始日志不可信；但 `query_only` 已显示出比 `full_vocab_generation` 更强的 routing。 |
+| `atomic_qwen2.5_0.5b_10tasks_firststep_reeval_20260329_0830` | 复用上一条 checkpoint | `first_step_routing` | 复评 | 复用 `1.4653` | `80.4%` | `48.0%` | 在修成“单次 `generate()` 首步约束”后重新评测，`instruction_and_query` 不再 OOM，且两种 prompt 下 routing 都是当前最优。 |
+
+补充说明：
+
+| 现象 | 含义 |
+| --- | --- |
+| 早期几条 10-task run 里 `avg_response_score == exact_match` | 当时没有真正算出 `ROUGE-L`，走了 fallback，不能把这个 `avg_response_score` 当成真实 ROUGE-L 理解。 |
+| `first_step_routing` 修复后 `instruction_and_query` 不再 OOM | 说明问题来自旧实现对 prompt 做了两次前向，而不是学习率或 checkpoint 本身。 |
+
+### 700-task 对比
+
+| Run | `lr` | `generation_routing` | `best_val_loss` | 关键结果 | 结果解读 |
+| --- | --- | --- | --- | --- | --- |
+| `atomic_qwen2.5_0.5b_20260328_065526` | `1e-3` | 旧 run，未显式记录 | `2.4261` | `task_accuracy=46.85%`, `exact_match=26.63%`, `ROUGE-L=38.96%` | 目前 700-task 里明显更好的基线。日志显示新 best 主要出现在后半程，最终最优几乎贴着结尾。 |
+| `atomic_qwen2.5_0.5b_20260328_200701` | `5e-3` | `full_vocab_generation` | `6.2518` | `instruction_and_query task acc=33.07%`, `query_only task acc=1.59%` | 明显差于 `1e-3`。说明这条 700-task 路径上 `5e-3` 过大，模型主要是靠后半程学习率降下来才慢慢恢复。 |
+
+### 当前最值得记住的结论
+
+- `10-task` 上，`5e-4` 明显优于 `1e-4`。当前没有证据支持继续把学习率往更低调。
+- `10-task` 上，`first_step_routing` 在修复成“单次 `generate()` + 首步 memory-token 限制”后，是当前 routing 最好的设置。
+- `700-task` 上，`1e-3` 明显优于 `5e-3`。问题核心更像学习率过大，而不是缺 `weight decay`。
+- `validate_every_n_steps` 从 `1000` 改到 `100` 的主要价值是更容易看曲线和抓中途 best，不会增加训练更新次数。
+- 当前这些测试都还没有启用论文里的 `decoupled embeddings`，也没有额外加入 task loss，保持的是更接近原始 TokMem 的基本路径。
+
 ## 7. 论文硬件与我当前机器的关系
 
 论文里写的是：
