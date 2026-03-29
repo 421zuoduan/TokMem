@@ -169,6 +169,33 @@ effective batch size = batch_size * gradient_accumulation_steps = 2 * 2 = 4
 - 在显存有限时，模拟更大的 batch
 - 让训练配置更接近论文中的 batch setting
 
+## 6.4 评测里的三个核心指标是什么意思
+
+`atomic` 评测里常见的三个数是：
+
+- `task prediction acc`
+- `exact match acc`
+- `average response score`
+
+它们在代码里的来源主要是：
+
+- [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+- [atomic/natural_instructions_eval.py](/data/ruochen/tokmem/atomic/natural_instructions_eval.py)
+
+| 指标 | 代码里怎么计算 | 主要看什么 | 代码位置 | 和论文的对应关系 |
+| --- | --- | --- | --- | --- |
+| `task prediction acc` | 每个样本判断预测 task 是否和标注 task 一致，正确记 `1`，错误记 `0`，最后求平均。当前 `atomic` 基本是单 task，可近似理解为 task token 是否选对。 | `routing` 是否正确，memory token 检索是否学会。 | [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py#L783) | 对应 Table 2：`Task routing accuracy` |
+| `exact match acc` | 把预测回答与所有参考答案做标准化比较，只要和任一参考答案完全一致就记 `1`，否则记 `0`，最后求平均。 | 回答是否和标准答案完全一致。指标很严格。 | [atomic/natural_instructions_eval.py](/data/ruochen/tokmem/atomic/natural_instructions_eval.py#L123), [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py#L821) | 不是 atomic 主表核心指标，更像代码里额外保留的 NI 风格诊断指标 |
+| `average response score` | 实际上就是平均 `ROUGE-L`。每个样本算预测回答和参考答案的 `ROUGE-L`，多参考时取最大值，最后求平均。 | 回答整体是否接近参考答案，比 `exact match` 更宽松。 | [atomic/natural_instructions_eval.py](/data/ruochen/tokmem/atomic/natural_instructions_eval.py#L136), [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py#L823) | 对应 Table 1：`Atomic recall performance on SNI (ROUGE-L)` |
+
+补充：
+
+| 结果组合 | 更可能说明什么 |
+| --- | --- |
+| `task prediction acc` 高，但 `exact match / average response score` 一般 | routing 基本对了，但生成质量一般 |
+| `task prediction acc` 低，同时回答指标也低 | 问题首先出在 routing |
+| `instruction_and_query` 高、`query_only` 低 | 模型仍然强依赖 instruction prompt，query-only routing 不稳 |
+
 ## 7. 论文硬件与我当前机器的关系
 
 论文里写的是：

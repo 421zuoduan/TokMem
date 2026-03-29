@@ -2,8 +2,8 @@
 
 NUM_TASKS="${1:-700}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POOL_DIR="$ROOT_DIR/atomic/cached_splits/all-models-pool-500-10-50-seed42"
-SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/all-models-task${NUM_TASKS}-500-10-50-seed42"
+POOL_DIR="$ROOT_DIR/atomic/cached_splits/pool-500-10-50-seed42"
+SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/task${NUM_TASKS}-500-10-50-seed42"
 
 if [ ! -f "$POOL_DIR/task_pool_manifest.json" ]; then
     bash "$ROOT_DIR/scripts/build_atomic_all_models_task_pool.sh"

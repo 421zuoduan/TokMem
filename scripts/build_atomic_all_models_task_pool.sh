@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POOL_DIR="$ROOT_DIR/atomic/cached_splits/all-models-pool-500-10-50-seed42"
+POOL_DIR="$ROOT_DIR/atomic/cached_splits/pool-500-10-50-seed42"
 
 cd "$ROOT_DIR"
 

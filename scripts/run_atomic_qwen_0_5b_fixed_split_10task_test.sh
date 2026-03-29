@@ -2,8 +2,8 @@
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/scripts/$(basename "${BASH_SOURCE[0]}")"
-NUM_TASKS=700
-SPLIT_NAME="task700-500-10-50-seed42"
+NUM_TASKS=10
+SPLIT_NAME="task$NUM_TASKS-500-10-50-seed42"
 SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/$SPLIT_NAME"
 SPLIT_CACHE="$SPLIT_DIR/tokmem_atomic_fixed_split_maxlen1024.pt"
 
@@ -52,9 +52,9 @@ python -u main_in_domain_fixed_split.py \
     --batch_size 8 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
-    --lr 5e-3 \
-    --generation_routing full_vocab_generation \
-    --val_batch_size 16 \
-    --test_batch_size 256 \
-    --validate_every_n_steps 1000 \
+    --lr 5e-4 \
+    --generation_routing first_step_routing \
+    --val_batch_size 32 \
+    --test_batch_size 400 \
+    --validate_every_n_steps 100 \
     --seed 42
