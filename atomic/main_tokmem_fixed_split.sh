@@ -36,6 +36,7 @@ python -u "${SCRIPT_DIR}/main_in_domain_fixed_split.py" \
     --run_name "$(basename "${RUN_DIR}")" \
     --num_epochs 1 \
     --batch_size 4 \
+    --shuffle_train \
     --gradient_accumulation_steps 2 \
     --max_length 1280 \
     --val_batch_size 16 \

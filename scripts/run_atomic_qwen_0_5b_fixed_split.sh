@@ -50,11 +50,12 @@ python -u main_in_domain_fixed_split.py \
     --run_name "$RUN_NAME" \
     --num_epochs 1 \
     --batch_size 8 \
+    --shuffle_train \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --lr 5e-4 \
     --generation_routing full_vocab_generation \
-    --val_batch_size 32 \
+    --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \
     --seed 42

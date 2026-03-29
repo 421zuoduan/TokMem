@@ -825,7 +825,8 @@ def collate_fn(batch, tokenizer):
 def create_natural_instructions_dataloader(model, train_data=None, val_data=None, test_data=None,
                                          tokenizer=None, batch_size=4, max_length=512,
                                          val_batch_size=32, test_batch_size=32,
-                                         test_prompt_mode="both"):
+                                         test_prompt_mode="both",
+                                         shuffle_train=False):
     """Create DataLoaders for Natural Instructions
     
     Args:
@@ -838,6 +839,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         max_length: Maximum sequence length
         val_batch_size: Batch size for validation dataloader
         test_batch_size: Batch size for test dataloader
+        shuffle_train: Whether to shuffle the training dataloader
     
     Returns:
         train_dataloader: Training DataLoader
@@ -861,11 +863,11 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=shuffle_train,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )
         
-        print(f"Training dataset created: {len(train_dataset)} samples")
+        print(f"Training dataset created: {len(train_dataset)} samples (shuffle={shuffle_train})")
     else:
         print(f"Warning: No training data provided")
     

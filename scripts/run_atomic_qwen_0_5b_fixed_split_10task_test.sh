@@ -50,6 +50,7 @@ python -u main_in_domain_fixed_split.py \
     --run_name "$RUN_NAME" \
     --num_epochs 1 \
     --batch_size 8 \
+    --shuffle_train \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --lr 5e-4 \

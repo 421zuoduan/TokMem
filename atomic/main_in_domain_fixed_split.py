@@ -201,6 +201,11 @@ def main():
         default=1,
         help="Gradient accumulation steps",
     )
+    parser.add_argument(
+        "--shuffle_train",
+        action="store_true",
+        help="Shuffle the training dataloader",
+    )
     parser.add_argument("--train_size", type=int, default=None, help="Absolute number of training samples per task")
     parser.add_argument("--val_size", type=int, default=None, help="Absolute number of validation samples per task")
     parser.add_argument("--test_size", type=int, default=None, help="Absolute number of test samples per task")
@@ -272,6 +277,7 @@ def main():
     print(f"Test batch size: {args.test_batch_size}")
     print(f"Test prompt mode: {args.test_prompt_mode}")
     print(f"Generation routing mode: {args.generation_routing}")
+    print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Run directory: {run_context['run_dir']}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
@@ -368,6 +374,7 @@ def main():
             val_batch_size=args.val_batch_size,
             test_batch_size=args.test_batch_size,
             test_prompt_mode=args.test_prompt_mode,
+            shuffle_train=args.shuffle_train,
         )
     )
 

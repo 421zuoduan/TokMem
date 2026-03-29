@@ -124,6 +124,8 @@ def main():
     parser.add_argument('--load_task_tokens', type=str, default=None, 
                         help='Path to saved task tokens file (for evaluation/inference)')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--shuffle_train', action='store_true',
+                        help='Shuffle the training dataloader')
     # Absolute per-task sizes (override ratios when provided)
     parser.add_argument('--train_size', type=int, default=None, help='Absolute number of training samples per task (overrides train_ratio)')
     parser.add_argument('--val_size', type=int, default=None, help='Absolute number of validation samples per task (overrides val_ratio)')
@@ -176,6 +178,7 @@ def main():
     print(f"Test batch size: {args.test_batch_size}")
     print(f"Test prompt mode: {args.test_prompt_mode}")
     print(f"Generation routing mode: {args.generation_routing}")
+    print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
@@ -287,6 +290,7 @@ def main():
         val_batch_size=args.val_batch_size,
         test_batch_size=args.test_batch_size,
         test_prompt_mode=args.test_prompt_mode,
+        shuffle_train=args.shuffle_train,
     )
     
     # ---- Training ----
