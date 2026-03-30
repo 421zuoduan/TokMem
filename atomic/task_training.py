@@ -131,6 +131,29 @@ def clear_cuda_cache():
         torch.cuda.empty_cache()
 
 
+def compute_task_loss(shift_logits, shift_labels, reserved_token_ids):
+    """Compute task_loss as reserved-task-only routing cross entropy."""
+    import torch.nn.functional as F
+
+    valid_mask = shift_labels != -100
+    task_token_mask = torch.isin(shift_labels, reserved_token_ids)
+    routing_mask = task_token_mask & valid_mask
+    routing_count = int(routing_mask.sum().item())
+
+    if routing_count == 0:
+        return torch.tensor(0.0, device=shift_logits.device), routing_count
+
+    task_bank_logits = shift_logits[routing_mask].index_select(dim=-1, index=reserved_token_ids)
+    routing_labels = shift_labels[routing_mask]
+    task_targets = torch.searchsorted(reserved_token_ids, routing_labels)
+
+    if not torch.equal(reserved_token_ids.index_select(0, task_targets), routing_labels):
+        raise RuntimeError("Task routing labels must map to reserved token IDs.")
+
+    task_loss = F.cross_entropy(task_bank_logits, task_targets)
+    return task_loss, routing_count
+
+
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
@@ -159,11 +182,18 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
 
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
+            reserved_token_ids = model.get_reserved_token_tensor(shift_logits.device)
 
             # Check if there are any valid (non-ignored) labels
             valid_mask = shift_labels != ignore_index
             if valid_mask.sum() > 0:
-                loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index)
+                lm_loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index)
+                task_loss, _ = compute_task_loss(
+                    shift_logits,
+                    shift_labels,
+                    reserved_token_ids,
+                )
+                loss = lm_loss + task_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
                     valid_losses += 1
@@ -262,21 +292,19 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Flatten for cross entropy
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
+            reserved_token_ids = model.get_reserved_token_tensor(shift_logits.device)
             
             # Calculate overall loss (ignore -100 labels)
-            loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)            
+            lm_loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
             
-            # Calculate task token loss
-            task_mask = torch.isin(shift_labels, model.get_reserved_token_tensor(shift_labels.device))
-            valid_mask = shift_labels != -100
-            task_token_mask = task_mask & valid_mask
-            
-            if task_token_mask.sum() > 0:
-                task_loss = F.cross_entropy(shift_logits[task_token_mask], shift_labels[task_token_mask])
-                batch_task_count += task_token_mask.sum().item()
-            else:
-                task_loss = torch.tensor(0.0)  # No need for device since it's just used for .item()
-                batch_task_count += 0
+            # Calculate task token loss using routing logits over only the reserved task bank.
+            task_loss, current_task_count = compute_task_loss(
+                shift_logits,
+                shift_labels,
+                reserved_token_ids,
+            )
+            loss = lm_loss + task_loss
+            batch_task_count += current_task_count
 
             batch_loss += loss.item()
             batch_task_loss += task_loss.item()
@@ -292,9 +320,9 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             total_loss += loss.item()
             
             # Track task token loss for global statistics
-            if batch_task_count > 0:
+            if current_task_count > 0:
                 total_task_loss += task_loss.item()
-                task_token_count += batch_task_count
+                task_token_count += current_task_count
                 task_loss_batches += 1
             
             # Increment batch counter for logging
