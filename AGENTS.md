@@ -92,6 +92,12 @@ Successful experiment runs should be archived under `results/` in a dedicated ru
 
 Recent history uses short, direct messages such as `Update README.md`, `Update task_dataset.py`, and `docs: update ...`. Follow that style: concise, imperative, and scoped.
 
+When pushing this repository to the local bare remote, use:
+
+```bash
+git push server main
+```
+
 PRs should include:
 
 - a short summary of the change
