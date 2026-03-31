@@ -30,6 +30,19 @@ from task_training import (
     save_trained_model,
 )
 
+
+def parse_bool_arg(value):
+    """Parse a CLI boolean argument from explicit True/False style strings."""
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {'true', '1', 'yes', 'y'}:
+        return True
+    if normalized in {'false', '0', 'no', 'n'}:
+        return False
+    raise argparse.ArgumentTypeError('Expected a boolean value: True or False')
+
 def add_reserved_special_tokens(tokenizer, num_of_tasks, device="cuda"):
     """Add reserved special tokens to the tokenizer"""
     start_idx = len([t for t in tokenizer.get_vocab() if t.startswith("<|reserved_special_token_")])
@@ -133,6 +146,8 @@ def main():
     parser.add_argument('--few_shot', action='store_true', help='Use few-shot instructions')
     parser.add_argument('--validate_every_n_steps', type=int, default=1000, 
                         help='Validate every n steps')
+    parser.add_argument('--use_task_loss', type=parse_bool_arg, default=False, metavar='BOOL',
+                        help='Whether to include task-token cross entropy in the optimization objective')
     parser.add_argument('--run_root_dir', type=str, default=DEFAULT_RUNS_DIR,
                         help='Directory where atomic run folders will be created')
     parser.add_argument('--run_name', type=str, default=None,
@@ -179,6 +194,7 @@ def main():
     print(f"Test prompt mode: {args.test_prompt_mode}")
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
+    print(f"Use task loss: {args.use_task_loss}")
     print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
@@ -306,7 +322,8 @@ def main():
             device=args.device,
             timestamp=timestamp,
             save_dir=run_context["run_dir"],
-            validate_every_n_steps=args.validate_every_n_steps
+            validate_every_n_steps=args.validate_every_n_steps,
+            use_task_loss=args.use_task_loss,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(

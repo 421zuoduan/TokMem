@@ -29,6 +29,7 @@ python main_in_domain.py \
     --gradient_accumulation_steps 1 \
     --max_length 1280 \
     --generation_routing full_vocab_generation \
+    --use_task_loss False \
     --val_batch_size 16 \
     --test_batch_size 64 \
     --validate_every_n_steps 1000 \

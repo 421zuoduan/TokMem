@@ -132,29 +132,22 @@ def clear_cuda_cache():
 
 
 def compute_task_loss(shift_logits, shift_labels, reserved_token_ids):
-    """Compute task_loss as reserved-task-only routing cross entropy."""
+    """Compute task_loss as full-vocab cross entropy on task-token positions."""
     import torch.nn.functional as F
 
     valid_mask = shift_labels != -100
     task_token_mask = torch.isin(shift_labels, reserved_token_ids)
-    routing_mask = task_token_mask & valid_mask
-    routing_count = int(routing_mask.sum().item())
+    task_loss_mask = task_token_mask & valid_mask
+    routing_count = int(task_loss_mask.sum().item())
 
     if routing_count == 0:
         return torch.tensor(0.0, device=shift_logits.device), routing_count
 
-    task_bank_logits = shift_logits[routing_mask].index_select(dim=-1, index=reserved_token_ids)
-    routing_labels = shift_labels[routing_mask]
-    task_targets = torch.searchsorted(reserved_token_ids, routing_labels)
-
-    if not torch.equal(reserved_token_ids.index_select(0, task_targets), routing_labels):
-        raise RuntimeError("Task routing labels must map to reserved token IDs.")
-
-    task_loss = F.cross_entropy(task_bank_logits, task_targets)
+    task_loss = F.cross_entropy(shift_logits[task_loss_mask], shift_labels[task_loss_mask])
     return task_loss, routing_count
 
 
-def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
+def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
     """
@@ -188,11 +181,14 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
             valid_mask = shift_labels != ignore_index
             if valid_mask.sum() > 0:
                 lm_loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index)
-                task_loss, _ = compute_task_loss(
-                    shift_logits,
-                    shift_labels,
-                    reserved_token_ids,
-                )
+                if use_task_loss:
+                    task_loss, _ = compute_task_loss(
+                        shift_logits,
+                        shift_labels,
+                        reserved_token_ids,
+                    )
+                else:
+                    task_loss = torch.tensor(0.0, device=shift_logits.device)
                 loss = lm_loss + task_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
@@ -213,7 +209,8 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100):
 def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01, 
                            gradient_accumulation_steps=1, device="cuda", timestamp=None,
                            save_dir="saved_models",
-                           validate_every_n_steps=1000):
+                           validate_every_n_steps=1000,
+                           use_task_loss=False):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
@@ -242,6 +239,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print(f"Total steps: {total_steps}")
     print(f"Learning rate: {lr} (with linear schedule + warmup)")
     print(f"Warmup steps: {total_steps // 10}")
+    print(f"Use task loss: {use_task_loss}")
     if model.decouple_embeddings:
         print(f"Training mode: Decoupled embeddings")
         print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)} (input: {model.trainable_task_input_embeddings.numel()}, output: {model.trainable_task_output_embeddings.numel()})")
@@ -254,6 +252,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     # Log training configuration
     training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
+    training_logger.info(f"Task loss enabled: {use_task_loss}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
     
@@ -297,12 +296,15 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Calculate overall loss (ignore -100 labels)
             lm_loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
             
-            # Calculate task token loss using routing logits over only the reserved task bank.
-            task_loss, current_task_count = compute_task_loss(
-                shift_logits,
-                shift_labels,
-                reserved_token_ids,
-            )
+            if use_task_loss:
+                task_loss, current_task_count = compute_task_loss(
+                    shift_logits,
+                    shift_labels,
+                    reserved_token_ids,
+                )
+            else:
+                task_loss = torch.tensor(0.0, device=shift_logits.device)
+                current_task_count = 0
             loss = lm_loss + task_loss
             batch_task_count += current_task_count
 
@@ -384,7 +386,13 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Step-based validation
             if val_dataloader is not None and validate_every_n_steps is not None and validate_every_n_steps > 0:
                 if step % validate_every_n_steps == 0:
-                    avg_val_loss = run_validation(model, val_dataloader, device=device, ignore_index=-100)
+                    avg_val_loss = run_validation(
+                        model,
+                        val_dataloader,
+                        device=device,
+                        ignore_index=-100,
+                        use_task_loss=use_task_loss,
+                    )
                     clear_cuda_cache()
                     print(f"Step {step} - Validation Loss: {avg_val_loss:.4f}")
                     training_logger.info(f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f}")
@@ -402,7 +410,13 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
 
         # After each epoch, run validation to compute average validation loss
         if val_dataloader is not None:
-            avg_val_loss = run_validation(model, val_dataloader, device=device, ignore_index=-100)
+            avg_val_loss = run_validation(
+                model,
+                val_dataloader,
+                device=device,
+                ignore_index=-100,
+                use_task_loss=use_task_loss,
+            )
             clear_cuda_cache()
             print(f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}")
             training_logger.info(f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f}")

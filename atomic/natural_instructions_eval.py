@@ -11,6 +11,8 @@ try:
     from rouge_score import rouge_scorer
     from transformers import AutoTokenizer
     ROUGE_AVAILABLE = True
+    xlingual_tokenizer = None
+    xlingual_rouge_scorer = None
     
     class GPTTokenizer:
         def __init__(self):
@@ -24,15 +26,21 @@ try:
             tokens = [t.lstrip("Ġ") for t in tokens]
             return tokens
 
+    def get_xlingual_rouge_scorer():
+        global xlingual_tokenizer, xlingual_rouge_scorer
+        if xlingual_rouge_scorer is None:
+            xlingual_tokenizer = GPTTokenizer()
+            xlingual_rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], tokenizer=xlingual_tokenizer)
+        return xlingual_rouge_scorer
+
     default_rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-    xlingual_tokenizer = GPTTokenizer()
-    xlingual_rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], tokenizer=xlingual_tokenizer) 
     
 except ImportError:
     print("Warning: rouge-score not available. Install with: pip install rouge-score")
     print("         Falling back to exact match only evaluation")
     ROUGE_AVAILABLE = False
     default_rouge_scorer = None
+    xlingual_tokenizer = None
     xlingual_rouge_scorer = None
 
 
@@ -64,10 +72,9 @@ def rouge_score(prediction: str, ground_truth: str, xlingual: bool = False) -> f
         # Fallback to normalized exact match
         return 1.0 if exact_match(prediction, ground_truth, xlingual) else 0.0
     
-    if xlingual and xlingual_rouge_scorer:
-        scorer = xlingual_rouge_scorer
-    else:
-        scorer = default_rouge_scorer
+    scorer = default_rouge_scorer
+    if xlingual:
+        scorer = get_xlingual_rouge_scorer()
     
     try:
         scores = scorer.score(prediction=prediction, target=ground_truth)

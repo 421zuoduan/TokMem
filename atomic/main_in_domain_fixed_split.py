@@ -30,6 +30,7 @@ from task_training import (
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_MODEL_NAME = os.path.join(SCRIPT_DIR, "..", "models", "Qwen2.5-0.5B-Instruct")
 
 
 def add_reserved_special_tokens(tokenizer, num_of_tasks, device="cuda"):
@@ -49,6 +50,19 @@ def add_reserved_special_tokens(tokenizer, num_of_tasks, device="cuda"):
     )
 
     return tokenizer, True
+
+
+def parse_bool_arg(value):
+    """Parse a CLI boolean argument from explicit True/False style strings."""
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError("Expected a boolean value: True or False")
 
 
 def set_random_seed(seed):
@@ -147,13 +161,13 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="meta-llama/Llama-3.2-1B-Instruct",
+        default=DEFAULT_MODEL_NAME,
         help="HuggingFace model name or local path",
     )
-    parser.add_argument("--num_tasks", type=int, default=5, help="Number of tasks to sample")
-    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--num_tasks", type=int, default=700, help="Number of tasks to sample")
+    parser.add_argument("--batch_size", type=int, default=8, help="Training batch size")
     parser.add_argument("--val_batch_size", type=int, default=16, help="Validation batch size")
-    parser.add_argument("--test_batch_size", type=int, default=64, help="Test batch size")
+    parser.add_argument("--test_batch_size", type=int, default=400, help="Test batch size")
     parser.add_argument(
         "--test_prompt_mode",
         type=str,
@@ -162,12 +176,12 @@ def main():
         help="Which prompt format(s) to use during test-time evaluation",
     )
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate")
+    parser.add_argument("--num_epochs", type=int, default=1, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument(
         "--generation_routing",
         type=str,
-        default="first_step_routing",
+        default="full_vocab_generation",
         choices=["full_vocab_generation", "first_step_routing"],
         help="How to handle the first generated token during inference",
     )
@@ -175,7 +189,7 @@ def main():
     parser.add_argument(
         "--device_map",
         type=str,
-        default=None,
+        default="balanced",
         choices=[None, "auto", "balanced", "balanced_low_0", "sequential"],
         help="Optional Hugging Face device_map for sharding the frozen backbone across multiple GPUs",
     )
@@ -203,18 +217,26 @@ def main():
     )
     parser.add_argument(
         "--shuffle_train",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Shuffle the training dataloader",
     )
-    parser.add_argument("--train_size", type=int, default=None, help="Absolute number of training samples per task")
-    parser.add_argument("--val_size", type=int, default=None, help="Absolute number of validation samples per task")
-    parser.add_argument("--test_size", type=int, default=None, help="Absolute number of test samples per task")
+    parser.add_argument("--train_size", type=int, default=500, help="Absolute number of training samples per task")
+    parser.add_argument("--val_size", type=int, default=10, help="Absolute number of validation samples per task")
+    parser.add_argument("--test_size", type=int, default=50, help="Absolute number of test samples per task")
     parser.add_argument("--few_shot", action="store_true", help="Use few-shot instructions")
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
         default=1000,
         help="Validate every n steps",
+    )
+    parser.add_argument(
+        "--use_task_loss",
+        type=parse_bool_arg,
+        default=False,
+        metavar="BOOL",
+        help="Whether to include task-token cross entropy in the optimization objective",
     )
     parser.add_argument(
         "--split_cache_path",
@@ -278,6 +300,7 @@ def main():
     print(f"Test prompt mode: {args.test_prompt_mode}")
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
+    print(f"Use task loss: {args.use_task_loss}")
     print(f"Run directory: {run_context['run_dir']}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
@@ -392,6 +415,7 @@ def main():
             timestamp=timestamp,
             save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps,
+            use_task_loss=args.use_task_loss,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(
