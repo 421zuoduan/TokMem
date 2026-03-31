@@ -56,8 +56,9 @@ python -u main_in_domain_fixed_split.py \
     --lr 5e-4 \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
+    --task_loss_weight 0.0 \
     --use_sep_loss True \
-    --sep_loss_weight 0.1 \
+    --sep_loss_weight 0.01 \
     --sep_loss_tau 0.2 \
     --val_batch_size 16 \
     --test_batch_size 400 \

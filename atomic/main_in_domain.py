@@ -148,6 +148,8 @@ def main():
                         help='Validate every n steps')
     parser.add_argument('--use_task_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include task-token cross entropy in the optimization objective')
+    parser.add_argument('--task_loss_weight', type=float, default=0.0,
+                        help='Weight for the task-token routing cross entropy loss')
     parser.add_argument('--run_root_dir', type=str, default=DEFAULT_RUNS_DIR,
                         help='Directory where atomic run folders will be created')
     parser.add_argument('--run_name', type=str, default=None,
@@ -195,6 +197,7 @@ def main():
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
+    print(f"Task loss weight: {args.task_loss_weight}")
     print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
@@ -324,6 +327,7 @@ def main():
             save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps,
             use_task_loss=args.use_task_loss,
+            task_loss_weight=args.task_loss_weight,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(
@@ -336,6 +340,7 @@ def main():
             os.path.join(run_context["run_dir"], "train_results.json"),
             {
                 "avg_total_loss": train_results["avg_total_loss"],
+                "avg_task_loss": train_results["avg_task_loss"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
                 "final_model_path": final_model_path,

@@ -239,6 +239,12 @@ def main():
         help="Whether to include task-token cross entropy in the optimization objective",
     )
     parser.add_argument(
+        "--task_loss_weight",
+        type=float,
+        default=0.0,
+        help="Weight for the task-token routing cross entropy loss",
+    )
+    parser.add_argument(
         "--use_sep_loss",
         type=parse_bool_arg,
         default=False,
@@ -320,6 +326,7 @@ def main():
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
+    print(f"Task loss weight: {args.task_loss_weight}")
     print(f"Use separation loss: {args.use_sep_loss}")
     print(f"Separation loss weight: {args.sep_loss_weight}")
     print(f"Separation loss tau: {args.sep_loss_tau}")
@@ -438,6 +445,7 @@ def main():
             save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps,
             use_task_loss=args.use_task_loss,
+            task_loss_weight=args.task_loss_weight,
             use_sep_loss=args.use_sep_loss,
             sep_loss_weight=args.sep_loss_weight,
             sep_loss_tau=args.sep_loss_tau,
@@ -453,6 +461,7 @@ def main():
             os.path.join(run_context["run_dir"], "train_results.json"),
             {
                 "avg_total_loss": train_results["avg_total_loss"],
+                "avg_task_loss": train_results["avg_task_loss"],
                 "avg_sep_loss": train_results["avg_sep_loss"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],

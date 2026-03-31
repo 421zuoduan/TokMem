@@ -50,18 +50,25 @@
 
 ## 2. `task_loss` 现在是否参与训练
 
-现在会直接参与优化。
+现在是否参与优化，取决于两个开关：
 
-训练时当前目标是：
+- `use_task_loss`
+- `task_loss_weight`
+
+训练和验证当前统一使用：
 
 ```python
-loss = lm_loss + task_loss
+loss = lm_loss + task_loss_weight * task_loss + sep_loss_weight * sep_loss
 ```
 
-验证时也按同样口径计算，因此：
+但只有对应开关打开时，相关项才真正生效。
 
-- `task_loss` 不再只是监控项
-- 它已经是实际反传的 routing loss
+所以当前默认配置下：
+
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+
+这意味着 `task_loss` 默认仍然只是被记录，不参与总 loss。
 
 ## 3. 这次实现上的关键保证
 
@@ -107,22 +114,159 @@ loss = lm_loss + task_loss
 
 不是把 `the`、`,`、`yes` 之类普通 token 也放进分母。
 
-## 5. 当前还没做的事
+## 5. `task_loss_weight` 现状
 
-虽然 `task_loss` 已经改成 routing loss 并接入训练，但当前还没有恢复旧实验里那种单独的：
+`task_loss_weight` 已经重新接回代码与脚本。
 
-- `task_loss_weight`
-
-也就是说，当前默认是：
+当前默认值是：
 
 ```python
-loss = lm_loss + task_loss
+task_loss_weight = 0.0
 ```
 
-而不是：
+所以即使显式传了：
+
+```bash
+--use_task_loss True
+```
+
+只要没有把 `task_loss_weight` 调大，`task_loss` 仍然不会对总 loss 产生实际影响。
+
+一句话记忆：
+
+- `use_task_loss` 决定“允不允许加”
+- `task_loss_weight` 决定“实际加多少”
+
+## 6. `50-task / Qwen2.5-0.5B` 严格对齐 A/B 结果
+
+这组对比对应两次已经归档到 `results/` 的实验：
+
+- 无 `sep loss`：
+  - [results/atomic_qwen2.5_0.5b_50tasks_20260331_131544](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_50tasks_20260331_131544)
+- 有 `sep loss`：
+  - [results/atomic_qwen2.5_0.5b_50tasks_sep_loss_20260331_134233](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_50tasks_sep_loss_20260331_134233)
+
+### 6.1 这次为什么算严格对齐
+
+两边统一为：
+
+- 同一个模型：`Qwen2.5-0.5B-Instruct`
+- 同一个 split cache：`task50-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 500`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `seed = 42`
+
+唯一主要区别是：
+
+- baseline：`use_sep_loss = False`
+- 对照：`use_sep_loss = True`, `sep_loss_weight = 0.1`, `sep_loss_tau = 0.2`
+
+### 6.2 结果对比
+
+| 指标 | 无 `sep loss` | 有 `sep loss` |
+|---|---:|---:|
+| Avg train loss | 1.2028 | 1.2122 |
+| Best val loss | 0.8644 | 0.8593 |
+| I+Q Task Acc | 0.9940 | 0.9956 |
+| I+Q Exact Match | 0.3784 | 0.3768 |
+| I+Q Avg Response Score | 0.5328 | 0.5286 |
+| Query-only Task Acc | 0.1088 | 0.1084 |
+| Query-only Exact Match | 0.0348 | 0.0376 |
+| Query-only Avg Response Score | 0.0965 | 0.1004 |
+
+### 6.3 当前判断
+
+这组严格 A/B 的结论可以记成：
+
+- `sep loss` 会进一步压低 `best val loss`
+- `sep loss` 会略微提高 `instruction_and_query` routing
+- 但它没有带来稳定、明确的整体回答质量优势
+- `query_only` 的 routing 基本没改善
+
+一句话总结：
+
+- `sep loss` 更像是在优化 routing/regularization
+- 不是当前这套 `50-task / 0.5B` 配置下的明显综合最优解
+
+## 7. `sep_loss_tau` 的方向别记反
+
+当前实现是：
 
 ```python
-loss = lm_loss + w * task_loss
+penalty = relu(cosine_similarity - tau) ** 2
 ```
 
-后面如果要继续对齐论文或做 ablation，可以再单独把这个权重参数接回来。
+所以：
+
+- `tau` 调低：更严格
+- `tau` 调高：更宽松
+
+直觉上：
+
+- `tau = 0.1` 比 `0.2` 更严格
+- `tau = 0.3` 比 `0.2` 更宽松
+
+如果只是想先减弱 `sep loss` 对主任务的干扰，优先先降 `sep_loss_weight`，不要一上来同时改 `weight` 和 `tau`。
+
+## 8. 最新实验结果：`sep_loss_weight = 0.01`
+
+最新一轮实验已经归档到：
+
+- [results/atomic_qwen2.5_0.5b_50tasks_sep_loss_20260331_142411](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_50tasks_sep_loss_20260331_142411)
+
+它和前一轮 `sep_loss_weight = 0.1` 的实验保持同样的：
+
+- `50 tasks`
+- 同一份 split cache：`task50-500-10-50-seed42`
+- `batch_size = 8`
+- `lr = 5e-4`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 500`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `sep_loss_tau = 0.2`
+
+唯一主要区别是：
+
+- 旧：`sep_loss_weight = 0.1`
+- 新：`sep_loss_weight = 0.01`
+
+### 8.1 和 `sep_loss_weight = 0.1` 的直接对比
+
+| 指标 | `sep=0.1` | `sep=0.01` |
+|---|---:|---:|
+| Avg train loss | 1.2122 | 1.2258 |
+| Best val loss | 0.8593 | 0.8775 |
+| I+Q Task Acc | 0.9956 | 0.9960 |
+| I+Q Exact Match | 0.3768 | 0.3560 |
+| I+Q Avg Response Score | 0.5286 | 0.5246 |
+| Query-only Task Acc | 0.1084 | 0.1364 |
+| Query-only Exact Match | 0.0376 | 0.0404 |
+| Query-only Avg Response Score | 0.1004 | 0.0941 |
+
+### 8.2 当前判断
+
+这次下调到 `0.01` 后：
+
+- `query_only` routing 确实升了
+- 但 `best val loss` 变差了
+- `instruction_and_query` 的 `Exact Match` 和 `Average Response Score` 都明显回落
+
+所以目前更像是：
+
+- `sep_loss_weight = 0.01` 在强化 `query_only` routing 方面有一点信号
+- 但综合表现并没有比 `0.1` 更稳，也没有比无 `sep loss` 更优
+
+一句话记忆：
+
+- `0.01` 不是当前这组 `50-task / 0.5B` 的明显更优点
+- 如果还要继续试，下一步更值得考虑的是小权重 `task_loss_weight`

@@ -172,7 +172,7 @@ def get_separation_loss_embeddings(model):
 
 
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False,
-                   use_sep_loss=False, sep_loss_weight=0.1, sep_loss_tau=0.2):
+                   task_loss_weight=0.0, use_sep_loss=False, sep_loss_weight=0.1, sep_loss_tau=0.2):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
     """
@@ -221,7 +221,7 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_
                     )
                 else:
                     sep_loss = torch.tensor(0.0, device=shift_logits.device)
-                loss = lm_loss + task_loss + sep_loss_weight * sep_loss
+                loss = lm_loss + task_loss_weight * task_loss + sep_loss_weight * sep_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
                     valid_losses += 1
@@ -243,6 +243,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                            save_dir="saved_models",
                            validate_every_n_steps=1000,
                            use_task_loss=False,
+                           task_loss_weight=0.0,
                            use_sep_loss=False,
                            sep_loss_weight=0.1,
                            sep_loss_tau=0.2):
@@ -275,6 +276,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print(f"Learning rate: {lr} (with linear schedule + warmup)")
     print(f"Warmup steps: {total_steps // 10}")
     print(f"Use task loss: {use_task_loss}")
+    print(f"Task loss weight: {task_loss_weight}")
     print(f"Use separation loss: {use_sep_loss}")
     print(f"Separation loss weight: {sep_loss_weight}")
     print(f"Separation loss tau: {sep_loss_tau}")
@@ -290,7 +292,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     # Log training configuration
     training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
-    training_logger.info(f"Task loss enabled: {use_task_loss}")
+    training_logger.info(f"Task loss enabled: {use_task_loss}, Weight: {task_loss_weight}")
     training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
@@ -349,7 +351,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
 
             loss = lm_loss
             if use_task_loss:
-                loss = loss + task_loss
+                loss = loss + task_loss_weight * task_loss
             if use_sep_loss:
                 loss = loss + sep_loss_weight * sep_loss
             batch_task_count += current_task_count
@@ -428,6 +430,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                         device=device,
                         ignore_index=-100,
                         use_task_loss=use_task_loss,
+                        task_loss_weight=task_loss_weight,
                         use_sep_loss=use_sep_loss,
                         sep_loss_weight=sep_loss_weight,
                         sep_loss_tau=sep_loss_tau,
@@ -455,6 +458,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 device=device,
                 ignore_index=-100,
                 use_task_loss=use_task_loss,
+                task_loss_weight=task_loss_weight,
                 use_sep_loss=use_sep_loss,
                 sep_loss_weight=sep_loss_weight,
                 sep_loss_tau=sep_loss_tau,
@@ -512,6 +516,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     # Return training results including best model state
     return {
         'avg_total_loss': avg_total_loss,
+        'avg_task_loss': avg_task_loss,
         'avg_sep_loss': avg_sep_loss,
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
