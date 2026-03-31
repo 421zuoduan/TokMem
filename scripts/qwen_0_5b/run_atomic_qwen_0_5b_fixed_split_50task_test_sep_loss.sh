@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_PATH="$ROOT_DIR/scripts/$(basename "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 NUM_TASKS=10
 SPLIT_NAME="task$NUM_TASKS-500-10-50-seed42"
 SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/$SPLIT_NAME"
 SPLIT_CACHE="$SPLIT_DIR/tokmem_atomic_fixed_split_maxlen1024.pt"
 
 if [ ! -f "$SPLIT_CACHE" ]; then
-    bash "$ROOT_DIR/scripts/sample_atomic_all_models_fixed_split.sh" "$NUM_TASKS"
+    bash "$ROOT_DIR/scripts/all_models/sample_atomic_all_models_fixed_split.sh" "$NUM_TASKS"
 fi
 
 cd "$ROOT_DIR/atomic"
 
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_$RUN_ID"
+RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_sep_loss_$RUN_ID"
 RUN_DIR="$ROOT_DIR/atomic/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"
@@ -56,7 +56,10 @@ python -u main_in_domain_fixed_split.py \
     --lr 5e-4 \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
-    --val_batch_size 32 \
+    --use_sep_loss True \
+    --sep_loss_weight 0.1 \
+    --sep_loss_tau 0.2 \
+    --val_batch_size 16 \
     --test_batch_size 400 \
-    --validate_every_n_steps 100 \
+    --validate_every_n_steps 500 \
     --seed 42

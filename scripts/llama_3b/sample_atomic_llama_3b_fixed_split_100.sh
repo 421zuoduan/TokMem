@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POOL_DIR="$ROOT_DIR/atomic/cached_splits/llama-3.2-3b-pool-500-10-50-seed42"
 SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/llama-3.2-3b-task100-500-10-50-seed42"
 
 if [ ! -f "$POOL_DIR/task_pool_manifest.json" ]; then
-    bash "$ROOT_DIR/scripts/build_atomic_llama_3b_task_pool.sh"
+    bash "$ROOT_DIR/scripts/llama_3b/build_atomic_llama_3b_task_pool.sh"
 fi
 
 cd "$ROOT_DIR"

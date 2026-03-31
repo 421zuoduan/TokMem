@@ -147,7 +147,32 @@ def compute_task_loss(shift_logits, shift_labels, reserved_token_ids):
     return task_loss, routing_count
 
 
-def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False):
+def compute_separation_loss(task_embeddings, tau=0.2):
+    """Penalize task embeddings whose cosine similarity exceeds the margin tau."""
+    if task_embeddings is None:
+        raise ValueError("task_embeddings must be provided for separation loss")
+
+    num_embeddings = task_embeddings.shape[0]
+    if num_embeddings <= 1:
+        return torch.zeros((), device=task_embeddings.device, dtype=task_embeddings.dtype)
+
+    normalized_embeddings = torch.nn.functional.normalize(task_embeddings, p=2, dim=-1)
+    cosine_matrix = torch.matmul(normalized_embeddings, normalized_embeddings.transpose(0, 1))
+    penalty_matrix = torch.relu(cosine_matrix - tau).pow(2)
+    penalty_matrix.fill_diagonal_(0)
+    normalizer = num_embeddings * (num_embeddings - 1)
+    return penalty_matrix.sum() / normalizer
+
+
+def get_separation_loss_embeddings(model):
+    """Return the task embeddings to regularize for separation loss."""
+    if getattr(model, "decouple_embeddings", False):
+        return model.trainable_task_output_embeddings
+    return model.trainable_task_embeddings
+
+
+def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False,
+                   use_sep_loss=False, sep_loss_weight=0.1, sep_loss_tau=0.2):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
     """
@@ -189,7 +214,14 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_
                     )
                 else:
                     task_loss = torch.tensor(0.0, device=shift_logits.device)
-                loss = lm_loss + task_loss
+                if use_sep_loss:
+                    sep_loss = compute_separation_loss(
+                        get_separation_loss_embeddings(model),
+                        tau=sep_loss_tau,
+                    )
+                else:
+                    sep_loss = torch.tensor(0.0, device=shift_logits.device)
+                loss = lm_loss + task_loss + sep_loss_weight * sep_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
                     valid_losses += 1
@@ -210,7 +242,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                            gradient_accumulation_steps=1, device="cuda", timestamp=None,
                            save_dir="saved_models",
                            validate_every_n_steps=1000,
-                           use_task_loss=False):
+                           use_task_loss=False,
+                           use_sep_loss=False,
+                           sep_loss_weight=0.1,
+                           sep_loss_tau=0.2):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
@@ -240,6 +275,9 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print(f"Learning rate: {lr} (with linear schedule + warmup)")
     print(f"Warmup steps: {total_steps // 10}")
     print(f"Use task loss: {use_task_loss}")
+    print(f"Use separation loss: {use_sep_loss}")
+    print(f"Separation loss weight: {sep_loss_weight}")
+    print(f"Separation loss tau: {sep_loss_tau}")
     if model.decouple_embeddings:
         print(f"Training mode: Decoupled embeddings")
         print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)} (input: {model.trainable_task_input_embeddings.numel()}, output: {model.trainable_task_output_embeddings.numel()})")
@@ -253,17 +291,20 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
     training_logger.info(f"Task loss enabled: {use_task_loss}")
+    training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
     
     total_loss = 0
     total_task_loss = 0
+    total_sep_loss = 0
     task_token_count = 0
     task_loss_batches = 0  # Count of batches that had task tokens
     step = 0
 
     batch_loss = 0
     batch_task_loss = 0
+    batch_sep_loss = 0
     batch_task_count = 0
     batches_since_log = 0
     
@@ -296,20 +337,26 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Calculate overall loss (ignore -100 labels)
             lm_loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
             
+            task_loss, current_task_count = compute_task_loss(
+                shift_logits,
+                shift_labels,
+                reserved_token_ids,
+            )
+            sep_loss = compute_separation_loss(
+                get_separation_loss_embeddings(model),
+                tau=sep_loss_tau,
+            )
+
+            loss = lm_loss
             if use_task_loss:
-                task_loss, current_task_count = compute_task_loss(
-                    shift_logits,
-                    shift_labels,
-                    reserved_token_ids,
-                )
-            else:
-                task_loss = torch.tensor(0.0, device=shift_logits.device)
-                current_task_count = 0
-            loss = lm_loss + task_loss
+                loss = loss + task_loss
+            if use_sep_loss:
+                loss = loss + sep_loss_weight * sep_loss
             batch_task_count += current_task_count
 
             batch_loss += loss.item()
             batch_task_loss += task_loss.item()
+            batch_sep_loss += sep_loss.item()
             
             # Backward pass
             loss.backward()
@@ -320,11 +367,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 scheduler.step()
             
             total_loss += loss.item()
-            
-            # Track task token loss for global statistics
+            total_task_loss += task_loss.item()
+            total_sep_loss += sep_loss.item()
+            task_token_count += current_task_count
             if current_task_count > 0:
-                total_task_loss += task_loss.item()
-                task_token_count += current_task_count
                 task_loss_batches += 1
             
             # Increment batch counter for logging
@@ -337,6 +383,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 # Calculate averages over the accumulated batches (100 batches or remaining)
                 avg_loss = batch_loss / batches_since_log
                 avg_task_loss = batch_task_loss / batches_since_log if batches_since_log > 0 else 0.0
+                avg_sep_loss = batch_sep_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_task_count = batch_task_count / batches_since_log
                 
                 completed_batches = epoch * len(dataloader) + batch_idx + 1
@@ -352,32 +399,21 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                     f"{_format_duration(total_estimated_seconds)}"
                 )
 
-                # Show averages over the logging window
-                if batch_task_count > 0:
-                    print(
-                        f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
-                        f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, "
-                        f"Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}, {time_summary}"
-                    )
-                    training_logger.info(
-                        f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
-                        f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} "
-                        f"AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f} {time_summary}"
-                    )
-                else:
-                    print(
-                        f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
-                        f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: N/A (no task tokens in window), "
-                        f"LR: {current_lr:.6f}, {time_summary}"
-                    )
-                    training_logger.info(
-                        f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
-                        f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:N/A LR:{current_lr:.6f} {time_summary}"
-                    )
+                print(
+                    f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
+                    f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, Avg Sep Loss: {avg_sep_loss:.4f}, "
+                    f"Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}, {time_summary}"
+                )
+                training_logger.info(
+                    f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
+                    f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgSepLoss:{avg_sep_loss:.4f} "
+                    f"AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f} {time_summary}"
+                )
 
                 # Reset accumulators for next logging window
                 batch_loss = 0
                 batch_task_loss = 0
+                batch_sep_loss = 0
                 batch_task_count = 0
                 batches_since_log = 0
             
@@ -392,6 +428,9 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                         device=device,
                         ignore_index=-100,
                         use_task_loss=use_task_loss,
+                        use_sep_loss=use_sep_loss,
+                        sep_loss_weight=sep_loss_weight,
+                        sep_loss_tau=sep_loss_tau,
                     )
                     clear_cuda_cache()
                     print(f"Step {step} - Validation Loss: {avg_val_loss:.4f}")
@@ -416,6 +455,9 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 device=device,
                 ignore_index=-100,
                 use_task_loss=use_task_loss,
+                use_sep_loss=use_sep_loss,
+                sep_loss_weight=sep_loss_weight,
+                sep_loss_tau=sep_loss_tau,
             )
             clear_cuda_cache()
             print(f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}")
@@ -433,24 +475,32 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
     
     avg_total_loss = total_loss / (len(dataloader) * num_epochs)
+    avg_sep_loss = total_sep_loss / (len(dataloader) * num_epochs)
     
+    avg_task_loss = total_task_loss / (len(dataloader) * num_epochs)
+
     if task_token_count > 0:
-        avg_task_loss = total_task_loss / task_loss_batches  # Average task loss across batches that had task tokens
         print(f"\nTraining completed!")
         print(f"Average overall loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
+        print(f"Average separation loss: {avg_sep_loss:.4f}")
         print(f"Total task tokens processed: {task_token_count}")
         print(f"Batches with task tokens: {task_loss_batches}/{step}")
         print(f"Task token accuracy insight: Lower task loss indicates better task selection performance")
         
         # Log training completion
-        training_logger.info(f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} TaskTokens:{task_token_count} TaskBatches:{task_loss_batches}/{step}")
+        training_logger.info(f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} SepLoss:{avg_sep_loss:.4f} TaskTokens:{task_token_count} TaskBatches:{task_loss_batches}/{step}")
     else:
         print(f"\nTraining completed! Average loss: {avg_total_loss:.4f}")
+        print(f"Average task token loss: {avg_task_loss:.4f}")
+        print(f"Average separation loss: {avg_sep_loss:.4f}")
         print("Warning: No task tokens found in training data!")
         
         # Log training completion without task tokens
-        training_logger.info(f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} WARNING:NoTaskTokens")
+        training_logger.info(
+            f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} "
+            f"SepLoss:{avg_sep_loss:.4f} WARNING:NoTaskTokens"
+        )
 
     # Report best validation loss if validation was performed
     if val_dataloader is not None and best_val_loss < float('inf'):
@@ -462,6 +512,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     # Return training results including best model state
     return {
         'avg_total_loss': avg_total_loss,
+        'avg_sep_loss': avg_sep_loss,
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
         'best_model_path': best_model_path

@@ -115,7 +115,7 @@ def validate_cached_split_metadata(cache_path, expected_metadata, cached_metadat
             )
         lines.append(
             "Change --split_cache_path or rebuild/resample it with the corresponding "
-            "scripts/build_atomic_*_task_pool.sh and scripts/sample_atomic_*_fixed_split*.sh scripts."
+            "scripts/*/build_atomic_*_task_pool.sh and scripts/*/sample_atomic_*_fixed_split*.sh scripts."
         )
         raise ValueError("\n".join(lines))
 
@@ -126,7 +126,7 @@ def load_split_cache(args):
     if not os.path.exists(cache_path):
         raise FileNotFoundError(
             f"Split cache not found: {cache_path}\n"
-            "Generate it first with the corresponding scripts/sample_atomic_*_fixed_split*.sh "
+            "Generate it first with the corresponding scripts/*/sample_atomic_*_fixed_split*.sh "
             "script or point --split_cache_path to an existing .pt file."
         )
 
@@ -239,6 +239,25 @@ def main():
         help="Whether to include task-token cross entropy in the optimization objective",
     )
     parser.add_argument(
+        "--use_sep_loss",
+        type=parse_bool_arg,
+        default=False,
+        metavar="BOOL",
+        help="Whether to include separation loss between task embeddings in the optimization objective",
+    )
+    parser.add_argument(
+        "--sep_loss_weight",
+        type=float,
+        default=0.1,
+        help="Weight for the memory-token separation loss",
+    )
+    parser.add_argument(
+        "--sep_loss_tau",
+        type=float,
+        default=0.2,
+        help="Cosine-similarity margin for the memory-token separation loss",
+    )
+    parser.add_argument(
         "--split_cache_path",
         type=str,
         required=True,
@@ -301,6 +320,9 @@ def main():
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
+    print(f"Use separation loss: {args.use_sep_loss}")
+    print(f"Separation loss weight: {args.sep_loss_weight}")
+    print(f"Separation loss tau: {args.sep_loss_tau}")
     print(f"Run directory: {run_context['run_dir']}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
@@ -416,6 +438,9 @@ def main():
             save_dir=run_context["run_dir"],
             validate_every_n_steps=args.validate_every_n_steps,
             use_task_loss=args.use_task_loss,
+            use_sep_loss=args.use_sep_loss,
+            sep_loss_weight=args.sep_loss_weight,
+            sep_loss_tau=args.sep_loss_tau,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(
@@ -428,6 +453,7 @@ def main():
             os.path.join(run_context["run_dir"], "train_results.json"),
             {
                 "avg_total_loss": train_results["avg_total_loss"],
+                "avg_sep_loss": train_results["avg_sep_loss"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
                 "final_model_path": final_model_path,

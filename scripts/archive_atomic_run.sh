@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_NAME="$1"
 
 mkdir -p "$ROOT_DIR/results"

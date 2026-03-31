@@ -748,7 +748,7 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 
 当前 0.5B fixed-split 入口脚本是：
 
-- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
 
 当前固定设置：
 
@@ -774,7 +774,7 @@ tail -n 50 atomic/logs/watchdog_main_tokmem_fixed_split.log
 
 1. 新建了 0.5B fixed-split 脚本
    - 位置：
-   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
    - 作用：
    - 固定用本地 `Qwen2.5-0.5B-Instruct`
    - 固定用 `CUDA_VISIBLE_DEVICES=4,5,6`
@@ -824,7 +824,7 @@ Remaining/Total: 04:20:22/04:20:37
 
 6. 0.5B 脚本内置 GPU 监控
    - 改动文件：
-   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
    - 日志命名保持：
    - `gpu_monitor_<RUN_ID>.log`
    - 现在采样频率：
@@ -842,7 +842,7 @@ Remaining/Total: 04:20:22/04:20:37
 
 8. fixed-split 启动脚本加 allocator 配置
    - 改动文件：
-   - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+   - [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
    - [atomic/main_tokmem_fixed_split.sh](/data/ruochen/tokmem/atomic/main_tokmem_fixed_split.sh)
    - 新增：
    - `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
@@ -893,7 +893,7 @@ Remaining/Total: 04:20:22/04:20:37
 这里记录的是目前最有参考价值的一组配置：
 
 - 脚本：
-  - [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+  - [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
 - GPU：
   - `CUDA_VISIBLE_DEVICES=4,5,6`
 - 模型：
@@ -945,7 +945,7 @@ Remaining/Total: 04:20:22/04:20:37
 - 当前 0.5B fixed-split 脚本使用 `batch_size=8`、`max_length=1024`、`lr=0.005`。
 - 当前 0.5B fixed-split 脚本已把 `test_batch_size` 调到 `256`，用于加快 evaluation。
 - 这个 `test_batch_size=256` 的修改只会影响之后新启动的 run，不会动态改变已经在跑的进程。
-- 当前 [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- 当前 [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
   已不再使用 Qwen 专属 split cache。
 - 当前默认改为直接读取共享 cache 路径：
   - `/data/ruochen/tokmem/atomic/cached_splits/paper_model_common_pool/tokmem_atomic_fixed_split_common_all_models_maxlen1024.pt`
@@ -1175,7 +1175,7 @@ Remaining/Total: 04:20:22/04:20:37
 
 4. 0.5B 训练脚本改成“先有 PT，再训练”
 
-- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
   - 现在只做一件事：
     - 从已经存在的 `.pt` split cache 加载数据并训练
   - 如果 `.pt` 不存在，会直接报错退出
@@ -1189,8 +1189,8 @@ Remaining/Total: 04:20:22/04:20:37
   - 随机选出 `700` 个任务
   - 整理成训练用 `.pt`
 - 对应脚本现在拆成两步：
-  - 先用 [scripts/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_all_models_task_pool.sh) 生成三模型 tokenizer 交集任务池
-  - 再用 [scripts/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_qwen_0_5b_fixed_split.sh) 从池里固定抽样并导出 `.pt`
+  - 先用 [scripts/all_models/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/all_models/build_atomic_all_models_task_pool.sh) 生成三模型 tokenizer 交集任务池
+  - 再用 [scripts/qwen_0_5b/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/sample_atomic_qwen_0_5b_fixed_split.sh) 从池里固定抽样并导出 `.pt`
 - 当前输出目录固定到：
   - [atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42](/data/ruochen/tokmem/atomic/cached_splits/qwen2.5_0.5b_random700_from763_train500_val10_test50_seed42)
 
@@ -1206,7 +1206,7 @@ Remaining/Total: 04:20:22/04:20:37
 7. 新增“成功后归档到 results”的脚本
 
 - 新增文件：
-  - [scripts/archive_atomic_run.sh](/data/ruochen/tokmem/scripts/archive_atomic_run.sh)
+  - [scripts/shared/archive_atomic_run.sh](/data/ruochen/tokmem/scripts/shared/archive_atomic_run.sh)
 - 它的作用很简单：
   - 训练过程先在 `atomic/runs/` 里完成
   - 确认是成功实验后
@@ -1266,7 +1266,7 @@ Remaining/Total: 04:20:22/04:20:37
 
 当前最重要的新入口是：
 
-- [scripts/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_all_models_task_pool.sh)
+- [scripts/all_models/build_atomic_all_models_task_pool.sh](/data/ruochen/tokmem/scripts/all_models/build_atomic_all_models_task_pool.sh)
 
 它会对下面三个模型的 tokenizer 筛选结果取交集：
 
@@ -1301,7 +1301,7 @@ Remaining/Total: 04:20:22/04:20:37
 
 现在对应的抽样入口是：
 
-- [scripts/sample_atomic_all_models_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_all_models_fixed_split.sh)
+- [scripts/all_models/sample_atomic_all_models_fixed_split.sh](/data/ruochen/tokmem/scripts/all_models/sample_atomic_all_models_fixed_split.sh)
 
 这个脚本会：
 
@@ -1318,8 +1318,8 @@ Remaining/Total: 04:20:22/04:20:37
 例如：
 
 ```bash
-bash scripts/sample_atomic_all_models_fixed_split.sh
-bash scripts/sample_atomic_all_models_fixed_split.sh 300
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh 300
 ```
 
 对应输出目录会是：
@@ -1337,7 +1337,7 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 
 当前 Qwen 0.5B 的 fixed split 训练入口是：
 
-- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
 
 它现在支持传第一个参数指定 `NUM_TASKS`，默认是 `700`。
 
@@ -1347,7 +1347,7 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 
 如果这份 `.pt` 不存在，它会自动调用：
 
-- `bash scripts/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>`
+- `bash scripts/all_models/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>`
 
 也就是说，Qwen fixed split 这条线目前已经不再依赖旧的 Qwen 命名任务池，而是直接依赖“三模型共享交集池 -> 固定抽样”这条链路。
 
@@ -1359,7 +1359,7 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 
 另一个入口是：
 
-- [scripts/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b.sh)
 
 这条线和 fixed split 不一样：
 
@@ -1381,9 +1381,9 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 
 仓库里现在还有这些脚本：
 
-- [scripts/build_atomic_qwen_0_5b_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_qwen_0_5b_task_pool.sh)
-- [scripts/build_atomic_llama_3b_task_pool.sh](/data/ruochen/tokmem/scripts/build_atomic_llama_3b_task_pool.sh)
-- [scripts/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/sample_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/build_atomic_qwen_0_5b_task_pool.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/build_atomic_qwen_0_5b_task_pool.sh)
+- [scripts/llama_3b/build_atomic_llama_3b_task_pool.sh](/data/ruochen/tokmem/scripts/llama_3b/build_atomic_llama_3b_task_pool.sh)
+- [scripts/qwen_0_5b/sample_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/sample_atomic_qwen_0_5b_fixed_split.sh)
 
 这些脚本还保留着，主要是为了：
 
@@ -1434,15 +1434,15 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 300
 如果目标是“用三模型共享交集任务做固定 split 实验”，现在建议按下面顺序：
 
 ```bash
-bash scripts/build_atomic_all_models_task_pool.sh
-bash scripts/sample_atomic_all_models_fixed_split.sh 700
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 700
+bash scripts/all_models/build_atomic_all_models_task_pool.sh
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh 700
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh 700
 ```
 
 如果只是想快速跑一下 Qwen runtime split：
 
 ```bash
-bash scripts/run_atomic_qwen_0_5b.sh
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b.sh
 ```
 
 一句话总记忆：
@@ -1475,7 +1475,7 @@ bash scripts/run_atomic_qwen_0_5b.sh
 1. 建三模型共享任务池
 
 ```bash
-bash scripts/build_atomic_all_models_task_pool.sh
+bash scripts/all_models/build_atomic_all_models_task_pool.sh
 ```
 
 它会调用：
@@ -1498,13 +1498,13 @@ bash scripts/build_atomic_all_models_task_pool.sh
 例如抽 `300` 个任务：
 
 ```bash
-bash scripts/sample_atomic_all_models_fixed_split.sh 300
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh 300
 ```
 
 例如抽 `700` 个任务：
 
 ```bash
-bash scripts/sample_atomic_all_models_fixed_split.sh 700
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh 700
 ```
 
 它会调用：
@@ -1530,13 +1530,13 @@ bash scripts/sample_atomic_all_models_fixed_split.sh 700
 如果上一步抽的是 `300`：
 
 ```bash
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 300
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh 300
 ```
 
 如果上一步抽的是 `700`：
 
 ```bash
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 700
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh 700
 ```
 
 这个脚本会进入：
@@ -1553,9 +1553,9 @@ bash scripts/run_atomic_qwen_0_5b_fixed_split.sh 700
 也就是说，当前最清晰的完整顺序就是：
 
 ```bash
-bash scripts/build_atomic_all_models_task_pool.sh
-bash scripts/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh <NUM_TASKS>
+bash scripts/all_models/build_atomic_all_models_task_pool.sh
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh <NUM_TASKS>
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh <NUM_TASKS>
 ```
 
 补充两点：
@@ -1570,9 +1570,9 @@ bash scripts/run_atomic_qwen_0_5b_fixed_split.sh <NUM_TASKS>
 这次已经实际跑通了一条完整链路：
 
 ```bash
-bash scripts/build_atomic_all_models_task_pool.sh
-bash scripts/sample_atomic_all_models_fixed_split.sh 700
-bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
+bash scripts/all_models/build_atomic_all_models_task_pool.sh
+bash scripts/all_models/sample_atomic_all_models_fixed_split.sh 700
+bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh
 ```
 
 对应归档在：
@@ -1672,8 +1672,8 @@ bash scripts/run_atomic_qwen_0_5b_fixed_split.sh
 
 当前固定入口脚本是：
 
-- [scripts/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b_fixed_split.sh)
-- [scripts/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/run_atomic_qwen_0_5b.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b.sh)
 
 相对 `17.10` 里那个 `700-task` 归档 run，当时缺的几个关键点，现在已经补了：
 

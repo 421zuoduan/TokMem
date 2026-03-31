@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POOL_DIR="$ROOT_DIR/atomic/cached_splits/qwen2.5-0.5b-pool-500-10-50-seed42"
 SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/qwen2.5-0.5b-task700-500-10-50-seed42"
 
 if [ ! -f "$POOL_DIR/task_pool_manifest.json" ]; then
-    bash "$ROOT_DIR/scripts/build_atomic_qwen_0_5b_task_pool.sh"
+    bash "$ROOT_DIR/scripts/qwen_0_5b/build_atomic_qwen_0_5b_task_pool.sh"
 fi
 
 cd "$ROOT_DIR"
