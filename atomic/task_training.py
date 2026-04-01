@@ -166,9 +166,94 @@ def compute_separation_loss(task_embeddings, tau=0.2):
 
 def get_separation_loss_embeddings(model):
     """Return the task embeddings to regularize for separation loss."""
+    return get_memory_bank_embeddings(model)
+
+
+def get_memory_bank_embeddings(model):
+    """Return the trainable embeddings that define the current memory bank."""
     if getattr(model, "decouple_embeddings", False):
         return model.trainable_task_output_embeddings
     return model.trainable_task_embeddings
+
+
+def compute_memory_bank_geometry_stats(task_embeddings, eps=1e-12):
+    """Compute geometry stats for a memory bank after row normalization.
+
+    The eigenspectrum is derived from the centered normalized matrix via SVD for
+    numerical stability.
+    """
+    import torch
+
+    if task_embeddings is None:
+        return {
+            "memory_bank_mean_norm": 0.0,
+            "memory_bank_pc1_ratio": 0.0,
+            "memory_bank_top5_ratio": 0.0,
+            "memory_bank_top10_ratio": 0.0,
+            "memory_bank_effective_rank": 0.0,
+        }
+
+    with torch.no_grad():
+        bank = task_embeddings.detach()
+        if bank.numel() == 0 or bank.dim() != 2:
+            return {
+                "memory_bank_mean_norm": 0.0,
+                "memory_bank_pc1_ratio": 0.0,
+                "memory_bank_top5_ratio": 0.0,
+                "memory_bank_top10_ratio": 0.0,
+                "memory_bank_effective_rank": 0.0,
+            }
+
+        bank = bank.to(dtype=torch.float32)
+        if bank.device.type != "cpu":
+            bank = bank.cpu()
+
+        row_norms = bank.norm(p=2, dim=-1, keepdim=True).clamp_min(eps)
+        normalized_bank = bank / row_norms
+        mean_vector = normalized_bank.mean(dim=0)
+        mean_norm = mean_vector.norm(p=2).item()
+
+        centered = normalized_bank - mean_vector
+        # SVD of the centered normalized bank gives the covariance spectrum
+        # without forming the large feature covariance explicitly.
+        singular_values = torch.linalg.svdvals(centered)
+        eigvals = singular_values.pow(2) / max(int(normalized_bank.shape[0]), 1)
+        eigvals = torch.clamp(eigvals, min=0.0)
+        eigvals, _ = torch.sort(eigvals, descending=True)
+
+        total_energy = eigvals.sum()
+        total_energy_safe = total_energy.clamp_min(eps)
+
+        pc1_ratio = (eigvals[:1].sum() / total_energy_safe).item() if eigvals.numel() > 0 else 0.0
+        top5_ratio = (eigvals[: min(5, eigvals.numel())].sum() / total_energy_safe).item() if eigvals.numel() > 0 else 0.0
+        top10_ratio = (eigvals[: min(10, eigvals.numel())].sum() / total_energy_safe).item() if eigvals.numel() > 0 else 0.0
+
+        if eigvals.numel() == 0:
+            effective_rank = 0.0
+        else:
+            probs = eigvals / total_energy_safe
+            entropy = -(probs * torch.log(probs + eps)).sum()
+            effective_rank = torch.exp(entropy).item()
+
+    return {
+        "memory_bank_mean_norm": mean_norm,
+        "memory_bank_pc1_ratio": pc1_ratio,
+        "memory_bank_top5_ratio": top5_ratio,
+        "memory_bank_top10_ratio": top10_ratio,
+        "memory_bank_effective_rank": effective_rank,
+    }
+
+
+def format_memory_bank_geometry_stats(stats):
+    """Format memory bank geometry stats for human-readable logs."""
+    return (
+        "MemoryBank "
+        f"mean_norm:{stats['memory_bank_mean_norm']:.4f} "
+        f"pc1:{stats['memory_bank_pc1_ratio']:.4f} "
+        f"top5:{stats['memory_bank_top5_ratio']:.4f} "
+        f"top10:{stats['memory_bank_top10_ratio']:.4f} "
+        f"erank:{stats['memory_bank_effective_rank']:.2f}"
+    )
 
 
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False,
@@ -296,6 +381,13 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
+
+    def log_memory_bank_geometry_stats(tag):
+        stats = compute_memory_bank_geometry_stats(get_memory_bank_embeddings(model))
+        summary = format_memory_bank_geometry_stats(stats)
+        print(f"{tag} {summary}")
+        training_logger.info(f"{tag} {summary}")
+        return stats
     
     total_loss = 0
     total_task_loss = 0
@@ -411,6 +503,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                     f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgSepLoss:{avg_sep_loss:.4f} "
                     f"AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f} {time_summary}"
                 )
+                log_memory_bank_geometry_stats("MEMORY BANK GEOMETRY")
 
                 # Reset accumulators for next logging window
                 batch_loss = 0
@@ -438,6 +531,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                     clear_cuda_cache()
                     print(f"Step {step} - Validation Loss: {avg_val_loss:.4f}")
                     training_logger.info(f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f}")
+                    log_memory_bank_geometry_stats(f"VALIDATION STEP {step} MEMORY BANK GEOMETRY")
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         # Save best token state for later use
@@ -466,6 +560,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             clear_cuda_cache()
             print(f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}")
             training_logger.info(f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f}")
+            log_memory_bank_geometry_stats(f"VALIDATION E{epoch+1}/{num_epochs} MEMORY BANK GEOMETRY")
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 # Save best token state for later use
@@ -512,6 +607,15 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
         if best_model_path:
             print(f"Best model saved to: {best_model_path}")
         training_logger.info(f"BEST VALIDATION LOSS:{best_val_loss:.4f}")
+
+    final_memory_bank_geometry_stats = compute_memory_bank_geometry_stats(
+        get_memory_bank_embeddings(model)
+    )
+    final_memory_bank_geometry_summary = format_memory_bank_geometry_stats(
+        final_memory_bank_geometry_stats
+    )
+    print(f"Final {final_memory_bank_geometry_summary}")
+    training_logger.info(f"FINAL {final_memory_bank_geometry_summary}")
     
     # Return training results including best model state
     return {
@@ -520,7 +624,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
         'avg_sep_loss': avg_sep_loss,
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
-        'best_model_path': best_model_path
+        'best_model_path': best_model_path,
+        'memory_bank_geometry_stats': final_memory_bank_geometry_stats,
     }
 
 

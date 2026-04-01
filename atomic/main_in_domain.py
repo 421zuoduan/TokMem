@@ -344,6 +344,7 @@ def main():
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
                 "final_model_path": final_model_path,
+                "memory_bank_geometry_stats": train_results.get("memory_bank_geometry_stats"),
             },
         )
         print(f"Final model saved to: {final_model_path}")

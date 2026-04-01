@@ -12,6 +12,16 @@ This repository is organized by experiment track rather than by a shared package
 
 Tests are limited. The main standalone test-like script is `atomic/test_sbert_retriever.py`.
 
+## Current Experiment Focus
+
+Unless the user explicitly says otherwise, treat the current working scope as:
+
+- only `atomic/` experiments matter right now
+- training should be done on the `Qwen2.5-0.5B-Instruct` / `0.5B` setup
+- when comparing results, prioritize `instruction_and_query` metrics
+- the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
+- do not treat `Exact Match` or `query_only` results as the primary decision criteria unless the user explicitly asks for them
+
 ## Build, Test, and Development Commands
 
 Create an environment and install dependencies:
