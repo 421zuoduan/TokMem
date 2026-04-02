@@ -141,31 +141,31 @@ def main():
                         help='Validate every n steps')
     parser.add_argument('--use_task_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include task-token cross entropy in the optimization objective')
-    parser.add_argument('--task_loss_weight', type=float, default=0.0,
+    parser.add_argument('--task_loss_weight', type=float, default=0.01,
                         help='Weight for the task-token routing cross entropy loss')
     parser.add_argument('--mean_loss_weight', type=float, default=0.01,
                         help='Weight for the mean-direction memory bank regularizer')
-    parser.add_argument('--use_mean_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+    parser.add_argument('--use_mean_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include the mean-direction memory bank regularizer')
-    parser.add_argument('--use_angular_margin_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+    parser.add_argument('--use_angular_margin_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include angular-margin routing loss inside the memory bank')
-    parser.add_argument('--angular_margin_loss_weight', type=float, default=0.3,
+    parser.add_argument('--angular_margin_loss_weight', type=float, default=0.01,
                         help='Weight for the angular-margin routing loss')
     parser.add_argument('--routing_margin_m', type=float, default=0.3,
                         help='Angular margin applied to the positive routing class')
     parser.add_argument('--routing_scale_s', type=float, default=16.0,
                         help='Scale applied to bank-only routing logits')
-    parser.add_argument('--use_hard_negative_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+    parser.add_argument('--use_hard_negative_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include hardest-negative routing margin loss inside the memory bank')
-    parser.add_argument('--hard_negative_loss_weight', type=float, default=0.1,
+    parser.add_argument('--hard_negative_loss_weight', type=float, default=0.01,
                         help='Weight for the hard-negative routing loss')
     parser.add_argument('--hard_negative_margin', type=float, default=0.2,
                         help='Margin required between the positive and hardest-negative routing logits')
-    parser.add_argument('--use_sep_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+    parser.add_argument('--use_sep_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include separation loss between task embeddings in the optimization objective')
-    parser.add_argument('--sep_loss_weight', type=float, default=0.0,
+    parser.add_argument('--sep_loss_weight', type=float, default=0.01,
                         help='Weight for the memory-token separation loss')
-    parser.add_argument('--sep_loss_tau', type=float, default=0.2,
+    parser.add_argument('--sep_loss_tau', type=float, default=0.3,
                         help='Cosine-similarity margin for the memory-token separation loss')
     parser.add_argument('--use_centered_sep', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to compute separation loss after subtracting the mean direction')

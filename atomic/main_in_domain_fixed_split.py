@@ -234,7 +234,7 @@ def main():
     parser.add_argument(
         "--task_loss_weight",
         type=float,
-        default=0.0,
+        default=0.01,
         help="Weight for the task-token routing cross entropy loss",
     )
     parser.add_argument(
@@ -246,21 +246,21 @@ def main():
     parser.add_argument(
         "--use_mean_loss",
         type=parse_bool_arg,
-        default=True,
+        default=False,
         metavar="BOOL",
         help="Whether to include the mean-direction memory bank regularizer",
     )
     parser.add_argument(
         "--use_angular_margin_loss",
         type=parse_bool_arg,
-        default=True,
+        default=False,
         metavar="BOOL",
         help="Whether to include angular-margin routing loss inside the memory bank",
     )
     parser.add_argument(
         "--angular_margin_loss_weight",
         type=float,
-        default=0.3,
+        default=0.01,
         help="Weight for the angular-margin routing loss",
     )
     parser.add_argument(
@@ -278,14 +278,14 @@ def main():
     parser.add_argument(
         "--use_hard_negative_loss",
         type=parse_bool_arg,
-        default=True,
+        default=False,
         metavar="BOOL",
         help="Whether to include hardest-negative routing margin loss inside the memory bank",
     )
     parser.add_argument(
         "--hard_negative_loss_weight",
         type=float,
-        default=0.1,
+        default=0.01,
         help="Weight for the hard-negative routing loss",
     )
     parser.add_argument(
@@ -297,14 +297,14 @@ def main():
     parser.add_argument(
         "--use_sep_loss",
         type=parse_bool_arg,
-        default=True,
+        default=False,
         metavar="BOOL",
         help="Whether to include separation loss between task embeddings in the optimization objective",
     )
     parser.add_argument(
         "--sep_loss_weight",
         type=float,
-        default=0.0,
+        default=0.01,
         help="Weight for the memory-token separation loss",
     )
     parser.add_argument(
