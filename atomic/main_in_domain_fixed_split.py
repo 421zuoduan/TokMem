@@ -245,6 +245,12 @@ def main():
         help="Weight for the task-token routing cross entropy loss",
     )
     parser.add_argument(
+        "--mean_loss_weight",
+        type=float,
+        default=0.01,
+        help="Weight for the mean-direction memory bank regularizer",
+    )
+    parser.add_argument(
         "--use_sep_loss",
         type=parse_bool_arg,
         default=False,
@@ -262,6 +268,13 @@ def main():
         type=float,
         default=0.2,
         help="Cosine-similarity margin for the memory-token separation loss",
+    )
+    parser.add_argument(
+        "--use_centered_sep",
+        type=parse_bool_arg,
+        default=False,
+        metavar="BOOL",
+        help="Whether to compute separation loss after subtracting the mean direction",
     )
     parser.add_argument(
         "--split_cache_path",
@@ -327,9 +340,11 @@ def main():
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
     print(f"Task loss weight: {args.task_loss_weight}")
+    print(f"Mean loss weight: {args.mean_loss_weight}")
     print(f"Use separation loss: {args.use_sep_loss}")
     print(f"Separation loss weight: {args.sep_loss_weight}")
     print(f"Separation loss tau: {args.sep_loss_tau}")
+    print(f"Use centered separation loss: {args.use_centered_sep}")
     print(f"Run directory: {run_context['run_dir']}")
     print(f"Split cache path: {os.path.abspath(args.split_cache_path)}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
@@ -446,9 +461,11 @@ def main():
             validate_every_n_steps=args.validate_every_n_steps,
             use_task_loss=args.use_task_loss,
             task_loss_weight=args.task_loss_weight,
+            mean_loss_weight=args.mean_loss_weight,
             use_sep_loss=args.use_sep_loss,
             sep_loss_weight=args.sep_loss_weight,
             sep_loss_tau=args.sep_loss_tau,
+            use_centered_sep=args.use_centered_sep,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(
@@ -462,7 +479,10 @@ def main():
             {
                 "avg_total_loss": train_results["avg_total_loss"],
                 "avg_task_loss": train_results["avg_task_loss"],
+                "avg_mean_loss": train_results["avg_mean_loss"],
                 "avg_sep_loss": train_results["avg_sep_loss"],
+                "avg_sep_loss_raw": train_results["avg_sep_loss_raw"],
+                "avg_sep_loss_centered": train_results["avg_sep_loss_centered"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
                 "final_model_path": final_model_path,

@@ -57,9 +57,11 @@ python -u main_in_domain_fixed_split.py \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
     --task_loss_weight 0.0 \
+    --mean_loss_weight 0.01 \
     --use_sep_loss True \
     --sep_loss_weight 0.01 \
     --sep_loss_tau 0.5 \
+    --use_centered_sep True \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \

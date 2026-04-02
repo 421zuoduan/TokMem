@@ -147,21 +147,78 @@ def compute_task_loss(shift_logits, shift_labels, reserved_token_ids):
     return task_loss, routing_count
 
 
-def compute_separation_loss(task_embeddings, tau=0.2):
-    """Penalize task embeddings whose cosine similarity exceeds the margin tau."""
+def compute_memory_bank_mean_stats(task_embeddings, eps=1e-12):
+    """Return the mean-direction loss and mean-direction norm for a memory bank."""
+    import torch.nn.functional as F
+
     if task_embeddings is None:
-        raise ValueError("task_embeddings must be provided for separation loss")
+        raise ValueError("task_embeddings must be provided for mean loss")
 
     num_embeddings = task_embeddings.shape[0]
+    zero = torch.zeros((), device=task_embeddings.device, dtype=task_embeddings.dtype)
     if num_embeddings <= 1:
-        return torch.zeros((), device=task_embeddings.device, dtype=task_embeddings.dtype)
+        return zero, zero
 
-    normalized_embeddings = torch.nn.functional.normalize(task_embeddings, p=2, dim=-1)
+    normalized_embeddings = F.normalize(task_embeddings, p=2, dim=-1, eps=eps)
+    mean_vector = normalized_embeddings.mean(dim=0)
+    mean_norm = mean_vector.norm(p=2)
+    mean_loss = mean_norm.pow(2)
+    return mean_loss, mean_norm
+
+
+def _compute_pairwise_separation_penalty(normalized_embeddings, tau):
+    """Compute the raw pairwise cosine margin penalty on normalized embeddings."""
+    num_embeddings = normalized_embeddings.shape[0]
     cosine_matrix = torch.matmul(normalized_embeddings, normalized_embeddings.transpose(0, 1))
     penalty_matrix = torch.relu(cosine_matrix - tau).pow(2)
     penalty_matrix.fill_diagonal_(0)
     normalizer = num_embeddings * (num_embeddings - 1)
     return penalty_matrix.sum() / normalizer
+
+
+def compute_separation_loss_components(task_embeddings, tau=0.2, use_centered_sep=False, eps=1e-12):
+    """Compute raw and optional centered separation losses for a memory bank."""
+    import torch.nn.functional as F
+
+    if task_embeddings is None:
+        raise ValueError("task_embeddings must be provided for separation loss")
+
+    num_embeddings = task_embeddings.shape[0]
+    if num_embeddings <= 1:
+        zero = torch.zeros((), device=task_embeddings.device, dtype=task_embeddings.dtype)
+        return {
+            "sep_loss": zero,
+            "sep_loss_raw": zero,
+            "sep_loss_centered": zero,
+        }
+
+    normalized_embeddings = F.normalize(task_embeddings, p=2, dim=-1, eps=eps)
+    raw_sep_loss = _compute_pairwise_separation_penalty(normalized_embeddings, tau)
+
+    centered_sep_loss = torch.zeros((), device=task_embeddings.device, dtype=task_embeddings.dtype)
+    selected_sep_loss = raw_sep_loss
+    if use_centered_sep:
+        mean_direction = normalized_embeddings.mean(dim=0, keepdim=True)
+        centered_embeddings = normalized_embeddings - mean_direction
+        centered_embeddings = F.normalize(centered_embeddings, p=2, dim=-1, eps=eps)
+        centered_sep_loss = _compute_pairwise_separation_penalty(centered_embeddings, tau)
+        selected_sep_loss = centered_sep_loss
+
+    return {
+        "sep_loss": selected_sep_loss,
+        "sep_loss_raw": raw_sep_loss,
+        "sep_loss_centered": centered_sep_loss,
+    }
+
+
+def compute_separation_loss(task_embeddings, tau=0.2, use_centered_sep=False, eps=1e-12):
+    """Penalize task embeddings whose cosine similarity exceeds the margin tau."""
+    return compute_separation_loss_components(
+        task_embeddings,
+        tau=tau,
+        use_centered_sep=use_centered_sep,
+        eps=eps,
+    )["sep_loss"]
 
 
 def get_separation_loss_embeddings(model):
@@ -256,8 +313,20 @@ def format_memory_bank_geometry_stats(stats):
     )
 
 
-def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_task_loss=False,
-                   task_loss_weight=0.0, use_sep_loss=False, sep_loss_weight=0.1, sep_loss_tau=0.2):
+def run_validation(
+    model,
+    val_dataloader,
+    device="cuda",
+    ignore_index=-100,
+    use_task_loss=False,
+    task_loss_weight=0.0,
+    mean_loss_weight=0.01,
+    use_sep_loss=False,
+    sep_loss_weight=0.1,
+    sep_loss_tau=0.2,
+    use_centered_sep=False,
+    return_metrics=False,
+):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
     """
@@ -268,6 +337,10 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_
     model.eval()
 
     val_loss_total = 0.0
+    val_mean_loss_total = 0.0
+    val_sep_loss_total = 0.0
+    val_sep_loss_raw_total = 0.0
+    val_sep_loss_centered_total = 0.0
     val_batches = 0
     valid_losses = 0
     
@@ -299,39 +372,86 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100, use_
                     )
                 else:
                     task_loss = torch.tensor(0.0, device=shift_logits.device)
+                mean_loss, _ = compute_memory_bank_mean_stats(
+                    get_memory_bank_embeddings(model),
+                )
                 if use_sep_loss:
-                    sep_loss = compute_separation_loss(
+                    sep_loss_components = compute_separation_loss_components(
                         get_separation_loss_embeddings(model),
                         tau=sep_loss_tau,
+                        use_centered_sep=use_centered_sep,
                     )
+                    sep_loss = sep_loss_components["sep_loss"]
+                    sep_loss_raw = sep_loss_components["sep_loss_raw"]
+                    sep_loss_centered = sep_loss_components["sep_loss_centered"]
                 else:
                     sep_loss = torch.tensor(0.0, device=shift_logits.device)
-                loss = lm_loss + task_loss_weight * task_loss + sep_loss_weight * sep_loss
+                    sep_loss_raw = torch.tensor(0.0, device=shift_logits.device)
+                    sep_loss_centered = torch.tensor(0.0, device=shift_logits.device)
+                loss = (
+                    lm_loss
+                    + task_loss_weight * task_loss
+                    + mean_loss_weight * mean_loss
+                    + sep_loss_weight * sep_loss
+                )
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
+                    val_mean_loss_total += mean_loss.item()
+                    val_sep_loss_total += sep_loss.item()
+                    val_sep_loss_raw_total += sep_loss_raw.item()
+                    val_sep_loss_centered_total += sep_loss_centered.item()
                     valid_losses += 1
             val_batches += 1
 
     if valid_losses == 0:
         print(f"Warning: No valid validation losses computed ({val_batches} batches processed)")
         avg_val_loss = float('inf')
+        avg_mean_loss = 0.0
+        avg_sep_loss = 0.0
+        avg_sep_loss_raw = 0.0
+        avg_sep_loss_centered = 0.0
     else:
         avg_val_loss = val_loss_total / valid_losses
+        avg_mean_loss = val_mean_loss_total / valid_losses
+        avg_sep_loss = val_sep_loss_total / valid_losses
+        avg_sep_loss_raw = val_sep_loss_raw_total / valid_losses
+        avg_sep_loss_centered = val_sep_loss_centered_total / valid_losses
 
     if was_training:
         model.train()
 
+    if return_metrics:
+        return {
+            "avg_val_loss": avg_val_loss,
+            "avg_mean_loss": avg_mean_loss,
+            "avg_sep_loss": avg_sep_loss,
+            "avg_sep_loss_raw": avg_sep_loss_raw,
+            "avg_sep_loss_centered": avg_sep_loss_centered,
+            "valid_losses": valid_losses,
+            "val_batches": val_batches,
+        }
+
     return avg_val_loss
 
-def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01, 
-                           gradient_accumulation_steps=1, device="cuda", timestamp=None,
-                           save_dir="saved_models",
-                           validate_every_n_steps=1000,
-                           use_task_loss=False,
-                           task_loss_weight=0.0,
-                           use_sep_loss=False,
-                           sep_loss_weight=0.1,
-                           sep_loss_tau=0.2):
+def train_task_calling_model(
+    model,
+    dataloader,
+    val_dataloader=None,
+    num_epochs=3,
+    lr=0.01,
+    gradient_accumulation_steps=1,
+    device="cuda",
+    timestamp=None,
+    save_dir="saved_models",
+    validate_every_n_steps=1000,
+    use_task_loss=False,
+    task_loss_weight=0.0,
+    mean_loss_weight=0.01,
+    use_sep_loss=False,
+    sep_loss_weight=0.1,
+    sep_loss_tau=0.2,
+    use_centered_sep=False,
+):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
@@ -362,9 +482,11 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print(f"Warmup steps: {total_steps // 10}")
     print(f"Use task loss: {use_task_loss}")
     print(f"Task loss weight: {task_loss_weight}")
+    print(f"Mean loss weight: {mean_loss_weight}")
     print(f"Use separation loss: {use_sep_loss}")
     print(f"Separation loss weight: {sep_loss_weight}")
     print(f"Separation loss tau: {sep_loss_tau}")
+    print(f"Use centered separation loss: {use_centered_sep}")
     if model.decouple_embeddings:
         print(f"Training mode: Decoupled embeddings")
         print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)} (input: {model.trainable_task_input_embeddings.numel()}, output: {model.trainable_task_output_embeddings.numel()})")
@@ -378,7 +500,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
     training_logger.info(f"Task loss enabled: {use_task_loss}, Weight: {task_loss_weight}")
-    training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}")
+    training_logger.info(f"Mean loss weight: {mean_loss_weight}")
+    training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}, Centered: {use_centered_sep}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
 
@@ -391,14 +514,20 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     
     total_loss = 0
     total_task_loss = 0
+    total_mean_loss = 0
     total_sep_loss = 0
+    total_sep_loss_raw = 0
+    total_sep_loss_centered = 0
     task_token_count = 0
     task_loss_batches = 0  # Count of batches that had task tokens
     step = 0
 
     batch_loss = 0
     batch_task_loss = 0
+    batch_mean_loss = 0
     batch_sep_loss = 0
+    batch_sep_loss_raw = 0
+    batch_sep_loss_centered = 0
     batch_task_count = 0
     batches_since_log = 0
     
@@ -436,21 +565,33 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 shift_labels,
                 reserved_token_ids,
             )
-            sep_loss = compute_separation_loss(
+            mean_loss, mean_norm = compute_memory_bank_mean_stats(
+                get_memory_bank_embeddings(model),
+            )
+            sep_loss_components = compute_separation_loss_components(
                 get_separation_loss_embeddings(model),
                 tau=sep_loss_tau,
+                use_centered_sep=use_centered_sep,
             )
+            sep_loss = sep_loss_components["sep_loss"]
+            sep_loss_raw = sep_loss_components["sep_loss_raw"]
+            sep_loss_centered = sep_loss_components["sep_loss_centered"]
 
             loss = lm_loss
             if use_task_loss:
                 loss = loss + task_loss_weight * task_loss
+            if mean_loss_weight:
+                loss = loss + mean_loss_weight * mean_loss
             if use_sep_loss:
                 loss = loss + sep_loss_weight * sep_loss
             batch_task_count += current_task_count
 
             batch_loss += loss.item()
             batch_task_loss += task_loss.item()
+            batch_mean_loss += mean_loss.item()
             batch_sep_loss += sep_loss.item()
+            batch_sep_loss_raw += sep_loss_raw.item()
+            batch_sep_loss_centered += sep_loss_centered.item()
             
             # Backward pass
             loss.backward()
@@ -462,7 +603,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             
             total_loss += loss.item()
             total_task_loss += task_loss.item()
+            total_mean_loss += mean_loss.item()
             total_sep_loss += sep_loss.item()
+            total_sep_loss_raw += sep_loss_raw.item()
+            total_sep_loss_centered += sep_loss_centered.item()
             task_token_count += current_task_count
             if current_task_count > 0:
                 task_loss_batches += 1
@@ -477,7 +621,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 # Calculate averages over the accumulated batches (100 batches or remaining)
                 avg_loss = batch_loss / batches_since_log
                 avg_task_loss = batch_task_loss / batches_since_log if batches_since_log > 0 else 0.0
+                avg_mean_loss = batch_mean_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss = batch_sep_loss / batches_since_log if batches_since_log > 0 else 0.0
+                avg_sep_loss_raw = batch_sep_loss_raw / batches_since_log if batches_since_log > 0 else 0.0
+                avg_sep_loss_centered = batch_sep_loss_centered / batches_since_log if batches_since_log > 0 else 0.0
                 avg_task_count = batch_task_count / batches_since_log
                 
                 completed_batches = epoch * len(dataloader) + batch_idx + 1
@@ -495,20 +642,29 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
 
                 print(
                     f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
-                    f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, Avg Sep Loss: {avg_sep_loss:.4f}, "
+                    f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, Avg Mean Loss: {avg_mean_loss:.4f}, "
+                    f"Avg Sep Loss: {avg_sep_loss:.4f}, Mean Norm: {mean_norm.item():.4f}, "
                     f"Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}, {time_summary}"
                 )
                 training_logger.info(
                     f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
-                    f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgSepLoss:{avg_sep_loss:.4f} "
-                    f"AvgTokens:{avg_task_count:.1f} LR:{current_lr:.6f} {time_summary}"
+                    f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgMeanLoss:{avg_mean_loss:.4f} "
+                    f"AvgSepLoss:{avg_sep_loss:.4f} MeanNorm:{mean_norm.item():.4f} AvgTokens:{avg_task_count:.1f} "
+                    f"LR:{current_lr:.6f} {time_summary}"
                 )
                 log_memory_bank_geometry_stats("MEMORY BANK GEOMETRY")
+                if use_centered_sep:
+                    training_logger.info(
+                        f"SEP LOSS DETAIL Raw:{avg_sep_loss_raw:.4f} Centered:{avg_sep_loss_centered:.4f}"
+                    )
 
                 # Reset accumulators for next logging window
                 batch_loss = 0
                 batch_task_loss = 0
+                batch_mean_loss = 0
                 batch_sep_loss = 0
+                batch_sep_loss_raw = 0
+                batch_sep_loss_centered = 0
                 batch_task_count = 0
                 batches_since_log = 0
             
@@ -517,21 +673,40 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Step-based validation
             if val_dataloader is not None and validate_every_n_steps is not None and validate_every_n_steps > 0:
                 if step % validate_every_n_steps == 0:
-                    avg_val_loss = run_validation(
+                    val_metrics = run_validation(
                         model,
                         val_dataloader,
                         device=device,
                         ignore_index=-100,
                         use_task_loss=use_task_loss,
                         task_loss_weight=task_loss_weight,
+                        mean_loss_weight=mean_loss_weight,
                         use_sep_loss=use_sep_loss,
                         sep_loss_weight=sep_loss_weight,
                         sep_loss_tau=sep_loss_tau,
+                        use_centered_sep=use_centered_sep,
+                        return_metrics=True,
                     )
                     clear_cuda_cache()
-                    print(f"Step {step} - Validation Loss: {avg_val_loss:.4f}")
-                    training_logger.info(f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f}")
+                    avg_val_loss = val_metrics["avg_val_loss"]
+                    avg_val_mean_loss = val_metrics["avg_mean_loss"]
+                    avg_val_sep_loss = val_metrics["avg_sep_loss"]
+                    avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
+                    avg_val_sep_loss_centered = val_metrics["avg_sep_loss_centered"]
+                    print(
+                        f"Step {step} - Validation Loss: {avg_val_loss:.4f}, "
+                        f"Mean Loss: {avg_val_mean_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}"
+                    )
+                    training_logger.info(
+                        f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f} MeanLoss:{avg_val_mean_loss:.4f} "
+                        f"SepLoss:{avg_val_sep_loss:.4f}"
+                    )
                     log_memory_bank_geometry_stats(f"VALIDATION STEP {step} MEMORY BANK GEOMETRY")
+                    if use_centered_sep:
+                        training_logger.info(
+                            f"VALIDATION STEP {step} SEP LOSS DETAIL Raw:{avg_val_sep_loss_raw:.4f} "
+                            f"Centered:{avg_val_sep_loss_centered:.4f}"
+                        )
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         # Save best token state for later use
@@ -546,21 +721,40 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
 
         # After each epoch, run validation to compute average validation loss
         if val_dataloader is not None:
-            avg_val_loss = run_validation(
+            val_metrics = run_validation(
                 model,
                 val_dataloader,
                 device=device,
                 ignore_index=-100,
                 use_task_loss=use_task_loss,
                 task_loss_weight=task_loss_weight,
+                mean_loss_weight=mean_loss_weight,
                 use_sep_loss=use_sep_loss,
                 sep_loss_weight=sep_loss_weight,
                 sep_loss_tau=sep_loss_tau,
+                use_centered_sep=use_centered_sep,
+                return_metrics=True,
             )
             clear_cuda_cache()
-            print(f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}")
-            training_logger.info(f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f}")
+            avg_val_loss = val_metrics["avg_val_loss"]
+            avg_val_mean_loss = val_metrics["avg_mean_loss"]
+            avg_val_sep_loss = val_metrics["avg_sep_loss"]
+            avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
+            avg_val_sep_loss_centered = val_metrics["avg_sep_loss_centered"]
+            print(
+                f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}, "
+                f"Mean Loss: {avg_val_mean_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}"
+            )
+            training_logger.info(
+                f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f} "
+                f"MeanLoss:{avg_val_mean_loss:.4f} SepLoss:{avg_val_sep_loss:.4f}"
+            )
             log_memory_bank_geometry_stats(f"VALIDATION E{epoch+1}/{num_epochs} MEMORY BANK GEOMETRY")
+            if use_centered_sep:
+                training_logger.info(
+                    f"VALIDATION E{epoch+1}/{num_epochs} SEP LOSS DETAIL Raw:{avg_val_sep_loss_raw:.4f} "
+                    f"Centered:{avg_val_sep_loss_centered:.4f}"
+                )
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 # Save best token state for later use
@@ -574,7 +768,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
     
     avg_total_loss = total_loss / (len(dataloader) * num_epochs)
+    avg_mean_loss = total_mean_loss / (len(dataloader) * num_epochs)
     avg_sep_loss = total_sep_loss / (len(dataloader) * num_epochs)
+    avg_sep_loss_raw = total_sep_loss_raw / (len(dataloader) * num_epochs)
+    avg_sep_loss_centered = total_sep_loss_centered / (len(dataloader) * num_epochs)
     
     avg_task_loss = total_task_loss / (len(dataloader) * num_epochs)
 
@@ -582,23 +779,29 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
         print(f"\nTraining completed!")
         print(f"Average overall loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
+        print(f"Average mean loss: {avg_mean_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
         print(f"Total task tokens processed: {task_token_count}")
         print(f"Batches with task tokens: {task_loss_batches}/{step}")
         print(f"Task token accuracy insight: Lower task loss indicates better task selection performance")
         
         # Log training completion
-        training_logger.info(f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} SepLoss:{avg_sep_loss:.4f} TaskTokens:{task_token_count} TaskBatches:{task_loss_batches}/{step}")
+        training_logger.info(
+            f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} "
+            f"MeanLoss:{avg_mean_loss:.4f} SepLoss:{avg_sep_loss:.4f} TaskTokens:{task_token_count} "
+            f"TaskBatches:{task_loss_batches}/{step}"
+        )
     else:
         print(f"\nTraining completed! Average loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
+        print(f"Average mean loss: {avg_mean_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
         print("Warning: No task tokens found in training data!")
         
         # Log training completion without task tokens
         training_logger.info(
             f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} "
-            f"SepLoss:{avg_sep_loss:.4f} WARNING:NoTaskTokens"
+            f"MeanLoss:{avg_mean_loss:.4f} SepLoss:{avg_sep_loss:.4f} WARNING:NoTaskTokens"
         )
 
     # Report best validation loss if validation was performed
@@ -621,7 +824,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     return {
         'avg_total_loss': avg_total_loss,
         'avg_task_loss': avg_task_loss,
+        'avg_mean_loss': avg_mean_loss,
         'avg_sep_loss': avg_sep_loss,
+        'avg_sep_loss_raw': avg_sep_loss_raw,
+        'avg_sep_loss_centered': avg_sep_loss_centered,
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
         'best_model_path': best_model_path,

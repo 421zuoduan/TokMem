@@ -547,3 +547,171 @@ penalty = relu(cosine_similarity - tau) ** 2
 
 - 这次看到的是“**初始化时集中，训练后迅速展开**”
 - 不是“**训练后逐步塌到少数方向**”
+
+## 14. 最新实验：`200-task / mean loss + centered sep`
+
+最新一轮 `200-task` 已经归档到：
+
+- [results/atomic_qwen2.5_0.5b_200tasks_sep_loss_20260401_171149](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_200tasks_sep_loss_20260401_171149)
+
+这次保持当前 `200-task` fixed split 和主训练参数不变，只新增：
+
+- `mean_loss_weight = 0.01`
+- `use_centered_sep = True`
+
+同时仍然保留：
+
+- `use_sep_loss = True`
+- `sep_loss_weight = 0.01`
+- `sep_loss_tau = 0.5`
+
+### 14.1 和前两条 `200-task` 的直接对比
+
+| Run | I+Q Task Acc | I+Q Rouge-L | Best val loss |
+|---|---:|---:|---:|
+| baseline `20260401_061313` | 0.9676 | 50.9033 | 0.8587 |
+| 上一轮 `sep` rerun `20260401_144757` | 0.9661 | 51.2440 | 0.8603 |
+| 最新 `mean+centered` `20260401_171149` | 0.9713 | 51.2987 | 0.8476 |
+
+### 14.2 当前判断
+
+这次 `200-task` 的结果可以直接记成：
+
+- 相比 baseline，`routing acc`、`Rouge-L`、`best val loss` 三项都更好
+- 相比上一轮只做 geometry monitoring 的 `sep` rerun，这次也三项都更好
+- 当前 `200-task` 线上，`mean loss + centered sep` 是目前最强的一次完整结果
+
+### 14.3 geometry 结果怎么理解
+
+最终 geometry 统计是：
+
+- `mean_norm = 0.5581`
+- `pc1_ratio = 0.0427`
+- `top10_ratio = 0.2077`
+- `effective_rank = 143.25`
+
+这和上一轮 `20260401_144757` 基本一致，说明：
+
+- 这次收益不是靠把 memory bank 压到少数方向换来的
+- memory bank 训练后依然是展开的，不存在明显塌缩
+- `centered sep` 在最终阶段已经非常小，主收益更像来自 `mean loss` 对公共方向的额外约束
+
+## 15. `200-task` baseline 的 routing 误分类特征
+
+这里看的是：
+
+- [results/atomic_qwen2.5_0.5b_200tasks_20260401_061313/evaluation_results.json](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_200tasks_20260401_061313/evaluation_results.json)
+- [results/atomic_qwen2.5_0.5b_200tasks_20260401_061313/evaluation_predictions_instruction_and_query.jsonl](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_200tasks_20260401_061313/evaluation_predictions_instruction_and_query.jsonl)
+
+只看 `instruction_and_query` 的 routing：
+
+- 总任务数：`200`
+- 完全没有 routing 错误的任务数：`149`
+- 出现过 routing 错误的任务数：`51`
+- 总错误样本数：`324 / 10000`
+
+这说明：
+
+- 错误不是“所有任务平均都有一点”
+- 而是“大多数任务完全没问题，少数任务承担了绝大部分错误”
+
+### 15.1 错误高度集中在少数任务
+
+按错误数排序后：
+
+- 前 `1` 个任务占全部错误的 `12.0%`
+- 前 `2` 个任务占 `20.7%`
+- 前 `4` 个任务占 `35.2%`
+- 前 `10` 个任务占 `63.0%`
+- 前 `20` 个任务占 `81.8%`
+
+所以 `200-task baseline` 的 routing 失败是明显长尾分布，不是均匀噪声。
+
+### 15.2 最容易出错的是“近重复任务对”
+
+最典型的是下面两组：
+
+- `task127_scan_long_text_generation_action_command_all`
+- `task129_scan_long_text_generation_action_command_short`
+
+以及：
+
+- `task342_winomt_classification_profession_pro`
+- `task343_winomt_classification_profession_anti`
+
+这两组任务在定义和输入形式上都非常接近，所以最容易互相混淆。
+
+### 15.2.1 这两组任务到底差在哪里
+
+`task127_scan_long_text_generation_action_command_all` 和 `task129_scan_long_text_generation_action_command_short`：
+
+- 这两个任务的 `Definition`、`Categories`、`Domains`、`Source` 都是一样的
+- 本质上都是把 `SCAN` 的 action sequence 翻译成自然语言 command
+- 真正差别主要在数据分布：
+  - `task127` 的平均输入更长
+  - `task129` 的平均输入更短
+  - 两者实例还有大量重叠
+
+所以这对更像：
+
+- 同一个任务模板下的两个非常接近的数据切片
+
+`task342_winomt_classification_profession_pro` 和 `task343_winomt_classification_profession_anti`：
+
+- 这两个任务的 `Definition` 也完全一样
+- 都是给一句话和一个 gender，输出对应 profession
+- 真正差别不在任务规则，而在数据切片：
+  - `profession_pro` 更偏 stereotype-consistent 的样本
+  - `profession_anti` 更偏 stereotype-inconsistent 的样本
+- 两者输入长度几乎一样，但实例基本不重叠
+
+所以这对更像：
+
+- 同一个推理模板下、两个不同偏置方向的数据子集
+
+这也解释了为什么模型会把它们互相混淆：
+
+- 难点不是“理解不同任务规则”
+- 而是“把极其接近的数据切片边界分干净”
+
+### 15.3 其次是 QA / answer-generation 任务簇内部互混
+
+另一个明显模式是开放域问答、阅读理解和答案生成类任务之间互相串线，例如：
+
+- `task582_naturalquestion_answer_generation`
+- `task669_ambigqa_answer_generation`
+- `task339_record_answer_generation`
+- `task303_record_incorrect_answer_generation`
+- `task194_duorc_answer_generation`
+- `task061_ropes_answer_generation`
+- `task898_freebase_qa_answer_generation`
+
+它们共同的问题是：
+
+- instruction 都长得像“给问题或段落，生成一个短答案”
+- 但有的要求真答案，有的要求假答案，有的要求抽 span，有的是开放域事实问答
+- 模型在回答层面未必完全失效，但 routing 边界不够干净
+
+### 15.4 有一部分错误不是“分到另一个单任务”
+
+除了单任务互混之外，还存在两种现象：
+
+- 没有打出 task token，直接预测成空 task set
+- 同时打出多个 task token，通常是“主任务 + 一个很像的任务”
+
+所以有些样本不是“完全认错”，而是：
+
+- 任务边界不够干净
+- 额外多激活了相近任务
+
+### 15.5 当前判断
+
+`200-task baseline` 的 routing 弱点可以先总结成一句话：
+
+- 主要问题不是“大面积普遍性误分类”
+- 而是“少数高相似任务对和 QA 任务簇内部的边界不够清楚”
+
+这也解释了为什么后面 `mean loss + centered sep` 这类方法有机会带来收益：
+
+- 它们更可能改善的是“相近任务之间的几何边界”
+- 而不是去解决一个本来就不存在的全局性 routing 崩坏问题

@@ -30,7 +30,7 @@ export NCCL_DEBUG=INFO
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 4,5,6
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 1,2,3
     } >> "$RUN_DIR/gpu_monitor.log"
     sleep 10
 done &
@@ -57,9 +57,11 @@ python -u main_in_domain_fixed_split.py \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
     --task_loss_weight 0.0 \
+    --mean_loss_weight 0.01 \
     --use_sep_loss True \
     --sep_loss_weight 0.01 \
     --sep_loss_tau 0.3 \
+    --use_centered_sep True \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \
