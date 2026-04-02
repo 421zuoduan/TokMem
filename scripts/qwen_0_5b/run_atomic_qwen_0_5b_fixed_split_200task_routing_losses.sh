@@ -57,9 +57,10 @@ python -u main_in_domain_fixed_split.py \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
     --task_loss_weight 0.0 \
+    --use_mean_loss False \
     --mean_loss_weight 0.0 \
     --use_angular_margin_loss True \
-    --angular_margin_loss_weight 0.3 \
+    --angular_margin_loss_weight 0.01 \
     --routing_margin_m 0.3 \
     --routing_scale_s 16.0 \
     --use_hard_negative_loss True \

@@ -145,6 +145,8 @@ def main():
                         help='Weight for the task-token routing cross entropy loss')
     parser.add_argument('--mean_loss_weight', type=float, default=0.01,
                         help='Weight for the mean-direction memory bank regularizer')
+    parser.add_argument('--use_mean_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+                        help='Whether to include the mean-direction memory bank regularizer')
     parser.add_argument('--use_angular_margin_loss', type=parse_bool_arg, default=True, metavar='BOOL',
                         help='Whether to include angular-margin routing loss inside the memory bank')
     parser.add_argument('--angular_margin_loss_weight', type=float, default=0.3,
@@ -217,6 +219,7 @@ def main():
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
     print(f"Task loss weight: {args.task_loss_weight}")
+    print(f"Use mean loss: {args.use_mean_loss}")
     print(f"Mean loss weight: {args.mean_loss_weight}")
     print(f"Use angular-margin routing loss: {args.use_angular_margin_loss}")
     print(f"Angular-margin routing loss weight: {args.angular_margin_loss_weight}")
@@ -359,6 +362,7 @@ def main():
             validate_every_n_steps=args.validate_every_n_steps,
             use_task_loss=args.use_task_loss,
             task_loss_weight=args.task_loss_weight,
+            use_mean_loss=args.use_mean_loss,
             mean_loss_weight=args.mean_loss_weight,
             use_angular_margin_loss=args.use_angular_margin_loss,
             angular_margin_loss_weight=args.angular_margin_loss_weight,

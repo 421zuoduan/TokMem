@@ -2,8 +2,8 @@
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-NUM_TASKS=50
-SPLIT_NAME="task$NUM_TASKS-500-10-50-seed42"
+NUM_TASKS=700
+SPLIT_NAME="task700-500-10-50-seed42"
 SPLIT_DIR="$ROOT_DIR/atomic/cached_splits/$SPLIT_NAME"
 SPLIT_CACHE="$SPLIT_DIR/tokmem_atomic_fixed_split_maxlen1024.pt"
 
@@ -14,13 +14,13 @@ fi
 cd "$ROOT_DIR/atomic"
 
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_sep_loss_$RUN_ID"
+RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_mean_centered_sep_$RUN_ID"
 RUN_DIR="$ROOT_DIR/atomic/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
-export CUDA_VISIBLE_DEVICES=4,5,6
+export CUDA_VISIBLE_DEVICES=1,2,3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_SHOW_CPP_STACKTRACES=1
@@ -30,7 +30,7 @@ export NCCL_DEBUG=INFO
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 4,5,6
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 1,2,3
     } >> "$RUN_DIR/gpu_monitor.log"
     sleep 10
 done &
@@ -57,10 +57,13 @@ python -u main_in_domain_fixed_split.py \
     --generation_routing full_vocab_generation \
     --use_task_loss False \
     --task_loss_weight 0.0 \
+    --use_mean_loss True \
+    --mean_loss_weight 0.01 \
     --use_sep_loss True \
     --sep_loss_weight 0.01 \
-    --sep_loss_tau 0.3 \
+    --sep_loss_tau 0.5 \
+    --use_centered_sep True \
     --val_batch_size 16 \
     --test_batch_size 400 \
-    --validate_every_n_steps 500 \
+    --validate_every_n_steps 1000 \
     --seed 42

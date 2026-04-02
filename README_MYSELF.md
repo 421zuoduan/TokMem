@@ -1034,3 +1034,58 @@ sep_loss_weight = 0.0
 - `50-task`：baseline `20260331_131544`
 - `200-task`：`mean + centered sep` `20260401_171149`
 - `700-task`：baseline `20260329_164857`
+
+## 17. 最新归档：`200-task / routing losses`
+
+最新一轮“有 routing loss”的实验已经归档到：
+
+- [results/atomic_qwen2.5_0.5b_200tasks_routing_losses_20260402_025121](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_200tasks_routing_losses_20260402_025121)
+
+这次要注意，它不是把前面那个 `task_loss_weight` 打开，而是换成了两类 routing 辅助项：
+
+- `use_angular_margin_loss = True`
+- `angular_margin_loss_weight = 0.3`
+- `routing_margin_m = 0.3`
+- `routing_scale_s = 16.0`
+- `use_hard_negative_loss = True`
+- `hard_negative_loss_weight = 0.1`
+- `hard_negative_margin = 0.2`
+
+其余底座保持与 `200-task` baseline 一致：
+
+- `num_tasks = 200`
+- 同一份 split cache：`task200-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 1000`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `use_sep_loss = False`
+- `seed = 42`
+
+### 17.1 和现有 `200-task` 代表结果的直接对比
+
+| Run | 关键设置 | Best val loss | I+Q Task Acc | I+Q ROUGE-L | Query-only Task Acc | Query-only ROUGE-L |
+|---|---|---:|---:|---:|---:|---:|
+| baseline `20260401_061313` | 无额外 routing loss | 0.8587 | 96.76% | 50.9033% | 10.59% | 8.9164% |
+| 当前最佳 `20260401_171149` | `mean + centered sep` | 0.8476 | 97.13% | 51.2987% | 11.45% | 8.3608% |
+| 最新 `20260402_025121` | `angular margin + hard negative` | 2.3903 | 92.68% | 47.4125% | 17.44% | 8.3316% |
+
+### 17.2 当前判断
+
+这次最需要记住的是：
+
+- `query_only` routing 确实明显升了
+- 但当前主看的 `instruction_and_query` routing 和 `Rouge-L` 都明显变差
+- `best val loss` 也大幅恶化，不像是一个更稳的训练目标
+
+一句话总结：
+
+- 这组 routing losses 更像是在把模型往 `query_only` 判别方向推
+- 但它没有带来当前真正想要的综合收益，所以还不能替代 `200-task` 的现有最佳方案
