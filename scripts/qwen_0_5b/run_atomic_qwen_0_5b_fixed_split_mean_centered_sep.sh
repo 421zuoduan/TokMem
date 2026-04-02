@@ -20,17 +20,18 @@ RUN_DIR="$ROOT_DIR/atomic/runs/$RUN_NAME"
 mkdir -p "$RUN_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
-export CUDA_VISIBLE_DEVICES=1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_SHOW_CPP_STACKTRACES=1
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG=INFO
+MONITOR_GPUS="$CUDA_VISIBLE_DEVICES"
 
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 1,2,3
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i "$MONITOR_GPUS"
     } >> "$RUN_DIR/gpu_monitor.log"
     sleep 10
 done &
@@ -59,10 +60,16 @@ python -u main_in_domain_fixed_split.py \
     --task_loss_weight 0.0 \
     --use_mean_loss True \
     --mean_loss_weight 0.01 \
+    --use_angular_margin_loss False \
+    --angular_margin_loss_weight 0.01 \
+    --use_hard_negative_loss False \
+    --hard_negative_loss_weight 0.01 \
+    --hard_negative_margin 0.2 \
     --use_sep_loss True \
     --sep_loss_weight 0.01 \
-    --sep_loss_tau 0.5 \
+    --sep_loss_tau 0.3 \
     --use_centered_sep True \
+    --compute_memory_bank_geometry_stats True \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \

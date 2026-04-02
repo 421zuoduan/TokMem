@@ -6,6 +6,141 @@
 
 这个文件从现在开始只记录“当前最需要记住的实现变化”。
 
+## 0. 2026-04-02 这轮代码结构调整
+
+这轮改动主要不是改算法本身，而是把 `fixed_split` 训练路径里的日志组织、bank-routing 指标计算和 launcher 配置关系理顺。
+
+一句话记忆：
+
+- `task_training.py` 现在把“是否计算 routing metrics”和“如何格式化训练/验证日志”抽成了显式 helper
+- `AM / HN` 日志字段现在按各自开关单独显示，不再一起硬编码输出
+- `GEOMETRY` 不再跟着训练日志窗口频繁计算，只在 validation 和最终收尾时计算
+- `fixed_split` 的若干 launcher 不再隐式依赖默认 loss 配置，而是把关键开关直接写在脚本里
+
+### 0.1 `atomic/task_training.py` 里新增的结构层
+
+当前 [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py) 多了一层“日志/指标 helper”：
+
+- `should_compute_bank_routing_metrics(...)`
+- `format_training_progress_message(...)`
+- `format_training_logger_message(...)`
+- `format_validation_message(...)`
+- `format_validation_logger_message(...)`
+- `format_training_completion_logger_message(...)`
+- `maybe_get_memory_bank_geometry_stats(...)`
+- `maybe_get_memory_bank_geometry_summary(...)`
+
+这些 helper 的作用是把原来散落在训练循环里的字符串拼接和条件判断集中起来，避免每处都手写一遍：
+
+- progress print
+- training logger
+- validation print
+- validation logger
+- final summary
+
+所以现在训练主循环更像：
+
+- 先算 loss / metrics
+- 再把显示逻辑交给 formatter helper
+
+而不是在循环内部反复手拼日志字符串。
+
+### 0.2 bank-routing metrics 现在有单独总开关
+
+当前 bank-routing 指标是否需要计算，不再靠“反正后面会不会用到”这种隐含逻辑，而是显式通过：
+
+```python
+compute_bank_routing_metrics = should_compute_bank_routing_metrics(
+    use_angular_margin_loss=use_angular_margin_loss,
+    use_hard_negative_loss=use_hard_negative_loss,
+)
+```
+
+来决定。
+
+这意味着：
+
+- 如果 `AM/HN` 都关，就不会再额外算 bank-only routing outputs
+- 如果只开 `AM` 或只开 `HN`，仍然会算 routing metrics，但日志只显示对应那一项 loss
+
+要点是把两件事分开：
+
+- 是否需要 bank routing 的中间量
+- 哪些字段应该出现在日志里
+
+### 0.3 `AM / HN` 日志语义已经修正
+
+之前的问题是：
+
+- 只要任一 routing loss 开启，日志里会同时出现 `AMLoss` 和 `HNLoss`
+- 关闭的那一项会显示成 `0.0000`
+
+现在不再这样。
+
+当前语义是：
+
+- `show_angular_margin_loss = use_angular_margin_loss`
+- `show_hard_negative_loss = use_hard_negative_loss`
+
+所以：
+
+- 只开 `HN` 时，不会再打印假的 `AMLoss:0.0000`
+- 只开 `AM` 时，不会再打印假的 `HNLoss:0.0000`
+
+这同样适用于：
+
+- 训练过程日志
+- validation 日志
+- final training summary
+
+### 0.4 `GEOMETRY` 统计的频率已经降下来了
+
+当前 `compute_memory_bank_geometry_stats` 仍然是一个显式特性开关，但在开关打开时，触发点已经收窄。
+
+现在会计算 `GEOMETRY` 的时机是：
+
+- step-based validation
+- epoch 末 validation
+- training final summary
+
+不会再在“每 100 个 batch 的训练进度日志”那里算一次。
+
+一句话记忆：
+
+- 现在 `GEOMETRY` 是 validation-time / final-time 的统计
+- 不是 training-log-time 的高频统计
+
+### 0.5 `fixed_split` launcher 的配置关系
+
+当前 `scripts/qwen_0_5b/` 下这批 `fixed_split` launcher 做了一个重要约束：
+
+- 关键 routing-loss 开关尽量直接在脚本里显式写出
+- 不再依赖 `main_in_domain_fixed_split.py` 的默认值去“碰运气保持旧行为”
+
+重点影响的是原来依赖默认配置的那些脚本，例如：
+
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_10task_test_sep_loss.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_10task_test_sep_loss.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_sep_loss.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_sep_loss.sh)
+- [scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_sep_loss_tau03_sweep.sh](/data/ruochen/tokmem/scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_sep_loss_tau03_sweep.sh)
+
+这样做的目的不是让脚本更“通用”，而是让每个实验脚本的训练目标一眼可见，减少：
+
+- 默认值回归
+- 历史实验不可比
+- 看脚本时无法判断实际 loss 组合
+
+### 0.6 GPU watchdog 的当前约束
+
+`mean_centered_sep` 这一类 launcher 的 watchdog 现在应该跟实际 `CUDA_VISIBLE_DEVICES` 对齐，而不是手写另一组 GPU 编号。
+
+一句话记忆：
+
+- 训练绑哪几张卡
+- `gpu_monitor.log` 就应该监控同一组卡
+
+否则归档出来的 GPU 监控日志会和真实训练资源错位，后面查 OOM 或对比复现时会被误导。
+
 ## 1. `task_loss` 当前定义
 
 当前实现位置：
