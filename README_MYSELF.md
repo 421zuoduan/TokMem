@@ -518,6 +518,213 @@ penalty = relu(cosine_similarity - tau) ** 2
 最终稳定在：
 
 - `mean_norm = 0.5602`
+
+## 14. 新增 routing-margin losses：作用在 query-conditioned bank boundary 上
+
+这次新增的两个 loss 都是：
+
+- 只在“应该预测 memory token / reserved task token”的监督位置上计算
+- 只在 memory bank 内部计算
+- 不替换主训练的 full-vocab LM CE，只是 auxiliary loss
+
+总 loss 当前实现是：
+
+\[
+\mathcal L
+=
+\mathcal L_{\text{orig}}
++
+\mathbf{1}_{\text{use\_angular\_margin\_loss}}
+\cdot
+\text{angular\_margin\_loss\_weight}
+\cdot
+\mathcal L_{\text{am}}
++
+\mathbf{1}_{\text{use\_hard\_negative\_loss}}
+\cdot
+\text{hard\_negative\_loss\_weight}
+\cdot
+\mathcal L_{\text{hn}}
++
+\mathbf{1}_{\text{use\_sep\_loss}}
+\cdot
+\text{sep\_loss\_weight}
+\cdot
+\mathcal L_{\text{sep}}
+\]
+
+其中：
+
+- `L_orig` 仍然是原来的 full-vocab 主 CE
+- `L_am` 是 angular-margin routing loss
+- `L_hn` 是 hard-negative margin loss
+- `L_sep` 是保留的 embedding-level `sep loss`
+
+### 14.1 bank-only routing logits 怎么构造
+
+先取 task supervision 位置对应的 query hidden state：
+
+\[
+h_q
+\]
+
+再取当前 memory bank embedding：
+
+\[
+m_1, \dots, m_L
+\]
+
+然后做归一化后的 bank-only cosine logits：
+
+\[
+z_i = \hat h_q^\top \hat m_i
+\]
+
+其中：
+
+\[
+\hat h_q = \frac{h_q}{\|h_q\|+\epsilon}, \qquad
+\hat m_i = \frac{m_i}{\|m_i\|+\epsilon}
+\]
+
+一句话记忆：
+
+- 这两个新 loss 看的是 query-conditioned routing boundary
+- 不是只看 memory token embedding 彼此之间的全局几何分离
+
+### 14.2 Angular-Margin Routing Loss
+
+对正确类 \(y\)，把正类 logit 从：
+
+\[
+\cos(\theta_y)
+\]
+
+改成：
+
+\[
+\cos(\theta_y + m)
+\]
+
+再乘上 scale \(s\)：
+
+\[
+z'_y = s \cdot \cos(\theta_y + m)
+\]
+
+其余负类仍然是：
+
+\[
+z'_j = s \cdot \cos(\theta_j), \qquad j \ne y
+\]
+
+最后在 bank 内做 cross entropy：
+
+\[
+\mathcal L_{\text{am}}
+=
+-\log
+\frac{e^{z'_y}}
+{\sum_{j=1}^{L} e^{z'_j}}
+\]
+
+它的作用可以记成：
+
+- 正类不只是要最高
+- 还要在角度上留出更明确的 routing margin
+
+### 14.3 Hard-Negative Margin Loss
+
+先找当前样本在 bank 内最强的错误类：
+
+\[
+j^\star = \arg\max_{j \ne y} z_j
+\]
+
+然后定义：
+
+\[
+\mathcal L_{\text{hn}}
+=
+\max(0, \gamma - z_y + z_{j^\star})
+\]
+
+它的作用可以记成：
+
+- 正确 memory token 的 bank score
+- 至少要比当前 hardest negative 高出一个 margin
+
+相比对所有负类平均施压，这个 loss 更直接地盯住最容易混淆的错误 token。
+
+## 15. 新增超参里最重要的几个量是什么意思
+
+### 15.1 `angular_margin_loss_weight`
+
+- 控制 `L_am` 在总 loss 里的权重
+- 越大，越强调 bank 内角度边界
+- 太大可能会更强地牺牲主生成目标
+
+### 15.2 `hard_negative_loss_weight`
+
+- 控制 `L_hn` 在总 loss 里的权重
+- 越大，越强调“正类必须压过最强负类”
+- 更直接影响最容易混淆 task pair 的分离
+
+### 15.3 `routing_margin_m`
+
+- 它是 Angular-Margin loss 里的角度 margin \(m\)
+- 越大，正类必须离 decision boundary 更远才算“足够对”
+- 直觉上它控制的是 boundary 的“严格程度”
+
+一句话记忆：
+
+- `routing_margin_m` 越大，互斥压力越强
+
+### 15.4 `routing_scale_s`
+
+- 它是 Angular-Margin loss 里 softmax 之前的 scale \(s\)
+- 因为 cosine logits 天然只在 `[-1, 1]`，不放大时 CE 往往太软
+- 乘上 `s` 之后，bank-only 分类信号会更清晰
+
+一句话记忆：
+
+- `routing_scale_s` 决定 cosine 差异在 CE 里被放大到什么程度
+
+### 15.5 `hard_negative_margin`
+
+- 它是 hard-negative loss 里的 margin \(\gamma\)
+- 要求正类分数至少比 hardest negative 高出这么多
+- 越大，hard-negative 约束越严格
+
+## 16. 当前默认建议配置
+
+当前代码默认建议值是：
+
+```python
+use_angular_margin_loss = True
+angular_margin_loss_weight = 0.3
+routing_margin_m = 0.3
+routing_scale_s = 16.0
+
+use_hard_negative_loss = True
+hard_negative_loss_weight = 0.1
+hard_negative_margin = 0.2
+
+use_sep_loss = True
+sep_loss_weight = 0.0
+```
+
+如果用现在新增的 `200-task / Qwen2.5-0.5B` routing-loss 脚本，则训练实际打开的是：
+
+- 原始 full-vocab CE
+- `angular_margin_loss_weight = 0.3`
+- `hard_negative_loss_weight = 0.1`
+
+同时显式关闭：
+
+- `use_task_loss = False`
+- `mean_loss_weight = 0.0`
+- `use_sep_loss = False`
 - `pc1_ratio = 0.0440`
 - `top5_ratio = 0.1344`
 - `top10_ratio = 0.2078`
@@ -715,3 +922,115 @@ penalty = relu(cosine_similarity - tau) ** 2
 
 - 它们更可能改善的是“相近任务之间的几何边界”
 - 而不是去解决一个本来就不存在的全局性 routing 崩坏问题
+
+## 16. 实验汇总对比表
+
+这个章节只做一件事：
+
+- 把当前最值得反复比较的 `50-task`、`200-task`、`700-task` 实验放到统一视角下
+- 重点只看当前最关心的指标：`instruction_and_query` routing acc、`instruction_and_query` ROUGE-L，以及 `query_only` 的辅助变化
+
+### 16.1 `50-task / Qwen2.5-0.5B` 汇总
+
+共同底座：
+
+- split cache：`task50-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 500`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `seed = 42`
+
+| Run | 类型 | 关键改动 | Best val loss | I+Q Task Acc | I+Q ROUGE-L | Query-only Task Acc | Query-only ROUGE-L | 简评 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `20260331_131544` | baseline | 无 `sep loss` | 0.8644 | 99.40% | 53.2796% | 10.88% | 9.6481% | 当前 `50-task` 的回答质量基线。 |
+| `20260331_134233` | `sep loss` 对照 | `use_sep_loss=True`, `sep_loss_weight=0.1`, `sep_loss_tau=0.2` | 0.8593 | 99.56% | 52.8551% | 10.84% | 10.0353% | validation 更好，I+Q routing 略升，但 I+Q ROUGE-L 小幅回落。 |
+| `20260331_142411` | 弱 `sep loss` | `sep_loss_weight=0.01`, `sep_loss_tau=0.2` | 0.8775 | 99.60% | 52.4637% | 13.64% | 9.4050% | `query_only` routing 最强，但 I+Q ROUGE-L 和 val loss 都更差。 |
+
+当前判断：
+
+- `50-task` 已经接近饱和，`instruction_and_query` routing 在三条线上都接近满分，继续卷 routing 的边际收益很小。
+- `sep loss` 的主要作用更像 routing regularizer，不像稳定提升回答质量的方法。
+- 如果只看综合稳健性，当前还是 baseline 更均衡；如果只想推 `query_only` routing，`sep_loss_weight=0.01` 更值得继续试。
+
+### 16.2 `200-task / Qwen2.5-0.5B` 汇总
+
+共同底座：
+
+- split cache：`task200-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 1000`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `seed = 42`
+
+| Run | 类型 | 关键改动 | Best val loss | I+Q Task Acc | I+Q ROUGE-L | Query-only Task Acc | Query-only ROUGE-L | 简评 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `20260401_061313` | baseline | 无 `sep loss` | 0.8587 | 96.76% | 50.9033% | 10.59% | 8.9164% | 当前 `200-task` 的主基线。 |
+| `20260401_095753` | 首轮 `sep loss` | `use_sep_loss=True`, `sep_loss_weight=0.01`, `sep_loss_tau=0.5` | 0.8638 | 97.21% | 50.6665% | 10.82% | 10.1545% | I+Q routing 升，`query_only` 也升，但 I+Q ROUGE-L 和 val loss 变差。 |
+| `20260401_144757` | rerun + geometry | 保持 `sep=0.01`, `tau=0.5`，新增 geometry monitoring | 0.8603 | 96.61% | 51.2440% | 12.47% | 9.6153% | routing 不稳定，但 I+Q ROUGE-L 回升，`query_only` routing 也是当前最高。 |
+| `20260401_171149` | `mean + centered sep` | `mean_loss_weight=0.01`, `use_centered_sep=True`，同时保留 `sep=0.01`, `tau=0.5` | 0.8476 | 97.13% | 51.2987% | 11.45% | 8.3608% | 当前 `200-task` 最强完整结果，I+Q routing、ROUGE-L、val loss 三项同时领先。 |
+
+当前判断：
+
+- `200-task` 是目前最清楚能看出“改进方法开始起作用”的 setting。
+- 单独加 `sep loss` 的收益不稳定：有时更像把提升转移到 `query_only`，但未必改善主看的 I+Q ROUGE-L。
+- `mean loss + centered sep` 是当前最值得保留的方向，因为它不是只换来 routing 或只换来回答质量，而是把三项主指标一起往上推。
+- 但从 `query_only` 指标看，`20260401_171149` 也不是全维最强，说明这条改进更像是在优化主任务条件下的边界，而不是简单强化无 instruction routing。
+
+### 16.3 `700-task / Qwen2.5-0.5B` 汇总
+
+共同底座：
+
+- split cache：`task700-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 1000`
+- `use_task_loss = False`
+- `task_loss_weight = 0.0`
+- `seed = 42`
+
+| Run | 类型 | 关键改动 | Best val loss | I+Q Task Acc | I+Q ROUGE-L | Query-only Task Acc | Query-only ROUGE-L | 简评 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `20260329_164857` | baseline | 无 `sep loss` | 0.9231 | 93.23% | 50.4578% | 6.68% | 8.1077% | 当前 `700-task` 最稳的无 `sep loss` 基线。 |
+| `20260331_150719` | `sep loss` 对照 | `use_sep_loss=True`, `sep_loss_weight=0.1`, `sep_loss_tau=0.2` | 0.9351 | 92.40% | 50.1508% | 6.42% | 8.0954% | 基本全面退步。 |
+| `20260331_160533` | 弱 `sep loss` | `sep_loss_weight=0.01`, `sep_loss_tau=0.5` | 0.9273 | 92.82% | 49.9719% | 6.52% | 7.4697% | 比 `0.1/0.2` 稍稳，但仍没超过 baseline。 |
+| `20260401_035020` | 收紧 `tau` | `sep_loss_weight=0.01`, `sep_loss_tau=0.3` | 0.9312 | 92.81% | 50.4539% | 6.17% | 8.1681% | I+Q ROUGE-L 几乎追平 baseline，但 routing 和 val loss 仍未追平。 |
+
+当前判断：
+
+- `700-task` 是最能暴露方法上限的 setting。这里 `sep loss` 没有像 `200-task` 那样给出清晰正收益。
+- `tau=0.3` 相比 `tau=0.5` 更像是在拿一点 routing 换回答质量，但这依然不是明确优于 baseline 的交易。
+- 所以当前 `700-task` 的主结论仍然是：baseline 比较稳，`sep loss` 还没证明自己值得常驻。
+
+### 16.4 跨 setting 的一句话结论
+
+- `50-task`：已经接近 routing ceiling，改进方法更容易表现成细小 trade-off，而不是实质跃迁。
+- `200-task`：当前最有研究价值；难度足够高，且还能稳定看出方法差异，最适合继续做 `routing geometry` 相关改进。
+- `700-task`：最接近真正的大规模压力测试；如果方法在这里不能稳定超过 baseline，就还不能算成熟。
+
+如果只保留每个 setting 下一条“当前最值得当作代表结果”的 run，可以先记成：
+
+- `50-task`：baseline `20260331_131544`
+- `200-task`：`mean + centered sep` `20260401_171149`
+- `700-task`：baseline `20260329_164857`

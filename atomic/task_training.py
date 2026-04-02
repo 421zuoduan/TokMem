@@ -1,6 +1,7 @@
 import gc
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -145,6 +146,113 @@ def compute_task_loss(shift_logits, shift_labels, reserved_token_ids):
 
     task_loss = F.cross_entropy(shift_logits[task_loss_mask], shift_labels[task_loss_mask])
     return task_loss, routing_count
+
+
+def compute_bank_only_routing_outputs(
+    shift_hidden_states,
+    shift_labels,
+    reserved_token_ids,
+    task_embeddings,
+    eps=1e-12,
+):
+    """Build bank-only routing logits and summary stats on task-token positions."""
+    import torch.nn.functional as F
+
+    zero = torch.zeros((), device=shift_hidden_states.device, dtype=torch.float32)
+    empty_logits = torch.empty(
+        (0, 0),
+        device=shift_hidden_states.device,
+        dtype=torch.float32,
+    )
+    empty_targets = torch.empty((0,), device=shift_labels.device, dtype=torch.long)
+
+    if task_embeddings is None:
+        raise ValueError("task_embeddings must be provided for routing losses")
+
+    valid_mask = shift_labels != -100
+    routing_mask = valid_mask & torch.isin(shift_labels, reserved_token_ids)
+    routing_count = int(routing_mask.sum().item())
+    if routing_count == 0:
+        return {
+            "bank_logits": empty_logits,
+            "bank_targets": empty_targets,
+            "routing_count": 0,
+            "routing_bank_acc": zero,
+            "routing_bank_margin_avg": zero,
+            "routing_correct_count": 0,
+            "routing_margin_sum": zero,
+        }
+
+    routing_hidden = shift_hidden_states[routing_mask].to(dtype=torch.float32)
+    routing_labels = shift_labels[routing_mask]
+    bank_targets = torch.searchsorted(reserved_token_ids, routing_labels)
+
+    bank = task_embeddings.to(device=routing_hidden.device, dtype=torch.float32)
+    normalized_hidden = F.normalize(routing_hidden, p=2, dim=-1, eps=eps)
+    normalized_bank = F.normalize(bank, p=2, dim=-1, eps=eps)
+    bank_logits = torch.matmul(normalized_hidden, normalized_bank.transpose(0, 1))
+
+    predicted_targets = torch.argmax(bank_logits, dim=-1)
+    routing_correct_count = int((predicted_targets == bank_targets).sum().item())
+    routing_bank_acc = torch.tensor(
+        routing_correct_count / routing_count,
+        device=bank_logits.device,
+        dtype=bank_logits.dtype,
+    )
+
+    if bank_logits.shape[-1] <= 1:
+        routing_margin_sum = zero
+        routing_bank_margin_avg = zero
+    else:
+        positive_logits = bank_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
+        negative_mask = F.one_hot(bank_targets, num_classes=bank_logits.shape[-1]).bool()
+        hardest_negative_logits = bank_logits.masked_fill(negative_mask, float("-inf")).max(dim=-1).values
+        routing_margins = positive_logits - hardest_negative_logits
+        routing_margin_sum = routing_margins.sum()
+        routing_bank_margin_avg = routing_margins.mean()
+
+    return {
+        "bank_logits": bank_logits,
+        "bank_targets": bank_targets,
+        "routing_count": routing_count,
+        "routing_bank_acc": routing_bank_acc,
+        "routing_bank_margin_avg": routing_bank_margin_avg,
+        "routing_correct_count": routing_correct_count,
+        "routing_margin_sum": routing_margin_sum,
+    }
+
+
+def compute_angular_margin_loss(bank_logits, bank_targets, routing_margin_m=0.3, routing_scale_s=16.0, eps=1e-7):
+    """Compute an ArcFace-style routing loss inside the memory bank only."""
+    import torch.nn.functional as F
+
+    if bank_logits.numel() == 0:
+        return torch.zeros((), device=bank_logits.device, dtype=bank_logits.dtype)
+
+    cosine_logits = bank_logits.clamp(min=-1.0 + eps, max=1.0 - eps)
+    margin_cos = math.cos(routing_margin_m)
+    margin_sin = math.sin(routing_margin_m)
+
+    positive_cosine = cosine_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
+    positive_sine = torch.sqrt(torch.clamp(1.0 - positive_cosine.pow(2), min=0.0))
+    margin_positive = positive_cosine * margin_cos - positive_sine * margin_sin
+
+    scaled_logits = cosine_logits * routing_scale_s
+    scaled_logits.scatter_(1, bank_targets.unsqueeze(1), (margin_positive * routing_scale_s).unsqueeze(1))
+    return F.cross_entropy(scaled_logits, bank_targets)
+
+
+def compute_hard_negative_loss(bank_logits, bank_targets, hard_negative_margin=0.2):
+    """Push the positive routing logit above the hardest negative by a margin."""
+    import torch.nn.functional as F
+
+    if bank_logits.numel() == 0 or bank_logits.shape[-1] <= 1:
+        return torch.zeros((), device=bank_logits.device, dtype=bank_logits.dtype)
+
+    positive_logits = bank_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
+    negative_mask = F.one_hot(bank_targets, num_classes=bank_logits.shape[-1]).bool()
+    hardest_negative_logits = bank_logits.masked_fill(negative_mask, float("-inf")).max(dim=-1).values
+    return torch.relu(hard_negative_margin - positive_logits + hardest_negative_logits).mean()
 
 
 def compute_memory_bank_mean_stats(task_embeddings, eps=1e-12):
@@ -321,8 +429,15 @@ def run_validation(
     use_task_loss=False,
     task_loss_weight=0.0,
     mean_loss_weight=0.01,
-    use_sep_loss=False,
-    sep_loss_weight=0.1,
+    use_angular_margin_loss=True,
+    angular_margin_loss_weight=0.3,
+    routing_margin_m=0.3,
+    routing_scale_s=16.0,
+    use_hard_negative_loss=True,
+    hard_negative_loss_weight=0.1,
+    hard_negative_margin=0.2,
+    use_sep_loss=True,
+    sep_loss_weight=0.0,
     sep_loss_tau=0.2,
     use_centered_sep=False,
     return_metrics=False,
@@ -338,9 +453,14 @@ def run_validation(
 
     val_loss_total = 0.0
     val_mean_loss_total = 0.0
+    val_angular_margin_loss_total = 0.0
+    val_hard_negative_loss_total = 0.0
     val_sep_loss_total = 0.0
     val_sep_loss_raw_total = 0.0
     val_sep_loss_centered_total = 0.0
+    val_routing_correct_total = 0
+    val_routing_examples_total = 0
+    val_routing_margin_total = 0.0
     val_batches = 0
     valid_losses = 0
     
@@ -352,10 +472,19 @@ def run_validation(
             attention_mask = batch['attention_mask'].to(input_device)
             labels = batch['labels'].to(output_device)
 
-            logits = model(input_ids, attention_mask)
+            logits, hidden_states = model(
+                input_ids,
+                attention_mask,
+                return_hidden_states=True,
+            )
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
+            if hidden_states is not None:
+                shift_hidden_states = hidden_states[..., :-1, :].contiguous()
+                shift_hidden_states = shift_hidden_states.view(-1, shift_hidden_states.size(-1))
+            else:
+                shift_hidden_states = None
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
             reserved_token_ids = model.get_reserved_token_tensor(shift_logits.device)
@@ -375,7 +504,32 @@ def run_validation(
                 mean_loss, _ = compute_memory_bank_mean_stats(
                     get_memory_bank_embeddings(model),
                 )
-                if use_sep_loss:
+                routing_outputs = compute_bank_only_routing_outputs(
+                    shift_hidden_states,
+                    shift_labels,
+                    reserved_token_ids,
+                    get_memory_bank_embeddings(model),
+                )
+                if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
+                    angular_margin_loss = compute_angular_margin_loss(
+                        routing_outputs["bank_logits"],
+                        routing_outputs["bank_targets"],
+                        routing_margin_m=routing_margin_m,
+                        routing_scale_s=routing_scale_s,
+                    )
+                else:
+                    angular_margin_loss = torch.tensor(0.0, device=shift_logits.device)
+
+                if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
+                    hard_negative_loss = compute_hard_negative_loss(
+                        routing_outputs["bank_logits"],
+                        routing_outputs["bank_targets"],
+                        hard_negative_margin=hard_negative_margin,
+                    )
+                else:
+                    hard_negative_loss = torch.tensor(0.0, device=shift_logits.device)
+
+                if use_sep_loss and sep_loss_weight != 0.0:
                     sep_loss_components = compute_separation_loss_components(
                         get_separation_loss_embeddings(model),
                         tau=sep_loss_tau,
@@ -394,12 +548,21 @@ def run_validation(
                     + mean_loss_weight * mean_loss
                     + sep_loss_weight * sep_loss
                 )
+                if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
+                    loss = loss + angular_margin_loss_weight * angular_margin_loss
+                if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
+                    loss = loss + hard_negative_loss_weight * hard_negative_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
                     val_mean_loss_total += mean_loss.item()
+                    val_angular_margin_loss_total += angular_margin_loss.item()
+                    val_hard_negative_loss_total += hard_negative_loss.item()
                     val_sep_loss_total += sep_loss.item()
                     val_sep_loss_raw_total += sep_loss_raw.item()
                     val_sep_loss_centered_total += sep_loss_centered.item()
+                    val_routing_correct_total += routing_outputs["routing_correct_count"]
+                    val_routing_examples_total += routing_outputs["routing_count"]
+                    val_routing_margin_total += routing_outputs["routing_margin_sum"].item()
                     valid_losses += 1
             val_batches += 1
 
@@ -407,15 +570,27 @@ def run_validation(
         print(f"Warning: No valid validation losses computed ({val_batches} batches processed)")
         avg_val_loss = float('inf')
         avg_mean_loss = 0.0
+        avg_angular_margin_loss = 0.0
+        avg_hard_negative_loss = 0.0
         avg_sep_loss = 0.0
         avg_sep_loss_raw = 0.0
         avg_sep_loss_centered = 0.0
+        avg_routing_bank_acc = 0.0
+        avg_routing_bank_margin = 0.0
     else:
         avg_val_loss = val_loss_total / valid_losses
         avg_mean_loss = val_mean_loss_total / valid_losses
+        avg_angular_margin_loss = val_angular_margin_loss_total / valid_losses
+        avg_hard_negative_loss = val_hard_negative_loss_total / valid_losses
         avg_sep_loss = val_sep_loss_total / valid_losses
         avg_sep_loss_raw = val_sep_loss_raw_total / valid_losses
         avg_sep_loss_centered = val_sep_loss_centered_total / valid_losses
+        if val_routing_examples_total > 0:
+            avg_routing_bank_acc = val_routing_correct_total / val_routing_examples_total
+            avg_routing_bank_margin = val_routing_margin_total / val_routing_examples_total
+        else:
+            avg_routing_bank_acc = 0.0
+            avg_routing_bank_margin = 0.0
 
     if was_training:
         model.train()
@@ -424,9 +599,13 @@ def run_validation(
         return {
             "avg_val_loss": avg_val_loss,
             "avg_mean_loss": avg_mean_loss,
+            "avg_angular_margin_loss": avg_angular_margin_loss,
+            "avg_hard_negative_loss": avg_hard_negative_loss,
             "avg_sep_loss": avg_sep_loss,
             "avg_sep_loss_raw": avg_sep_loss_raw,
             "avg_sep_loss_centered": avg_sep_loss_centered,
+            "routing_bank_acc": avg_routing_bank_acc,
+            "routing_bank_margin_avg": avg_routing_bank_margin,
             "valid_losses": valid_losses,
             "val_batches": val_batches,
         }
@@ -447,10 +626,18 @@ def train_task_calling_model(
     use_task_loss=False,
     task_loss_weight=0.0,
     mean_loss_weight=0.01,
-    use_sep_loss=False,
-    sep_loss_weight=0.1,
+    use_angular_margin_loss=True,
+    angular_margin_loss_weight=0.3,
+    routing_margin_m=0.3,
+    routing_scale_s=16.0,
+    use_hard_negative_loss=True,
+    hard_negative_loss_weight=0.1,
+    hard_negative_margin=0.2,
+    use_sep_loss=True,
+    sep_loss_weight=0.0,
     sep_loss_tau=0.2,
     use_centered_sep=False,
+    compute_memory_bank_geometry_stats=False,
 ):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
@@ -483,10 +670,18 @@ def train_task_calling_model(
     print(f"Use task loss: {use_task_loss}")
     print(f"Task loss weight: {task_loss_weight}")
     print(f"Mean loss weight: {mean_loss_weight}")
+    print(f"Use angular-margin routing loss: {use_angular_margin_loss}")
+    print(f"Angular-margin routing loss weight: {angular_margin_loss_weight}")
+    print(f"Routing angular margin m: {routing_margin_m}")
+    print(f"Routing scale s: {routing_scale_s}")
+    print(f"Use hard-negative routing loss: {use_hard_negative_loss}")
+    print(f"Hard-negative routing loss weight: {hard_negative_loss_weight}")
+    print(f"Hard-negative routing margin: {hard_negative_margin}")
     print(f"Use separation loss: {use_sep_loss}")
     print(f"Separation loss weight: {sep_loss_weight}")
     print(f"Separation loss tau: {sep_loss_tau}")
     print(f"Use centered separation loss: {use_centered_sep}")
+    print(f"Compute memory bank geometry stats: {compute_memory_bank_geometry_stats}")
     if model.decouple_embeddings:
         print(f"Training mode: Decoupled embeddings")
         print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)} (input: {model.trainable_task_input_embeddings.numel()}, output: {model.trainable_task_output_embeddings.numel()})")
@@ -501,34 +696,44 @@ def train_task_calling_model(
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
     training_logger.info(f"Task loss enabled: {use_task_loss}, Weight: {task_loss_weight}")
     training_logger.info(f"Mean loss weight: {mean_loss_weight}")
+    training_logger.info(
+        f"Angular-margin loss enabled: {use_angular_margin_loss}, Weight: {angular_margin_loss_weight}, "
+        f"Margin: {routing_margin_m}, Scale: {routing_scale_s}"
+    )
+    training_logger.info(
+        f"Hard-negative loss enabled: {use_hard_negative_loss}, Weight: {hard_negative_loss_weight}, "
+        f"Margin: {hard_negative_margin}"
+    )
     training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}, Centered: {use_centered_sep}")
+    training_logger.info(f"Memory bank geometry stats enabled: {compute_memory_bank_geometry_stats}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
-
-    def log_memory_bank_geometry_stats(tag):
-        stats = compute_memory_bank_geometry_stats(get_memory_bank_embeddings(model))
-        summary = format_memory_bank_geometry_stats(stats)
-        print(f"{tag} {summary}")
-        training_logger.info(f"{tag} {summary}")
-        return stats
     
     total_loss = 0
     total_task_loss = 0
     total_mean_loss = 0
+    total_angular_margin_loss = 0
+    total_hard_negative_loss = 0
     total_sep_loss = 0
     total_sep_loss_raw = 0
     total_sep_loss_centered = 0
     task_token_count = 0
+    total_routing_correct = 0
+    total_routing_margin = 0.0
     task_loss_batches = 0  # Count of batches that had task tokens
     step = 0
 
     batch_loss = 0
     batch_task_loss = 0
     batch_mean_loss = 0
+    batch_angular_margin_loss = 0
+    batch_hard_negative_loss = 0
     batch_sep_loss = 0
     batch_sep_loss_raw = 0
     batch_sep_loss_centered = 0
     batch_task_count = 0
+    batch_routing_correct = 0
+    batch_routing_margin = 0.0
     batches_since_log = 0
     
     # Track best validation loss and model state
@@ -547,11 +752,20 @@ def train_task_calling_model(
             labels = batch['labels'].to(output_device)
             
             # Forward pass
-            logits = model(input_ids, attention_mask)
+            logits, hidden_states = model(
+                input_ids,
+                attention_mask,
+                return_hidden_states=True,
+            )
             # Shift logits and labels for causal LM loss
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
+            if hidden_states is not None:
+                shift_hidden_states = hidden_states[..., :-1, :].contiguous()
+                shift_hidden_states = shift_hidden_states.view(-1, shift_hidden_states.size(-1))
+            else:
+                shift_hidden_states = None
             # Flatten for cross entropy
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
@@ -568,30 +782,67 @@ def train_task_calling_model(
             mean_loss, mean_norm = compute_memory_bank_mean_stats(
                 get_memory_bank_embeddings(model),
             )
-            sep_loss_components = compute_separation_loss_components(
-                get_separation_loss_embeddings(model),
-                tau=sep_loss_tau,
-                use_centered_sep=use_centered_sep,
+            routing_outputs = compute_bank_only_routing_outputs(
+                shift_hidden_states,
+                shift_labels,
+                reserved_token_ids,
+                get_memory_bank_embeddings(model),
             )
-            sep_loss = sep_loss_components["sep_loss"]
-            sep_loss_raw = sep_loss_components["sep_loss_raw"]
-            sep_loss_centered = sep_loss_components["sep_loss_centered"]
+            if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
+                angular_margin_loss = compute_angular_margin_loss(
+                    routing_outputs["bank_logits"],
+                    routing_outputs["bank_targets"],
+                    routing_margin_m=routing_margin_m,
+                    routing_scale_s=routing_scale_s,
+                )
+            else:
+                angular_margin_loss = torch.tensor(0.0, device=shift_logits.device)
+
+            if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
+                hard_negative_loss = compute_hard_negative_loss(
+                    routing_outputs["bank_logits"],
+                    routing_outputs["bank_targets"],
+                    hard_negative_margin=hard_negative_margin,
+                )
+            else:
+                hard_negative_loss = torch.tensor(0.0, device=shift_logits.device)
+            if use_sep_loss and sep_loss_weight != 0.0:
+                sep_loss_components = compute_separation_loss_components(
+                    get_separation_loss_embeddings(model),
+                    tau=sep_loss_tau,
+                    use_centered_sep=use_centered_sep,
+                )
+                sep_loss = sep_loss_components["sep_loss"]
+                sep_loss_raw = sep_loss_components["sep_loss_raw"]
+                sep_loss_centered = sep_loss_components["sep_loss_centered"]
+            else:
+                sep_loss = torch.tensor(0.0, device=shift_logits.device)
+                sep_loss_raw = torch.tensor(0.0, device=shift_logits.device)
+                sep_loss_centered = torch.tensor(0.0, device=shift_logits.device)
 
             loss = lm_loss
             if use_task_loss:
                 loss = loss + task_loss_weight * task_loss
             if mean_loss_weight:
                 loss = loss + mean_loss_weight * mean_loss
-            if use_sep_loss:
+            if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
+                loss = loss + angular_margin_loss_weight * angular_margin_loss
+            if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
+                loss = loss + hard_negative_loss_weight * hard_negative_loss
+            if use_sep_loss and sep_loss_weight != 0.0:
                 loss = loss + sep_loss_weight * sep_loss
             batch_task_count += current_task_count
 
             batch_loss += loss.item()
             batch_task_loss += task_loss.item()
             batch_mean_loss += mean_loss.item()
+            batch_angular_margin_loss += angular_margin_loss.item()
+            batch_hard_negative_loss += hard_negative_loss.item()
             batch_sep_loss += sep_loss.item()
             batch_sep_loss_raw += sep_loss_raw.item()
             batch_sep_loss_centered += sep_loss_centered.item()
+            batch_routing_correct += routing_outputs["routing_correct_count"]
+            batch_routing_margin += routing_outputs["routing_margin_sum"].item()
             
             # Backward pass
             loss.backward()
@@ -604,10 +855,14 @@ def train_task_calling_model(
             total_loss += loss.item()
             total_task_loss += task_loss.item()
             total_mean_loss += mean_loss.item()
+            total_angular_margin_loss += angular_margin_loss.item()
+            total_hard_negative_loss += hard_negative_loss.item()
             total_sep_loss += sep_loss.item()
             total_sep_loss_raw += sep_loss_raw.item()
             total_sep_loss_centered += sep_loss_centered.item()
             task_token_count += current_task_count
+            total_routing_correct += routing_outputs["routing_correct_count"]
+            total_routing_margin += routing_outputs["routing_margin_sum"].item()
             if current_task_count > 0:
                 task_loss_batches += 1
             
@@ -622,10 +877,18 @@ def train_task_calling_model(
                 avg_loss = batch_loss / batches_since_log
                 avg_task_loss = batch_task_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_mean_loss = batch_mean_loss / batches_since_log if batches_since_log > 0 else 0.0
+                avg_angular_margin_loss = batch_angular_margin_loss / batches_since_log if batches_since_log > 0 else 0.0
+                avg_hard_negative_loss = batch_hard_negative_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss = batch_sep_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss_raw = batch_sep_loss_raw / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss_centered = batch_sep_loss_centered / batches_since_log if batches_since_log > 0 else 0.0
                 avg_task_count = batch_task_count / batches_since_log
+                if batch_task_count > 0:
+                    avg_routing_bank_acc = batch_routing_correct / batch_task_count
+                    avg_routing_bank_margin = batch_routing_margin / batch_task_count
+                else:
+                    avg_routing_bank_acc = 0.0
+                    avg_routing_bank_margin = 0.0
                 
                 completed_batches = epoch * len(dataloader) + batch_idx + 1
                 elapsed_seconds = time.time() - training_start_time
@@ -643,16 +906,24 @@ def train_task_calling_model(
                 print(
                     f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(dataloader)}, "
                     f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, Avg Mean Loss: {avg_mean_loss:.4f}, "
-                    f"Avg Sep Loss: {avg_sep_loss:.4f}, Mean Norm: {mean_norm.item():.4f}, "
+                    f"Avg AM Loss: {avg_angular_margin_loss:.4f}, Avg HN Loss: {avg_hard_negative_loss:.4f}, "
+                    f"Avg Sep Loss: {avg_sep_loss:.4f}, Routing Bank Acc: {avg_routing_bank_acc:.4f}, "
+                    f"Routing Bank Margin: {avg_routing_bank_margin:.4f}, Mean Norm: {mean_norm.item():.4f}, "
                     f"Avg Task Tokens: {avg_task_count:.1f}, LR: {current_lr:.6f}, {time_summary}"
                 )
                 training_logger.info(
                     f"E{epoch+1}/{num_epochs} B{batch_idx+1}/{len(dataloader)} "
                     f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} AvgMeanLoss:{avg_mean_loss:.4f} "
-                    f"AvgSepLoss:{avg_sep_loss:.4f} MeanNorm:{mean_norm.item():.4f} AvgTokens:{avg_task_count:.1f} "
+                    f"AvgAMLoss:{avg_angular_margin_loss:.4f} AvgHNLoss:{avg_hard_negative_loss:.4f} "
+                    f"AvgSepLoss:{avg_sep_loss:.4f} RoutingBankAcc:{avg_routing_bank_acc:.4f} "
+                    f"RoutingBankMargin:{avg_routing_bank_margin:.4f} MeanNorm:{mean_norm.item():.4f} AvgTokens:{avg_task_count:.1f} "
                     f"LR:{current_lr:.6f} {time_summary}"
                 )
-                log_memory_bank_geometry_stats("MEMORY BANK GEOMETRY")
+                if compute_memory_bank_geometry_stats:
+                    stats = compute_memory_bank_geometry_stats(get_memory_bank_embeddings(model))
+                    summary = format_memory_bank_geometry_stats(stats)
+                    print(f"MEMORY BANK GEOMETRY {summary}")
+                    training_logger.info(f"MEMORY BANK GEOMETRY {summary}")
                 if use_centered_sep:
                     training_logger.info(
                         f"SEP LOSS DETAIL Raw:{avg_sep_loss_raw:.4f} Centered:{avg_sep_loss_centered:.4f}"
@@ -662,10 +933,14 @@ def train_task_calling_model(
                 batch_loss = 0
                 batch_task_loss = 0
                 batch_mean_loss = 0
+                batch_angular_margin_loss = 0
+                batch_hard_negative_loss = 0
                 batch_sep_loss = 0
                 batch_sep_loss_raw = 0
                 batch_sep_loss_centered = 0
                 batch_task_count = 0
+                batch_routing_correct = 0
+                batch_routing_margin = 0.0
                 batches_since_log = 0
             
             step += 1
@@ -681,6 +956,13 @@ def train_task_calling_model(
                         use_task_loss=use_task_loss,
                         task_loss_weight=task_loss_weight,
                         mean_loss_weight=mean_loss_weight,
+                        use_angular_margin_loss=use_angular_margin_loss,
+                        angular_margin_loss_weight=angular_margin_loss_weight,
+                        routing_margin_m=routing_margin_m,
+                        routing_scale_s=routing_scale_s,
+                        use_hard_negative_loss=use_hard_negative_loss,
+                        hard_negative_loss_weight=hard_negative_loss_weight,
+                        hard_negative_margin=hard_negative_margin,
                         use_sep_loss=use_sep_loss,
                         sep_loss_weight=sep_loss_weight,
                         sep_loss_tau=sep_loss_tau,
@@ -690,18 +972,31 @@ def train_task_calling_model(
                     clear_cuda_cache()
                     avg_val_loss = val_metrics["avg_val_loss"]
                     avg_val_mean_loss = val_metrics["avg_mean_loss"]
+                    avg_val_angular_margin_loss = val_metrics["avg_angular_margin_loss"]
+                    avg_val_hard_negative_loss = val_metrics["avg_hard_negative_loss"]
                     avg_val_sep_loss = val_metrics["avg_sep_loss"]
                     avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
                     avg_val_sep_loss_centered = val_metrics["avg_sep_loss_centered"]
+                    avg_val_routing_bank_acc = val_metrics["routing_bank_acc"]
+                    avg_val_routing_bank_margin = val_metrics["routing_bank_margin_avg"]
                     print(
                         f"Step {step} - Validation Loss: {avg_val_loss:.4f}, "
-                        f"Mean Loss: {avg_val_mean_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}"
+                        f"Mean Loss: {avg_val_mean_loss:.4f}, AM Loss: {avg_val_angular_margin_loss:.4f}, "
+                        f"HN Loss: {avg_val_hard_negative_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}, "
+                        f"Routing Bank Acc: {avg_val_routing_bank_acc:.4f}, "
+                        f"Routing Bank Margin: {avg_val_routing_bank_margin:.4f}"
                     )
                     training_logger.info(
                         f"VALIDATION STEP {step} Loss:{avg_val_loss:.4f} MeanLoss:{avg_val_mean_loss:.4f} "
-                        f"SepLoss:{avg_val_sep_loss:.4f}"
+                        f"AMLoss:{avg_val_angular_margin_loss:.4f} HNLoss:{avg_val_hard_negative_loss:.4f} "
+                        f"SepLoss:{avg_val_sep_loss:.4f} RoutingBankAcc:{avg_val_routing_bank_acc:.4f} "
+                        f"RoutingBankMargin:{avg_val_routing_bank_margin:.4f}"
                     )
-                    log_memory_bank_geometry_stats(f"VALIDATION STEP {step} MEMORY BANK GEOMETRY")
+                    if compute_memory_bank_geometry_stats:
+                        stats = compute_memory_bank_geometry_stats(get_memory_bank_embeddings(model))
+                        summary = format_memory_bank_geometry_stats(stats)
+                        print(f"VALIDATION STEP {step} MEMORY BANK GEOMETRY {summary}")
+                        training_logger.info(f"VALIDATION STEP {step} MEMORY BANK GEOMETRY {summary}")
                     if use_centered_sep:
                         training_logger.info(
                             f"VALIDATION STEP {step} SEP LOSS DETAIL Raw:{avg_val_sep_loss_raw:.4f} "
@@ -729,6 +1024,13 @@ def train_task_calling_model(
                 use_task_loss=use_task_loss,
                 task_loss_weight=task_loss_weight,
                 mean_loss_weight=mean_loss_weight,
+                use_angular_margin_loss=use_angular_margin_loss,
+                angular_margin_loss_weight=angular_margin_loss_weight,
+                routing_margin_m=routing_margin_m,
+                routing_scale_s=routing_scale_s,
+                use_hard_negative_loss=use_hard_negative_loss,
+                hard_negative_loss_weight=hard_negative_loss_weight,
+                hard_negative_margin=hard_negative_margin,
                 use_sep_loss=use_sep_loss,
                 sep_loss_weight=sep_loss_weight,
                 sep_loss_tau=sep_loss_tau,
@@ -738,18 +1040,31 @@ def train_task_calling_model(
             clear_cuda_cache()
             avg_val_loss = val_metrics["avg_val_loss"]
             avg_val_mean_loss = val_metrics["avg_mean_loss"]
+            avg_val_angular_margin_loss = val_metrics["avg_angular_margin_loss"]
+            avg_val_hard_negative_loss = val_metrics["avg_hard_negative_loss"]
             avg_val_sep_loss = val_metrics["avg_sep_loss"]
             avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
             avg_val_sep_loss_centered = val_metrics["avg_sep_loss_centered"]
+            avg_val_routing_bank_acc = val_metrics["routing_bank_acc"]
+            avg_val_routing_bank_margin = val_metrics["routing_bank_margin_avg"]
             print(
                 f"Epoch {epoch+1}/{num_epochs} - Validation Loss: {avg_val_loss:.4f}, "
-                f"Mean Loss: {avg_val_mean_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}"
+                f"Mean Loss: {avg_val_mean_loss:.4f}, AM Loss: {avg_val_angular_margin_loss:.4f}, "
+                f"HN Loss: {avg_val_hard_negative_loss:.4f}, Sep Loss: {avg_val_sep_loss:.4f}, "
+                f"Routing Bank Acc: {avg_val_routing_bank_acc:.4f}, "
+                f"Routing Bank Margin: {avg_val_routing_bank_margin:.4f}"
             )
             training_logger.info(
                 f"VALIDATION E{epoch+1}/{num_epochs} Loss:{avg_val_loss:.4f} "
-                f"MeanLoss:{avg_val_mean_loss:.4f} SepLoss:{avg_val_sep_loss:.4f}"
+                f"MeanLoss:{avg_val_mean_loss:.4f} AMLoss:{avg_val_angular_margin_loss:.4f} "
+                f"HNLoss:{avg_val_hard_negative_loss:.4f} SepLoss:{avg_val_sep_loss:.4f} "
+                f"RoutingBankAcc:{avg_val_routing_bank_acc:.4f} RoutingBankMargin:{avg_val_routing_bank_margin:.4f}"
             )
-            log_memory_bank_geometry_stats(f"VALIDATION E{epoch+1}/{num_epochs} MEMORY BANK GEOMETRY")
+            if compute_memory_bank_geometry_stats:
+                stats = compute_memory_bank_geometry_stats(get_memory_bank_embeddings(model))
+                summary = format_memory_bank_geometry_stats(stats)
+                print(f"VALIDATION E{epoch+1}/{num_epochs} MEMORY BANK GEOMETRY {summary}")
+                training_logger.info(f"VALIDATION E{epoch+1}/{num_epochs} MEMORY BANK GEOMETRY {summary}")
             if use_centered_sep:
                 training_logger.info(
                     f"VALIDATION E{epoch+1}/{num_epochs} SEP LOSS DETAIL Raw:{avg_val_sep_loss_raw:.4f} "
@@ -769,18 +1084,30 @@ def train_task_calling_model(
     
     avg_total_loss = total_loss / (len(dataloader) * num_epochs)
     avg_mean_loss = total_mean_loss / (len(dataloader) * num_epochs)
+    avg_angular_margin_loss = total_angular_margin_loss / (len(dataloader) * num_epochs)
+    avg_hard_negative_loss = total_hard_negative_loss / (len(dataloader) * num_epochs)
     avg_sep_loss = total_sep_loss / (len(dataloader) * num_epochs)
     avg_sep_loss_raw = total_sep_loss_raw / (len(dataloader) * num_epochs)
     avg_sep_loss_centered = total_sep_loss_centered / (len(dataloader) * num_epochs)
     
     avg_task_loss = total_task_loss / (len(dataloader) * num_epochs)
+    if task_token_count > 0:
+        avg_routing_bank_acc = total_routing_correct / task_token_count
+        avg_routing_bank_margin = total_routing_margin / task_token_count
+    else:
+        avg_routing_bank_acc = 0.0
+        avg_routing_bank_margin = 0.0
 
     if task_token_count > 0:
         print(f"\nTraining completed!")
         print(f"Average overall loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
         print(f"Average mean loss: {avg_mean_loss:.4f}")
+        print(f"Average angular-margin loss: {avg_angular_margin_loss:.4f}")
+        print(f"Average hard-negative loss: {avg_hard_negative_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
+        print(f"Routing bank accuracy: {avg_routing_bank_acc:.4f}")
+        print(f"Routing bank margin avg: {avg_routing_bank_margin:.4f}")
         print(f"Total task tokens processed: {task_token_count}")
         print(f"Batches with task tokens: {task_loss_batches}/{step}")
         print(f"Task token accuracy insight: Lower task loss indicates better task selection performance")
@@ -788,20 +1115,30 @@ def train_task_calling_model(
         # Log training completion
         training_logger.info(
             f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} "
-            f"MeanLoss:{avg_mean_loss:.4f} SepLoss:{avg_sep_loss:.4f} TaskTokens:{task_token_count} "
+            f"MeanLoss:{avg_mean_loss:.4f} AMLoss:{avg_angular_margin_loss:.4f} "
+            f"HNLoss:{avg_hard_negative_loss:.4f} SepLoss:{avg_sep_loss:.4f} "
+            f"RoutingBankAcc:{avg_routing_bank_acc:.4f} RoutingBankMargin:{avg_routing_bank_margin:.4f} "
+            f"TaskTokens:{task_token_count} "
             f"TaskBatches:{task_loss_batches}/{step}"
         )
     else:
         print(f"\nTraining completed! Average loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
         print(f"Average mean loss: {avg_mean_loss:.4f}")
+        print(f"Average angular-margin loss: {avg_angular_margin_loss:.4f}")
+        print(f"Average hard-negative loss: {avg_hard_negative_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
+        print(f"Routing bank accuracy: {avg_routing_bank_acc:.4f}")
+        print(f"Routing bank margin avg: {avg_routing_bank_margin:.4f}")
         print("Warning: No task tokens found in training data!")
         
         # Log training completion without task tokens
         training_logger.info(
             f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} TaskLoss:{avg_task_loss:.4f} "
-            f"MeanLoss:{avg_mean_loss:.4f} SepLoss:{avg_sep_loss:.4f} WARNING:NoTaskTokens"
+            f"MeanLoss:{avg_mean_loss:.4f} AMLoss:{avg_angular_margin_loss:.4f} "
+            f"HNLoss:{avg_hard_negative_loss:.4f} SepLoss:{avg_sep_loss:.4f} "
+            f"RoutingBankAcc:{avg_routing_bank_acc:.4f} RoutingBankMargin:{avg_routing_bank_margin:.4f} "
+            f"WARNING:NoTaskTokens"
         )
 
     # Report best validation loss if validation was performed
@@ -811,23 +1148,29 @@ def train_task_calling_model(
             print(f"Best model saved to: {best_model_path}")
         training_logger.info(f"BEST VALIDATION LOSS:{best_val_loss:.4f}")
 
-    final_memory_bank_geometry_stats = compute_memory_bank_geometry_stats(
-        get_memory_bank_embeddings(model)
-    )
-    final_memory_bank_geometry_summary = format_memory_bank_geometry_stats(
-        final_memory_bank_geometry_stats
-    )
-    print(f"Final {final_memory_bank_geometry_summary}")
-    training_logger.info(f"FINAL {final_memory_bank_geometry_summary}")
+    final_memory_bank_geometry_stats = None
+    if compute_memory_bank_geometry_stats:
+        final_memory_bank_geometry_stats = compute_memory_bank_geometry_stats(
+            get_memory_bank_embeddings(model)
+        )
+        final_memory_bank_geometry_summary = format_memory_bank_geometry_stats(
+            final_memory_bank_geometry_stats
+        )
+        print(f"Final {final_memory_bank_geometry_summary}")
+        training_logger.info(f"FINAL {final_memory_bank_geometry_summary}")
     
     # Return training results including best model state
     return {
         'avg_total_loss': avg_total_loss,
         'avg_task_loss': avg_task_loss,
         'avg_mean_loss': avg_mean_loss,
+        'avg_angular_margin_loss': avg_angular_margin_loss,
+        'avg_hard_negative_loss': avg_hard_negative_loss,
         'avg_sep_loss': avg_sep_loss,
         'avg_sep_loss_raw': avg_sep_loss_raw,
         'avg_sep_loss_centered': avg_sep_loss_centered,
+        'routing_bank_acc': avg_routing_bank_acc,
+        'routing_bank_margin_avg': avg_routing_bank_margin,
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
         'best_model_path': best_model_path,

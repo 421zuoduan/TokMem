@@ -152,14 +152,30 @@ def main():
                         help='Weight for the task-token routing cross entropy loss')
     parser.add_argument('--mean_loss_weight', type=float, default=0.01,
                         help='Weight for the mean-direction memory bank regularizer')
-    parser.add_argument('--use_sep_loss', type=parse_bool_arg, default=False, metavar='BOOL',
+    parser.add_argument('--use_angular_margin_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+                        help='Whether to include angular-margin routing loss inside the memory bank')
+    parser.add_argument('--angular_margin_loss_weight', type=float, default=0.3,
+                        help='Weight for the angular-margin routing loss')
+    parser.add_argument('--routing_margin_m', type=float, default=0.3,
+                        help='Angular margin applied to the positive routing class')
+    parser.add_argument('--routing_scale_s', type=float, default=16.0,
+                        help='Scale applied to bank-only routing logits')
+    parser.add_argument('--use_hard_negative_loss', type=parse_bool_arg, default=True, metavar='BOOL',
+                        help='Whether to include hardest-negative routing margin loss inside the memory bank')
+    parser.add_argument('--hard_negative_loss_weight', type=float, default=0.1,
+                        help='Weight for the hard-negative routing loss')
+    parser.add_argument('--hard_negative_margin', type=float, default=0.2,
+                        help='Margin required between the positive and hardest-negative routing logits')
+    parser.add_argument('--use_sep_loss', type=parse_bool_arg, default=True, metavar='BOOL',
                         help='Whether to include separation loss between task embeddings in the optimization objective')
-    parser.add_argument('--sep_loss_weight', type=float, default=0.1,
+    parser.add_argument('--sep_loss_weight', type=float, default=0.0,
                         help='Weight for the memory-token separation loss')
     parser.add_argument('--sep_loss_tau', type=float, default=0.2,
                         help='Cosine-similarity margin for the memory-token separation loss')
     parser.add_argument('--use_centered_sep', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to compute separation loss after subtracting the mean direction')
+    parser.add_argument('--compute_memory_bank_geometry_stats', type=parse_bool_arg, default=False, metavar='BOOL',
+                        help='Whether to compute auxiliary memory-bank geometry stats such as effective rank')
     parser.add_argument('--run_root_dir', type=str, default=DEFAULT_RUNS_DIR,
                         help='Directory where atomic run folders will be created')
     parser.add_argument('--run_name', type=str, default=None,
@@ -209,10 +225,18 @@ def main():
     print(f"Use task loss: {args.use_task_loss}")
     print(f"Task loss weight: {args.task_loss_weight}")
     print(f"Mean loss weight: {args.mean_loss_weight}")
+    print(f"Use angular-margin routing loss: {args.use_angular_margin_loss}")
+    print(f"Angular-margin routing loss weight: {args.angular_margin_loss_weight}")
+    print(f"Routing angular margin m: {args.routing_margin_m}")
+    print(f"Routing scale s: {args.routing_scale_s}")
+    print(f"Use hard-negative routing loss: {args.use_hard_negative_loss}")
+    print(f"Hard-negative routing loss weight: {args.hard_negative_loss_weight}")
+    print(f"Hard-negative routing margin: {args.hard_negative_margin}")
     print(f"Use separation loss: {args.use_sep_loss}")
     print(f"Separation loss weight: {args.sep_loss_weight}")
     print(f"Separation loss tau: {args.sep_loss_tau}")
     print(f"Use centered separation loss: {args.use_centered_sep}")
+    print(f"Compute memory bank geometry stats: {args.compute_memory_bank_geometry_stats}")
     print(f"Run directory: {run_context['run_dir']}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
@@ -344,10 +368,18 @@ def main():
             use_task_loss=args.use_task_loss,
             task_loss_weight=args.task_loss_weight,
             mean_loss_weight=args.mean_loss_weight,
+            use_angular_margin_loss=args.use_angular_margin_loss,
+            angular_margin_loss_weight=args.angular_margin_loss_weight,
+            routing_margin_m=args.routing_margin_m,
+            routing_scale_s=args.routing_scale_s,
+            use_hard_negative_loss=args.use_hard_negative_loss,
+            hard_negative_loss_weight=args.hard_negative_loss_weight,
+            hard_negative_margin=args.hard_negative_margin,
             use_sep_loss=args.use_sep_loss,
             sep_loss_weight=args.sep_loss_weight,
             sep_loss_tau=args.sep_loss_tau,
             use_centered_sep=args.use_centered_sep,
+            compute_memory_bank_geometry_stats=args.compute_memory_bank_geometry_stats,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         final_model_path = save_trained_model(
@@ -362,9 +394,13 @@ def main():
                 "avg_total_loss": train_results["avg_total_loss"],
                 "avg_task_loss": train_results["avg_task_loss"],
                 "avg_mean_loss": train_results["avg_mean_loss"],
+                "avg_angular_margin_loss": train_results["avg_angular_margin_loss"],
+                "avg_hard_negative_loss": train_results["avg_hard_negative_loss"],
                 "avg_sep_loss": train_results["avg_sep_loss"],
                 "avg_sep_loss_raw": train_results["avg_sep_loss_raw"],
                 "avg_sep_loss_centered": train_results["avg_sep_loss_centered"],
+                "routing_bank_acc": train_results["routing_bank_acc"],
+                "routing_bank_margin_avg": train_results["routing_bank_margin_avg"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
                 "final_model_path": final_model_path,

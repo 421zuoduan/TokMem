@@ -318,14 +318,32 @@ class TaskCallingModel(nn.Module):
         selected_tokens = reserved_token_ids_on_device[selected_positions]
         return selected_tokens.to(instruction_tokens.device)
     
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, return_hidden_states=False):
         """
         Forward pass for task calling training
         
         Sequence: [Instruction] [Reserved_Task_Token] [Response] <|eot_id|>
         """
+        if return_hidden_states:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+                output_hidden_states=True,
+            )
+            logits = outputs.logits
+            last_hidden_state = outputs.hidden_states[-1]
+            if last_hidden_state.device != logits.device:
+                last_hidden_state = last_hidden_state.to(logits.device)
+            return logits, last_hidden_state
+
         # Disable KV cache during training/eval forward passes to reduce memory use.
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        )
         return outputs.logits
 
     

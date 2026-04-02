@@ -62,6 +62,7 @@ python -u main_in_domain_fixed_split.py \
     --sep_loss_weight 0.01 \
     --sep_loss_tau 0.3 \
     --use_centered_sep True \
+    --compute_memory_bank_geometry_stats False \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \
