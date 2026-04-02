@@ -168,13 +168,6 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8, help="Training batch size")
     parser.add_argument("--val_batch_size", type=int, default=16, help="Validation batch size")
     parser.add_argument("--test_batch_size", type=int, default=400, help="Test batch size")
-    parser.add_argument(
-        "--test_prompt_mode",
-        type=str,
-        default="both",
-        choices=["instruction_and_query", "query_only", "both"],
-        help="Which prompt format(s) to use during test-time evaluation",
-    )
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
     parser.add_argument("--num_epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
@@ -386,7 +379,7 @@ def main():
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Validation batch size: {args.val_batch_size}")
     print(f"Test batch size: {args.test_batch_size}")
-    print(f"Test prompt mode: {args.test_prompt_mode}")
+    print("Test prompt mode: instruction_and_query")
     print(f"Generation routing mode: {args.generation_routing}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use task loss: {args.use_task_loss}")
@@ -488,7 +481,7 @@ def main():
         print()
 
     print("Creating data loaders...")
-    train_dataloader, val_dataloader, test_dataloaders, tokenizer, test_examples = (
+    train_dataloader, val_dataloader, test_dataloader, tokenizer, test_examples = (
         create_natural_instructions_dataloader(
             model=model,
             train_data=train_data,
@@ -499,7 +492,6 @@ def main():
             max_length=args.max_length,
             val_batch_size=args.val_batch_size,
             test_batch_size=args.test_batch_size,
-            test_prompt_mode=args.test_prompt_mode,
             shuffle_train=args.shuffle_train,
         )
     )
@@ -577,42 +569,30 @@ def main():
         print()
 
     # ---- Evaluation ----
-    if test_dataloaders:
-        all_eval_results = {}
-        evaluation_prediction_paths = {}
-
-        for prompt_mode_name, test_dataloader in test_dataloaders.items():
-            print(f"Running comprehensive evaluation ({prompt_mode_name})...")
-            predictions_output_path = os.path.join(
-                run_context["run_dir"], f"evaluation_predictions_{prompt_mode_name}.jsonl"
-            )
-            results = eval_task_calling(
-                model=model,
-                tokenizer=tokenizer,
-                test_dataloader=test_dataloader,
-                device=args.device,
-                use_ground_truth_tasks=False,
-                predictions_output_path=predictions_output_path,
-                prompt_mode_label=prompt_mode_name,
-            )
-            all_eval_results[prompt_mode_name] = results
-            evaluation_prediction_paths[prompt_mode_name] = results.get("predictions_output_path")
-            write_json(
-                os.path.join(run_context["run_dir"], f"evaluation_results_{prompt_mode_name}.json"),
-                results,
-            )
-
+    if test_dataloader:
+        print("Running comprehensive evaluation (instruction_and_query)...")
+        predictions_output_path = os.path.join(
+            run_context["run_dir"], "evaluation_predictions_instruction_and_query.jsonl"
+        )
+        results = eval_task_calling(
+            model=model,
+            tokenizer=tokenizer,
+            test_dataloader=test_dataloader,
+            device=args.device,
+            use_ground_truth_tasks=False,
+            predictions_output_path=predictions_output_path,
+            prompt_mode_label="instruction_and_query",
+        )
         print("\n" + "=" * 50)
         print("FINAL RESULTS SUMMARY:")
-        for prompt_mode_name, results in all_eval_results.items():
-            print(f"   Prompt mode: {prompt_mode_name}")
-            print(f"   Task Prediction Accuracy: {results['task_accuracy']:.3f}")
-            print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
-            print(f"   Average Response Score: {results['avg_response_score']:.3f}")
+        print("   Prompt mode: instruction_and_query")
+        print(f"   Task Prediction Accuracy: {results['task_accuracy']:.3f}")
+        print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
+        print(f"   Average Response Score: {results['avg_response_score']:.3f}")
         print("=" * 50)
         write_json(
             os.path.join(run_context["run_dir"], "evaluation_results.json"),
-            all_eval_results,
+            results,
         )
         write_json(
             os.path.join(run_context["run_dir"], "run_summary.json"),
@@ -628,8 +608,9 @@ def main():
                 "task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
                 "best_task_tokens_path": train_results["best_model_path"] if not args.skip_training and train_dataloader else None,
                 "final_task_tokens_path": final_model_path if not args.skip_training and train_dataloader else None,
-                "evaluation_predictions_paths": evaluation_prediction_paths,
-                "metrics_by_prompt_mode": all_eval_results,
+                "evaluation_predictions_path": results.get("predictions_output_path"),
+                "evaluation_results_path": os.path.join(run_context["run_dir"], "evaluation_results.json"),
+                "metrics": results,
             },
         )
 

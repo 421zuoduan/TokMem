@@ -825,7 +825,6 @@ def collate_fn(batch, tokenizer):
 def create_natural_instructions_dataloader(model, train_data=None, val_data=None, test_data=None,
                                          tokenizer=None, batch_size=4, max_length=512,
                                          val_batch_size=32, test_batch_size=32,
-                                         test_prompt_mode="both",
                                          shuffle_train=False):
     """Create DataLoaders for Natural Instructions
     
@@ -844,7 +843,7 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
     Returns:
         train_dataloader: Training DataLoader
         val_dataloader: Validation DataLoader (if val_data provided)
-        test_dataloaders: Test DataLoaders keyed by prompt mode
+        test_dataloader: Test DataLoader using instruction+query prompts
         tokenizer: Tokenizer used
         test_examples: List of raw test examples for demo
     """
@@ -891,42 +890,28 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         
         print(f"Validation dataset created: {len(val_dataset)} samples")
     
-    # ---- Test loader(s) ----
-    test_dataloaders = {}
+    # ---- Test loader ----
+    test_dataloader = None
     test_examples = []
     if test_data is not None:
-        if test_prompt_mode == "both":
-            prompt_modes = [
-                ("instruction_and_query", True),
-                ("query_only", False),
-            ]
-        elif test_prompt_mode == "instruction_and_query":
-            prompt_modes = [("instruction_and_query", True)]
-        elif test_prompt_mode == "query_only":
-            prompt_modes = [("query_only", False)]
-        else:
-            raise ValueError(f"Unsupported test_prompt_mode: {test_prompt_mode}")
+        test_dataset = NaturalInstructionsTaskDataset(
+            data=test_data,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            model=model,
+            mode="eval",
+            include_instruction_in_prompt=True,
+        )
 
-        for prompt_mode_name, include_instruction in prompt_modes:
-            test_dataset = NaturalInstructionsTaskDataset(
-                data=test_data,
-                tokenizer=tokenizer,
-                max_length=max_length,
-                model=model,
-                mode="eval",
-                include_instruction_in_prompt=include_instruction,
-            )
-            
-            test_dataloaders[prompt_mode_name] = DataLoader(
-                test_dataset,
-                batch_size=test_batch_size,
-                shuffle=False,
-                collate_fn=lambda batch: collate_fn(batch, tokenizer)
-            )
-            print(f"Test dataset created ({prompt_mode_name}): {len(test_dataset)} samples")
-
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=test_batch_size,
+            shuffle=False,
+            collate_fn=lambda batch: collate_fn(batch, tokenizer)
+        )
+        print(f"Test dataset created (instruction_and_query): {len(test_dataset)} samples")
         test_examples = test_data.copy()
     else:
         print(f"Warning: No test data provided")
     
-    return train_dataloader, val_dataloader, test_dataloaders, tokenizer, test_examples
+    return train_dataloader, val_dataloader, test_dataloader, tokenizer, test_examples
