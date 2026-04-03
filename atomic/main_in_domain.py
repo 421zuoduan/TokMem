@@ -153,6 +153,19 @@ def main():
                         help='Weight for the hard-negative routing loss')
     parser.add_argument('--hard_negative_margin', type=float, default=0.2,
                         help='Margin required between the positive and hardest-negative routing logits')
+    parser.add_argument('--hard_negative_mode', type=str, default='global',
+                        choices=['global', 'confusion_memory'],
+                        help='Hard-negative mining mode')
+    parser.add_argument('--hard_negative_mining_topk', type=int, default=4,
+                        help='Top-k wrong classes used to update confusion memory')
+    parser.add_argument('--hard_negative_memory_topk', type=int, default=4,
+                        help='Top-k confusion memory entries used to build hard-negative candidates')
+    parser.add_argument('--hard_negative_memory_decay', type=float, default=0.98,
+                        help='EMA decay for confusion memory')
+    parser.add_argument('--hard_negative_start_fraction', type=float, default=0.2,
+                        help='Fraction of total steps before confusion memory affects the loss')
+    parser.add_argument('--hard_negative_update_margin', type=float, default=0.2,
+                        help='Margin threshold used when updating confusion memory')
     parser.add_argument('--use_sep_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include separation loss between task embeddings in the optimization objective')
     parser.add_argument('--sep_loss_weight', type=float, default=0.01,
@@ -216,6 +229,12 @@ def main():
     print(f"Use hard-negative routing loss: {args.use_hard_negative_loss}")
     print(f"Hard-negative routing loss weight: {args.hard_negative_loss_weight}")
     print(f"Hard-negative routing margin: {args.hard_negative_margin}")
+    print(f"Hard-negative mode: {args.hard_negative_mode}")
+    print(f"Hard-negative mining top-k: {args.hard_negative_mining_topk}")
+    print(f"Hard-negative memory top-k: {args.hard_negative_memory_topk}")
+    print(f"Hard-negative memory decay: {args.hard_negative_memory_decay}")
+    print(f"Hard-negative start fraction: {args.hard_negative_start_fraction}")
+    print(f"Hard-negative update margin: {args.hard_negative_update_margin}")
     print(f"Use separation loss: {args.use_sep_loss}")
     print(f"Separation loss weight: {args.sep_loss_weight}")
     print(f"Separation loss tau: {args.sep_loss_tau}")
@@ -355,6 +374,12 @@ def main():
             use_hard_negative_loss=args.use_hard_negative_loss,
             hard_negative_loss_weight=args.hard_negative_loss_weight,
             hard_negative_margin=args.hard_negative_margin,
+            hard_negative_mode=args.hard_negative_mode,
+            hard_negative_mining_topk=args.hard_negative_mining_topk,
+            hard_negative_memory_topk=args.hard_negative_memory_topk,
+            hard_negative_memory_decay=args.hard_negative_memory_decay,
+            hard_negative_start_fraction=args.hard_negative_start_fraction,
+            hard_negative_update_margin=args.hard_negative_update_margin,
             use_sep_loss=args.use_sep_loss,
             sep_loss_weight=args.sep_loss_weight,
             sep_loss_tau=args.sep_loss_tau,

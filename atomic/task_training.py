@@ -395,7 +395,12 @@ def compute_bank_only_routing_outputs(
     }
 
 
-def compute_hard_negative_loss(bank_logits, bank_targets, hard_negative_margin=0.2):
+def compute_hard_negative_loss(
+    bank_logits,
+    bank_targets,
+    hard_negative_margin=0.2,
+    negative_candidate_mask=None,
+):
     """Push the positive routing logit above the hardest negative by a margin."""
     import torch.nn.functional as F
 
@@ -404,8 +409,140 @@ def compute_hard_negative_loss(bank_logits, bank_targets, hard_negative_margin=0
 
     positive_logits = bank_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
     negative_mask = F.one_hot(bank_targets, num_classes=bank_logits.shape[-1]).bool()
-    hardest_negative_logits = bank_logits.masked_fill(negative_mask, float("-inf")).max(dim=-1).values
+    global_hardest_negative_logits = bank_logits.masked_fill(negative_mask, float("-inf")).max(dim=-1).values
+
+    if negative_candidate_mask is None:
+        hardest_negative_logits = global_hardest_negative_logits
+    else:
+        if negative_candidate_mask.shape != bank_logits.shape:
+            raise ValueError("negative_candidate_mask must match bank_logits shape")
+        candidate_mask = negative_candidate_mask.to(device=bank_logits.device, dtype=torch.bool)
+        candidate_mask = candidate_mask & ~negative_mask
+        has_candidates = candidate_mask.any(dim=-1)
+        candidate_hardest_negative_logits = bank_logits.masked_fill(~candidate_mask, float("-inf")).max(dim=-1).values
+        hardest_negative_logits = torch.where(
+            has_candidates,
+            candidate_hardest_negative_logits,
+            global_hardest_negative_logits,
+        )
+
     return torch.relu(hard_negative_margin - positive_logits + hardest_negative_logits).mean()
+
+
+def initialize_hard_negative_confusion_memory(num_tasks, device=None, dtype=torch.float32):
+    """Create the training-only confusion memory buffer for hard-negative mining."""
+    return torch.zeros((num_tasks, num_tasks), device=device, dtype=dtype)
+
+
+def initialize_confusion_memory(num_tasks, device=None, dtype=torch.float32):
+    """Backward-compatible alias for the hard-negative confusion-memory buffer."""
+    return initialize_hard_negative_confusion_memory(num_tasks, device=device, dtype=dtype)
+
+
+def build_hard_negative_confusion_candidate_mask(confusion_memory, bank_targets, memory_topk=4):
+    """Build a per-sample candidate mask from the current confusion memory."""
+    import torch.nn.functional as F
+
+    if confusion_memory is None or bank_targets.numel() == 0:
+        return None
+
+    num_classes = confusion_memory.shape[-1]
+    if num_classes <= 1:
+        return None
+
+    topk = min(max(int(memory_topk), 0), num_classes - 1)
+    if topk <= 0:
+        return None
+
+    row_scores = confusion_memory.index_select(0, bank_targets)
+    positive_mask = F.one_hot(bank_targets, num_classes=num_classes).bool()
+    row_scores = row_scores.masked_fill(positive_mask, float("-inf"))
+
+    topk_scores, topk_indices = torch.topk(row_scores, k=topk, dim=-1)
+    candidate_mask = torch.isfinite(topk_scores) & (topk_scores > 0)
+    if not candidate_mask.any():
+        return None
+
+    mask = torch.zeros_like(row_scores, dtype=torch.bool)
+    mask.scatter_(1, topk_indices, candidate_mask)
+    mask = mask & torch.isfinite(row_scores)
+    if not mask.any():
+        return None
+    return mask
+
+
+def build_confusion_candidate_mask(confusion_memory, bank_targets, memory_topk=4):
+    """Backward-compatible alias for confusion-memory candidate selection."""
+    return build_hard_negative_confusion_candidate_mask(
+        confusion_memory,
+        bank_targets,
+        memory_topk=memory_topk,
+    )
+
+
+def update_hard_negative_confusion_memory(
+    confusion_memory,
+    bank_logits,
+    bank_targets,
+    mining_topk=4,
+    update_margin=0.2,
+    decay=0.98,
+):
+    """Update the confusion memory using the current batch routing scores."""
+    import torch.nn.functional as F
+
+    if confusion_memory is None or bank_logits.numel() == 0:
+        return confusion_memory
+
+    num_classes = bank_logits.shape[-1]
+    if num_classes <= 1:
+        return confusion_memory
+
+    topk = min(max(int(mining_topk), 0), num_classes - 1)
+    if topk <= 0:
+        return confusion_memory
+
+    with torch.no_grad():
+        confusion_memory.mul_(decay)
+        positive_logits = bank_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
+        positive_mask = F.one_hot(bank_targets, num_classes=num_classes).bool()
+        wrong_logits = bank_logits.masked_fill(positive_mask, float("-inf"))
+        topk_logits, topk_indices = torch.topk(wrong_logits, k=topk, dim=-1)
+        candidate_mask = torch.isfinite(topk_logits)
+        if not candidate_mask.any():
+            return confusion_memory
+
+        signals = torch.relu(update_margin - (positive_logits.unsqueeze(1) - topk_logits))
+        signals = signals * candidate_mask.to(dtype=signals.dtype)
+        if signals.numel() == 0:
+            return confusion_memory
+
+        row_indices = bank_targets.unsqueeze(1).expand_as(topk_indices)[candidate_mask]
+        col_indices = topk_indices[candidate_mask]
+        values = (1.0 - decay) * signals[candidate_mask]
+        if values.numel() > 0:
+            confusion_memory.index_put_((row_indices, col_indices), values, accumulate=True)
+
+    return confusion_memory
+
+
+def update_confusion_memory(
+    confusion_memory,
+    bank_logits,
+    bank_targets,
+    mining_topk=4,
+    update_margin=0.2,
+    decay=0.98,
+):
+    """Backward-compatible alias for hard-negative confusion-memory updates."""
+    return update_hard_negative_confusion_memory(
+        confusion_memory,
+        bank_logits,
+        bank_targets,
+        mining_topk=mining_topk,
+        update_margin=update_margin,
+        decay=decay,
+    )
 
 
 def compute_memory_bank_mean_stats(task_embeddings, eps=1e-12):
@@ -604,6 +741,13 @@ def run_validation(
     use_hard_negative_loss=True,
     hard_negative_loss_weight=0.1,
     hard_negative_margin=0.2,
+    hard_negative_mode="global",
+    hard_negative_memory=None,
+    hard_negative_mining_topk=4,
+    hard_negative_memory_topk=4,
+    hard_negative_start_step=0,
+    hard_negative_update_margin=0.2,
+    current_step=0,
     use_sep_loss=True,
     sep_loss_weight=0.0,
     sep_loss_tau=0.2,
@@ -618,6 +762,11 @@ def run_validation(
 
     was_training = model.training
     model.eval()
+    use_confusion_memory_for_hn = (
+        hard_negative_mode == "confusion_memory"
+        and current_step > hard_negative_start_step
+        and hard_negative_memory is not None
+    )
     compute_bank_routing_metrics = should_compute_bank_routing_metrics(
         use_hard_negative_loss=use_hard_negative_loss,
     )
@@ -685,10 +834,18 @@ def run_validation(
                     routing_outputs = None
 
                 if compute_bank_routing_metrics and use_hard_negative_loss and hard_negative_loss_weight != 0.0:
+                    negative_candidate_mask = None
+                    if use_confusion_memory_for_hn:
+                        negative_candidate_mask = build_hard_negative_confusion_candidate_mask(
+                            hard_negative_memory,
+                            routing_outputs["bank_targets"],
+                            memory_topk=hard_negative_memory_topk,
+                        )
                     hard_negative_loss = compute_hard_negative_loss(
                         routing_outputs["bank_logits"],
                         routing_outputs["bank_targets"],
                         hard_negative_margin=hard_negative_margin,
+                        negative_candidate_mask=negative_candidate_mask,
                     )
                 else:
                     hard_negative_loss = torch.tensor(0.0, device=shift_logits.device)
@@ -790,6 +947,12 @@ def train_task_calling_model(
     use_hard_negative_loss=True,
     hard_negative_loss_weight=0.1,
     hard_negative_margin=0.2,
+    hard_negative_mode="global",
+    hard_negative_mining_topk=4,
+    hard_negative_memory_topk=4,
+    hard_negative_memory_decay=0.98,
+    hard_negative_start_fraction=0.2,
+    hard_negative_update_margin=0.2,
     use_sep_loss=True,
     sep_loss_weight=0.0,
     sep_loss_tau=0.2,
@@ -834,6 +997,12 @@ def train_task_calling_model(
     print(f"Use hard-negative routing loss: {use_hard_negative_loss}")
     print(f"Hard-negative routing loss weight: {hard_negative_loss_weight}")
     print(f"Hard-negative routing margin: {hard_negative_margin}")
+    print(f"Hard-negative mode: {hard_negative_mode}")
+    print(f"Hard-negative mining top-k: {hard_negative_mining_topk}")
+    print(f"Hard-negative memory top-k: {hard_negative_memory_topk}")
+    print(f"Hard-negative memory decay: {hard_negative_memory_decay}")
+    print(f"Hard-negative start fraction: {hard_negative_start_fraction}")
+    print(f"Hard-negative update margin: {hard_negative_update_margin}")
     print(f"Use separation loss: {use_sep_loss}")
     print(f"Separation loss weight: {sep_loss_weight}")
     print(f"Separation loss tau: {sep_loss_tau}")
@@ -858,6 +1027,11 @@ def train_task_calling_model(
     training_logger.info(
         f"Hard-negative loss enabled: {use_hard_negative_loss}, Weight: {hard_negative_loss_weight}, "
         f"Margin: {hard_negative_margin}"
+    )
+    training_logger.info(
+        f"Hard-negative mode: {hard_negative_mode}, Mining top-k: {hard_negative_mining_topk}, "
+        f"Memory top-k: {hard_negative_memory_topk}, Memory decay: {hard_negative_memory_decay}, "
+        f"Start fraction: {hard_negative_start_fraction}, Update margin: {hard_negative_update_margin}"
     )
     training_logger.info(f"Separation loss enabled: {use_sep_loss}, Weight: {sep_loss_weight}, Tau: {sep_loss_tau}, Centered: {use_centered_sep}")
     training_logger.info(f"Memory bank geometry stats enabled: {compute_memory_bank_geometry_stats}")
@@ -895,9 +1069,19 @@ def train_task_calling_model(
     best_model_state = None
     best_model_path = None
     training_start_time = time.time()
+    hard_negative_start_step = int(total_steps * hard_negative_start_fraction)
+    confusion_memory = None
+    if hard_negative_mode == "confusion_memory":
+        memory_embeddings = get_memory_bank_embeddings(model)
+        confusion_memory = initialize_hard_negative_confusion_memory(
+            memory_embeddings.shape[0],
+            device=memory_embeddings.device,
+            dtype=torch.float32,
+        )
     
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
+            current_step = step + 1
             # Move batch to device
             input_device = model.get_input_device()
             output_device = model.get_output_device()
@@ -945,11 +1129,24 @@ def train_task_calling_model(
                 )
             else:
                 routing_outputs = None
+            use_confusion_memory_for_hn = (
+                hard_negative_mode == "confusion_memory"
+                and current_step > hard_negative_start_step
+                and confusion_memory is not None
+            )
+            negative_candidate_mask = None
+            if use_confusion_memory_for_hn:
+                negative_candidate_mask = build_hard_negative_confusion_candidate_mask(
+                    confusion_memory,
+                    routing_outputs["bank_targets"],
+                    memory_topk=hard_negative_memory_topk,
+                )
             if compute_bank_routing_metrics and use_hard_negative_loss and hard_negative_loss_weight != 0.0:
                 hard_negative_loss = compute_hard_negative_loss(
                     routing_outputs["bank_logits"],
                     routing_outputs["bank_targets"],
                     hard_negative_margin=hard_negative_margin,
+                    negative_candidate_mask=negative_candidate_mask,
                 )
             else:
                 hard_negative_loss = torch.tensor(0.0, device=shift_logits.device)
@@ -988,6 +1185,16 @@ def train_task_calling_model(
             if compute_bank_routing_metrics:
                 batch_routing_correct += routing_outputs["routing_correct_count"]
                 batch_routing_margin += routing_outputs["routing_margin_sum"].item()
+
+            if hard_negative_mode == "confusion_memory" and routing_outputs is not None and confusion_memory is not None:
+                confusion_memory = update_hard_negative_confusion_memory(
+                    confusion_memory,
+                    routing_outputs["bank_logits"].detach(),
+                    routing_outputs["bank_targets"].detach(),
+                    mining_topk=hard_negative_mining_topk,
+                    update_margin=hard_negative_update_margin,
+                    decay=hard_negative_memory_decay,
+                )
             
             # Backward pass
             loss.backward()
@@ -1124,6 +1331,13 @@ def train_task_calling_model(
                         use_hard_negative_loss=use_hard_negative_loss,
                         hard_negative_loss_weight=hard_negative_loss_weight,
                         hard_negative_margin=hard_negative_margin,
+                        hard_negative_mode=hard_negative_mode,
+                        hard_negative_memory=None,
+                        hard_negative_mining_topk=hard_negative_mining_topk,
+                        hard_negative_memory_topk=hard_negative_memory_topk,
+                        hard_negative_start_step=hard_negative_start_step,
+                        hard_negative_update_margin=hard_negative_update_margin,
+                        current_step=step,
                         use_sep_loss=use_sep_loss,
                         sep_loss_weight=sep_loss_weight,
                         sep_loss_tau=sep_loss_tau,
@@ -1203,6 +1417,13 @@ def train_task_calling_model(
                 use_hard_negative_loss=use_hard_negative_loss,
                 hard_negative_loss_weight=hard_negative_loss_weight,
                 hard_negative_margin=hard_negative_margin,
+                hard_negative_mode=hard_negative_mode,
+                hard_negative_memory=None,
+                hard_negative_mining_topk=hard_negative_mining_topk,
+                hard_negative_memory_topk=hard_negative_memory_topk,
+                hard_negative_start_step=hard_negative_start_step,
+                hard_negative_update_margin=hard_negative_update_margin,
+                current_step=step,
                 use_sep_loss=use_sep_loss,
                 sep_loss_weight=sep_loss_weight,
                 sep_loss_tau=sep_loss_tau,
