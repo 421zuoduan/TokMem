@@ -1,7 +1,6 @@
 import gc
 import json
 import logging
-import math
 import os
 import re
 import sys
@@ -60,9 +59,9 @@ def _build_log_suffix(timestamp, model_name=None, num_tasks=None):
     return f"_{timestamp}_{model_label}_{task_label}.log"
 
 
-def should_compute_bank_routing_metrics(use_angular_margin_loss, use_hard_negative_loss):
+def should_compute_bank_routing_metrics(use_hard_negative_loss):
     """Decide whether bank-only routing stats are needed for this run."""
-    return bool(use_angular_margin_loss or use_hard_negative_loss)
+    return bool(use_hard_negative_loss)
 
 
 def format_training_progress_message(
@@ -73,14 +72,12 @@ def format_training_progress_message(
     avg_loss,
     avg_task_loss,
     avg_mean_loss,
-    avg_angular_margin_loss,
     avg_hard_negative_loss,
     avg_sep_loss,
     avg_task_count,
     current_lr,
     time_summary,
     mean_norm,
-    show_angular_margin_loss,
     show_hard_negative_loss,
     include_bank_routing_metrics,
     avg_routing_bank_acc=0.0,
@@ -92,8 +89,6 @@ def format_training_progress_message(
         f"Avg Loss: {avg_loss:.4f}, Avg Task Loss: {avg_task_loss:.4f}, "
         f"Avg Mean Loss: {avg_mean_loss:.4f}, "
     )
-    if show_angular_margin_loss:
-        message += f"Avg AM Loss: {avg_angular_margin_loss:.4f}, "
     if show_hard_negative_loss:
         message += f"Avg HN Loss: {avg_hard_negative_loss:.4f}, "
     message += f"Avg Sep Loss: {avg_sep_loss:.4f}, "
@@ -117,14 +112,12 @@ def format_training_logger_message(
     avg_loss,
     avg_task_loss,
     avg_mean_loss,
-    avg_angular_margin_loss,
     avg_hard_negative_loss,
     avg_sep_loss,
     avg_task_count,
     current_lr,
     time_summary,
     mean_norm,
-    show_angular_margin_loss,
     show_hard_negative_loss,
     include_bank_routing_metrics,
     avg_routing_bank_acc=0.0,
@@ -136,8 +129,6 @@ def format_training_logger_message(
         f"AvgLoss:{avg_loss:.4f} AvgTaskLoss:{avg_task_loss:.4f} "
         f"AvgMeanLoss:{avg_mean_loss:.4f} "
     )
-    if show_angular_margin_loss:
-        message += f"AvgAMLoss:{avg_angular_margin_loss:.4f} "
     if show_hard_negative_loss:
         message += f"AvgHNLoss:{avg_hard_negative_loss:.4f} "
     message += f"AvgSepLoss:{avg_sep_loss:.4f} "
@@ -157,10 +148,8 @@ def format_validation_message(
     prefix,
     avg_val_loss,
     avg_val_mean_loss,
-    avg_val_angular_margin_loss,
     avg_val_hard_negative_loss,
     avg_val_sep_loss,
-    show_angular_margin_loss,
     show_hard_negative_loss,
     include_bank_routing_metrics,
     avg_val_routing_bank_acc=0.0,
@@ -171,8 +160,6 @@ def format_validation_message(
         f"{prefix} - Validation Loss: {avg_val_loss:.4f}, "
         f"Mean Loss: {avg_val_mean_loss:.4f}, "
     )
-    if show_angular_margin_loss:
-        message += f"AM Loss: {avg_val_angular_margin_loss:.4f}, "
     if show_hard_negative_loss:
         message += f"HN Loss: {avg_val_hard_negative_loss:.4f}, "
     message += f"Sep Loss: {avg_val_sep_loss:.4f}"
@@ -188,10 +175,8 @@ def format_validation_logger_message(
     prefix,
     avg_val_loss,
     avg_val_mean_loss,
-    avg_val_angular_margin_loss,
     avg_val_hard_negative_loss,
     avg_val_sep_loss,
-    show_angular_margin_loss,
     show_hard_negative_loss,
     include_bank_routing_metrics,
     avg_val_routing_bank_acc=0.0,
@@ -202,8 +187,6 @@ def format_validation_logger_message(
         f"{prefix} Loss:{avg_val_loss:.4f} "
         f"MeanLoss:{avg_val_mean_loss:.4f} "
     )
-    if show_angular_margin_loss:
-        message += f"AMLoss:{avg_val_angular_margin_loss:.4f} "
     if show_hard_negative_loss:
         message += f"HNLoss:{avg_val_hard_negative_loss:.4f} "
     message += f"SepLoss:{avg_val_sep_loss:.4f}"
@@ -219,10 +202,8 @@ def format_training_completion_logger_message(
     avg_total_loss,
     avg_task_loss,
     avg_mean_loss,
-    avg_angular_margin_loss,
     avg_hard_negative_loss,
     avg_sep_loss,
-    show_angular_margin_loss,
     show_hard_negative_loss,
     include_bank_routing_metrics,
     avg_routing_bank_acc=0.0,
@@ -237,8 +218,6 @@ def format_training_completion_logger_message(
         f"TRAINING COMPLETE - AvgLoss:{avg_total_loss:.4f} "
         f"TaskLoss:{avg_task_loss:.4f} MeanLoss:{avg_mean_loss:.4f} "
     )
-    if show_angular_margin_loss:
-        message += f"AMLoss:{avg_angular_margin_loss:.4f} "
     if show_hard_negative_loss:
         message += f"HNLoss:{avg_hard_negative_loss:.4f} "
     message += f"SepLoss:{avg_sep_loss:.4f} "
@@ -414,26 +393,6 @@ def compute_bank_only_routing_outputs(
         "routing_correct_count": routing_correct_count,
         "routing_margin_sum": routing_margin_sum,
     }
-
-
-def compute_angular_margin_loss(bank_logits, bank_targets, routing_margin_m=0.3, routing_scale_s=16.0, eps=1e-7):
-    """Compute an ArcFace-style routing loss inside the memory bank only."""
-    import torch.nn.functional as F
-
-    if bank_logits.numel() == 0:
-        return torch.zeros((), device=bank_logits.device, dtype=bank_logits.dtype)
-
-    cosine_logits = bank_logits.clamp(min=-1.0 + eps, max=1.0 - eps)
-    margin_cos = math.cos(routing_margin_m)
-    margin_sin = math.sin(routing_margin_m)
-
-    positive_cosine = cosine_logits.gather(1, bank_targets.unsqueeze(1)).squeeze(1)
-    positive_sine = torch.sqrt(torch.clamp(1.0 - positive_cosine.pow(2), min=0.0))
-    margin_positive = positive_cosine * margin_cos - positive_sine * margin_sin
-
-    scaled_logits = cosine_logits * routing_scale_s
-    scaled_logits.scatter_(1, bank_targets.unsqueeze(1), (margin_positive * routing_scale_s).unsqueeze(1))
-    return F.cross_entropy(scaled_logits, bank_targets)
 
 
 def compute_hard_negative_loss(bank_logits, bank_targets, hard_negative_margin=0.2):
@@ -642,10 +601,6 @@ def run_validation(
     task_loss_weight=0.0,
     use_mean_loss=True,
     mean_loss_weight=0.01,
-    use_angular_margin_loss=True,
-    angular_margin_loss_weight=0.3,
-    routing_margin_m=0.3,
-    routing_scale_s=16.0,
     use_hard_negative_loss=True,
     hard_negative_loss_weight=0.1,
     hard_negative_margin=0.2,
@@ -664,13 +619,11 @@ def run_validation(
     was_training = model.training
     model.eval()
     compute_bank_routing_metrics = should_compute_bank_routing_metrics(
-        use_angular_margin_loss=use_angular_margin_loss,
         use_hard_negative_loss=use_hard_negative_loss,
     )
 
     val_loss_total = 0.0
     val_mean_loss_total = 0.0
-    val_angular_margin_loss_total = 0.0
     val_hard_negative_loss_total = 0.0
     val_sep_loss_total = 0.0
     val_sep_loss_raw_total = 0.0
@@ -730,15 +683,6 @@ def run_validation(
                     )
                 else:
                     routing_outputs = None
-                if compute_bank_routing_metrics and use_angular_margin_loss and angular_margin_loss_weight != 0.0:
-                    angular_margin_loss = compute_angular_margin_loss(
-                        routing_outputs["bank_logits"],
-                        routing_outputs["bank_targets"],
-                        routing_margin_m=routing_margin_m,
-                        routing_scale_s=routing_scale_s,
-                    )
-                else:
-                    angular_margin_loss = torch.tensor(0.0, device=shift_logits.device)
 
                 if compute_bank_routing_metrics and use_hard_negative_loss and hard_negative_loss_weight != 0.0:
                     hard_negative_loss = compute_hard_negative_loss(
@@ -769,14 +713,11 @@ def run_validation(
                 )
                 if use_mean_loss and mean_loss_weight != 0.0:
                     loss = loss + mean_loss_weight * mean_loss
-                if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
-                    loss = loss + angular_margin_loss_weight * angular_margin_loss
                 if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
                     loss = loss + hard_negative_loss_weight * hard_negative_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss_total += loss.item()
                     val_mean_loss_total += mean_loss.item()
-                    val_angular_margin_loss_total += angular_margin_loss.item()
                     val_hard_negative_loss_total += hard_negative_loss.item()
                     val_sep_loss_total += sep_loss.item()
                     val_sep_loss_raw_total += sep_loss_raw.item()
@@ -792,7 +733,6 @@ def run_validation(
         print(f"Warning: No valid validation losses computed ({val_batches} batches processed)")
         avg_val_loss = float('inf')
         avg_mean_loss = 0.0
-        avg_angular_margin_loss = 0.0
         avg_hard_negative_loss = 0.0
         avg_sep_loss = 0.0
         avg_sep_loss_raw = 0.0
@@ -802,7 +742,6 @@ def run_validation(
     else:
         avg_val_loss = val_loss_total / valid_losses
         avg_mean_loss = val_mean_loss_total / valid_losses
-        avg_angular_margin_loss = val_angular_margin_loss_total / valid_losses
         avg_hard_negative_loss = val_hard_negative_loss_total / valid_losses
         avg_sep_loss = val_sep_loss_total / valid_losses
         avg_sep_loss_raw = val_sep_loss_raw_total / valid_losses
@@ -821,7 +760,6 @@ def run_validation(
         return {
             "avg_val_loss": avg_val_loss,
             "avg_mean_loss": avg_mean_loss,
-            "avg_angular_margin_loss": avg_angular_margin_loss,
             "avg_hard_negative_loss": avg_hard_negative_loss,
             "avg_sep_loss": avg_sep_loss,
             "avg_sep_loss_raw": avg_sep_loss_raw,
@@ -849,10 +787,6 @@ def train_task_calling_model(
     task_loss_weight=0.0,
     use_mean_loss=True,
     mean_loss_weight=0.01,
-    use_angular_margin_loss=True,
-    angular_margin_loss_weight=0.3,
-    routing_margin_m=0.3,
-    routing_scale_s=16.0,
     use_hard_negative_loss=True,
     hard_negative_loss_weight=0.1,
     hard_negative_margin=0.2,
@@ -871,7 +805,6 @@ def train_task_calling_model(
     # Get training logger
     training_logger = logging.getLogger('training')
     compute_bank_routing_metrics = should_compute_bank_routing_metrics(
-        use_angular_margin_loss=use_angular_margin_loss,
         use_hard_negative_loss=use_hard_negative_loss,
     )
     
@@ -898,10 +831,6 @@ def train_task_calling_model(
     print(f"Task loss weight: {task_loss_weight}")
     print(f"Use mean loss: {use_mean_loss}")
     print(f"Mean loss weight: {mean_loss_weight}")
-    print(f"Use angular-margin routing loss: {use_angular_margin_loss}")
-    print(f"Angular-margin routing loss weight: {angular_margin_loss_weight}")
-    print(f"Routing angular margin m: {routing_margin_m}")
-    print(f"Routing scale s: {routing_scale_s}")
     print(f"Use hard-negative routing loss: {use_hard_negative_loss}")
     print(f"Hard-negative routing loss weight: {hard_negative_loss_weight}")
     print(f"Hard-negative routing margin: {hard_negative_margin}")
@@ -927,10 +856,6 @@ def train_task_calling_model(
     training_logger.info(f"Mean loss enabled: {use_mean_loss}")
     training_logger.info(f"Mean loss weight: {mean_loss_weight}")
     training_logger.info(
-        f"Angular-margin loss enabled: {use_angular_margin_loss}, Weight: {angular_margin_loss_weight}, "
-        f"Margin: {routing_margin_m}, Scale: {routing_scale_s}"
-    )
-    training_logger.info(
         f"Hard-negative loss enabled: {use_hard_negative_loss}, Weight: {hard_negative_loss_weight}, "
         f"Margin: {hard_negative_margin}"
     )
@@ -943,7 +868,6 @@ def train_task_calling_model(
     total_loss = 0
     total_task_loss = 0
     total_mean_loss = 0
-    total_angular_margin_loss = 0
     total_hard_negative_loss = 0
     total_sep_loss = 0
     total_sep_loss_raw = 0
@@ -957,7 +881,6 @@ def train_task_calling_model(
     batch_loss = 0
     batch_task_loss = 0
     batch_mean_loss = 0
-    batch_angular_margin_loss = 0
     batch_hard_negative_loss = 0
     batch_sep_loss = 0
     batch_sep_loss_raw = 0
@@ -1022,16 +945,6 @@ def train_task_calling_model(
                 )
             else:
                 routing_outputs = None
-            if compute_bank_routing_metrics and use_angular_margin_loss and angular_margin_loss_weight != 0.0:
-                angular_margin_loss = compute_angular_margin_loss(
-                    routing_outputs["bank_logits"],
-                    routing_outputs["bank_targets"],
-                    routing_margin_m=routing_margin_m,
-                    routing_scale_s=routing_scale_s,
-                )
-            else:
-                angular_margin_loss = torch.tensor(0.0, device=shift_logits.device)
-
             if compute_bank_routing_metrics and use_hard_negative_loss and hard_negative_loss_weight != 0.0:
                 hard_negative_loss = compute_hard_negative_loss(
                     routing_outputs["bank_logits"],
@@ -1059,8 +972,6 @@ def train_task_calling_model(
                 loss = loss + task_loss_weight * task_loss
             if use_mean_loss and mean_loss_weight != 0.0:
                 loss = loss + mean_loss_weight * mean_loss
-            if use_angular_margin_loss and angular_margin_loss_weight != 0.0:
-                loss = loss + angular_margin_loss_weight * angular_margin_loss
             if use_hard_negative_loss and hard_negative_loss_weight != 0.0:
                 loss = loss + hard_negative_loss_weight * hard_negative_loss
             if use_sep_loss and sep_loss_weight != 0.0:
@@ -1070,7 +981,6 @@ def train_task_calling_model(
             batch_loss += loss.item()
             batch_task_loss += task_loss.item()
             batch_mean_loss += mean_loss.item()
-            batch_angular_margin_loss += angular_margin_loss.item()
             batch_hard_negative_loss += hard_negative_loss.item()
             batch_sep_loss += sep_loss.item()
             batch_sep_loss_raw += sep_loss_raw.item()
@@ -1090,7 +1000,6 @@ def train_task_calling_model(
             total_loss += loss.item()
             total_task_loss += task_loss.item()
             total_mean_loss += mean_loss.item()
-            total_angular_margin_loss += angular_margin_loss.item()
             total_hard_negative_loss += hard_negative_loss.item()
             total_sep_loss += sep_loss.item()
             total_sep_loss_raw += sep_loss_raw.item()
@@ -1113,7 +1022,6 @@ def train_task_calling_model(
                 avg_loss = batch_loss / batches_since_log
                 avg_task_loss = batch_task_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_mean_loss = batch_mean_loss / batches_since_log if batches_since_log > 0 else 0.0
-                avg_angular_margin_loss = batch_angular_margin_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_hard_negative_loss = batch_hard_negative_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss = batch_sep_loss / batches_since_log if batches_since_log > 0 else 0.0
                 avg_sep_loss_raw = batch_sep_loss_raw / batches_since_log if batches_since_log > 0 else 0.0
@@ -1148,14 +1056,12 @@ def train_task_calling_model(
                         avg_loss=avg_loss,
                         avg_task_loss=avg_task_loss,
                         avg_mean_loss=avg_mean_loss,
-                        avg_angular_margin_loss=avg_angular_margin_loss,
                         avg_hard_negative_loss=avg_hard_negative_loss,
                         avg_sep_loss=avg_sep_loss,
                         avg_task_count=avg_task_count,
                         current_lr=current_lr,
                         time_summary=time_summary,
                         mean_norm=mean_norm.item(),
-                        show_angular_margin_loss=use_angular_margin_loss,
                         show_hard_negative_loss=use_hard_negative_loss,
                         include_bank_routing_metrics=compute_bank_routing_metrics,
                         avg_routing_bank_acc=avg_routing_bank_acc,
@@ -1171,14 +1077,12 @@ def train_task_calling_model(
                         avg_loss=avg_loss,
                         avg_task_loss=avg_task_loss,
                         avg_mean_loss=avg_mean_loss,
-                        avg_angular_margin_loss=avg_angular_margin_loss,
                         avg_hard_negative_loss=avg_hard_negative_loss,
                         avg_sep_loss=avg_sep_loss,
                         avg_task_count=avg_task_count,
                         current_lr=current_lr,
                         time_summary=time_summary,
                         mean_norm=mean_norm.item(),
-                        show_angular_margin_loss=use_angular_margin_loss,
                         show_hard_negative_loss=use_hard_negative_loss,
                         include_bank_routing_metrics=compute_bank_routing_metrics,
                         avg_routing_bank_acc=avg_routing_bank_acc,
@@ -1194,7 +1098,6 @@ def train_task_calling_model(
                 batch_loss = 0
                 batch_task_loss = 0
                 batch_mean_loss = 0
-                batch_angular_margin_loss = 0
                 batch_hard_negative_loss = 0
                 batch_sep_loss = 0
                 batch_sep_loss_raw = 0
@@ -1218,10 +1121,6 @@ def train_task_calling_model(
                         task_loss_weight=task_loss_weight,
                         use_mean_loss=use_mean_loss,
                         mean_loss_weight=mean_loss_weight,
-                        use_angular_margin_loss=use_angular_margin_loss,
-                        angular_margin_loss_weight=angular_margin_loss_weight,
-                        routing_margin_m=routing_margin_m,
-                        routing_scale_s=routing_scale_s,
                         use_hard_negative_loss=use_hard_negative_loss,
                         hard_negative_loss_weight=hard_negative_loss_weight,
                         hard_negative_margin=hard_negative_margin,
@@ -1234,7 +1133,6 @@ def train_task_calling_model(
                     clear_cuda_cache()
                     avg_val_loss = val_metrics["avg_val_loss"]
                     avg_val_mean_loss = val_metrics["avg_mean_loss"]
-                    avg_val_angular_margin_loss = val_metrics["avg_angular_margin_loss"]
                     avg_val_hard_negative_loss = val_metrics["avg_hard_negative_loss"]
                     avg_val_sep_loss = val_metrics["avg_sep_loss"]
                     avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
@@ -1246,10 +1144,8 @@ def train_task_calling_model(
                             prefix=f"Step {step}",
                             avg_val_loss=avg_val_loss,
                             avg_val_mean_loss=avg_val_mean_loss,
-                            avg_val_angular_margin_loss=avg_val_angular_margin_loss,
                             avg_val_hard_negative_loss=avg_val_hard_negative_loss,
                             avg_val_sep_loss=avg_val_sep_loss,
-                            show_angular_margin_loss=use_angular_margin_loss,
                             show_hard_negative_loss=use_hard_negative_loss,
                             include_bank_routing_metrics=compute_bank_routing_metrics,
                             avg_val_routing_bank_acc=avg_val_routing_bank_acc,
@@ -1261,10 +1157,8 @@ def train_task_calling_model(
                             prefix=f"VALIDATION STEP {step}",
                             avg_val_loss=avg_val_loss,
                             avg_val_mean_loss=avg_val_mean_loss,
-                            avg_val_angular_margin_loss=avg_val_angular_margin_loss,
                             avg_val_hard_negative_loss=avg_val_hard_negative_loss,
                             avg_val_sep_loss=avg_val_sep_loss,
-                            show_angular_margin_loss=use_angular_margin_loss,
                             show_hard_negative_loss=use_hard_negative_loss,
                             include_bank_routing_metrics=compute_bank_routing_metrics,
                             avg_val_routing_bank_acc=avg_val_routing_bank_acc,
@@ -1306,10 +1200,6 @@ def train_task_calling_model(
                 task_loss_weight=task_loss_weight,
                 use_mean_loss=use_mean_loss,
                 mean_loss_weight=mean_loss_weight,
-                use_angular_margin_loss=use_angular_margin_loss,
-                angular_margin_loss_weight=angular_margin_loss_weight,
-                routing_margin_m=routing_margin_m,
-                routing_scale_s=routing_scale_s,
                 use_hard_negative_loss=use_hard_negative_loss,
                 hard_negative_loss_weight=hard_negative_loss_weight,
                 hard_negative_margin=hard_negative_margin,
@@ -1322,7 +1212,6 @@ def train_task_calling_model(
             clear_cuda_cache()
             avg_val_loss = val_metrics["avg_val_loss"]
             avg_val_mean_loss = val_metrics["avg_mean_loss"]
-            avg_val_angular_margin_loss = val_metrics["avg_angular_margin_loss"]
             avg_val_hard_negative_loss = val_metrics["avg_hard_negative_loss"]
             avg_val_sep_loss = val_metrics["avg_sep_loss"]
             avg_val_sep_loss_raw = val_metrics["avg_sep_loss_raw"]
@@ -1334,10 +1223,8 @@ def train_task_calling_model(
                     prefix=f"Epoch {epoch+1}/{num_epochs}",
                     avg_val_loss=avg_val_loss,
                     avg_val_mean_loss=avg_val_mean_loss,
-                    avg_val_angular_margin_loss=avg_val_angular_margin_loss,
                     avg_val_hard_negative_loss=avg_val_hard_negative_loss,
                     avg_val_sep_loss=avg_val_sep_loss,
-                    show_angular_margin_loss=use_angular_margin_loss,
                     show_hard_negative_loss=use_hard_negative_loss,
                     include_bank_routing_metrics=compute_bank_routing_metrics,
                     avg_val_routing_bank_acc=avg_val_routing_bank_acc,
@@ -1349,10 +1236,8 @@ def train_task_calling_model(
                     prefix=f"VALIDATION E{epoch+1}/{num_epochs}",
                     avg_val_loss=avg_val_loss,
                     avg_val_mean_loss=avg_val_mean_loss,
-                    avg_val_angular_margin_loss=avg_val_angular_margin_loss,
                     avg_val_hard_negative_loss=avg_val_hard_negative_loss,
                     avg_val_sep_loss=avg_val_sep_loss,
-                    show_angular_margin_loss=use_angular_margin_loss,
                     show_hard_negative_loss=use_hard_negative_loss,
                     include_bank_routing_metrics=compute_bank_routing_metrics,
                     avg_val_routing_bank_acc=avg_val_routing_bank_acc,
@@ -1385,7 +1270,6 @@ def train_task_calling_model(
     
     avg_total_loss = total_loss / (len(dataloader) * num_epochs)
     avg_mean_loss = total_mean_loss / (len(dataloader) * num_epochs)
-    avg_angular_margin_loss = total_angular_margin_loss / (len(dataloader) * num_epochs)
     avg_hard_negative_loss = total_hard_negative_loss / (len(dataloader) * num_epochs)
     avg_sep_loss = total_sep_loss / (len(dataloader) * num_epochs)
     avg_sep_loss_raw = total_sep_loss_raw / (len(dataloader) * num_epochs)
@@ -1404,8 +1288,6 @@ def train_task_calling_model(
         print(f"Average overall loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
         print(f"Average mean loss: {avg_mean_loss:.4f}")
-        if use_angular_margin_loss:
-            print(f"Average angular-margin loss: {avg_angular_margin_loss:.4f}")
         if use_hard_negative_loss:
             print(f"Average hard-negative loss: {avg_hard_negative_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
@@ -1421,10 +1303,8 @@ def train_task_calling_model(
             avg_total_loss=avg_total_loss,
             avg_task_loss=avg_task_loss,
             avg_mean_loss=avg_mean_loss,
-            avg_angular_margin_loss=avg_angular_margin_loss,
             avg_hard_negative_loss=avg_hard_negative_loss,
             avg_sep_loss=avg_sep_loss,
-            show_angular_margin_loss=use_angular_margin_loss,
             show_hard_negative_loss=use_hard_negative_loss,
             include_bank_routing_metrics=compute_bank_routing_metrics,
             avg_routing_bank_acc=avg_routing_bank_acc,
@@ -1438,8 +1318,6 @@ def train_task_calling_model(
         print(f"\nTraining completed! Average loss: {avg_total_loss:.4f}")
         print(f"Average task token loss: {avg_task_loss:.4f}")
         print(f"Average mean loss: {avg_mean_loss:.4f}")
-        if use_angular_margin_loss:
-            print(f"Average angular-margin loss: {avg_angular_margin_loss:.4f}")
         if use_hard_negative_loss:
             print(f"Average hard-negative loss: {avg_hard_negative_loss:.4f}")
         print(f"Average separation loss: {avg_sep_loss:.4f}")
@@ -1453,10 +1331,8 @@ def train_task_calling_model(
             avg_total_loss=avg_total_loss,
             avg_task_loss=avg_task_loss,
             avg_mean_loss=avg_mean_loss,
-            avg_angular_margin_loss=avg_angular_margin_loss,
             avg_hard_negative_loss=avg_hard_negative_loss,
             avg_sep_loss=avg_sep_loss,
-            show_angular_margin_loss=use_angular_margin_loss,
             show_hard_negative_loss=use_hard_negative_loss,
             include_bank_routing_metrics=compute_bank_routing_metrics,
             avg_routing_bank_acc=avg_routing_bank_acc,
@@ -1489,7 +1365,6 @@ def train_task_calling_model(
         'avg_total_loss': avg_total_loss,
         'avg_task_loss': avg_task_loss,
         'avg_mean_loss': avg_mean_loss,
-        'avg_angular_margin_loss': avg_angular_margin_loss,
         'avg_hard_negative_loss': avg_hard_negative_loss,
         'avg_sep_loss': avg_sep_loss,
         'avg_sep_loss_raw': avg_sep_loss_raw,

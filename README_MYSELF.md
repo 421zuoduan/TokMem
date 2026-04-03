@@ -1151,11 +1151,14 @@ sep_loss_weight = 0.0
 | `20260331_150719` | `sep loss` 对照 | `use_sep_loss=True`, `sep_loss_weight=0.1`, `sep_loss_tau=0.2` | 0.9351 | 92.40% | 50.1508% | 6.42% | 8.0954% | 基本全面退步。 |
 | `20260331_160533` | 弱 `sep loss` | `sep_loss_weight=0.01`, `sep_loss_tau=0.5` | 0.9273 | 92.82% | 49.9719% | 6.52% | 7.4697% | 比 `0.1/0.2` 稍稳，但仍没超过 baseline。 |
 | `20260401_035020` | 收紧 `tau` | `sep_loss_weight=0.01`, `sep_loss_tau=0.3` | 0.9312 | 92.81% | 50.4539% | 6.17% | 8.1681% | I+Q ROUGE-L 几乎追平 baseline，但 routing 和 val loss 仍未追平。 |
+| `20260402_174122` | 最新 `sep loss` rerun | 保持 `sep_loss_weight=0.01`, `sep_loss_tau=0.3`，补开 geometry 监控并重跑 | 0.9271 | 92.69% | 50.0213% | 未评测 | 未评测 | val loss 小幅回升，但 I+Q routing 和 ROUGE-L 都不如上一轮 `tau=0.3`。 |
+| `20260402_174124` | `mean + centered sep` | 在 `sep=0.01`, `tau=0.3` 上新增 `mean_loss_weight=0.01`, `use_centered_sep=True` | 0.9355 | 92.80% | 49.6288% | 未评测 | 未评测 | 没有复现 `200-task` 的收益，ROUGE-L 和 val loss 更差。 |
 
 当前判断：
 
 - `700-task` 是最能暴露方法上限的 setting。这里 `sep loss` 没有像 `200-task` 那样给出清晰正收益。
-- `tau=0.3` 相比 `tau=0.5` 更像是在拿一点 routing 换回答质量，但这依然不是明确优于 baseline 的交易。
+- `tau=0.3` 方向目前看依然只是局部 trade-off；最新 rerun 也没有把它推成稳定优于 baseline 的配置。
+- `mean + centered sep` 在 `700-task` 上没有复制 `200-task` 的正收益，至少这一轮不是新的代表结果。
 - 所以当前 `700-task` 的主结论仍然是：baseline 比较稳，`sep loss` 还没证明自己值得常驻。
 
 ### 16.4 跨 setting 的一句话结论
@@ -1224,3 +1227,64 @@ sep_loss_weight = 0.0
 
 - 这组 routing losses 更像是在把模型往 `query_only` 判别方向推
 - 但它没有带来当前真正想要的综合收益，所以还不能替代 `200-task` 的现有最佳方案
+
+## 18. 最新归档：`700-task / sep loss` 与 `mean + centered sep`
+
+这次新补归档的是同一批 `700-task` fixed split 上的两条新 run：
+
+- 纯 `sep loss`：
+  - [results/atomic_qwen2.5_0.5b_700tasks_sep_loss_20260402_174122](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_700tasks_sep_loss_20260402_174122)
+- `mean + centered sep`：
+  - [results/atomic_qwen2.5_0.5b_700tasks_mean_centered_sep_20260402_174124](/data/ruochen/tokmem/results/atomic_qwen2.5_0.5b_700tasks_mean_centered_sep_20260402_174124)
+
+它们都保持：
+
+- `num_tasks = 700`
+- 同一份 split cache：`task700-500-10-50-seed42`
+- `train/val/test per task = 500/10/50`
+- `batch_size = 8`
+- `gradient_accumulation_steps = 1`
+- `max_length = 1024`
+- `lr = 5e-4`
+- `generation_routing = full_vocab_generation`
+- `val_batch_size = 16`
+- `test_batch_size = 400`
+- `validate_every_n_steps = 1000`
+- `seed = 42`
+- 这两次都只产出了 `instruction_and_query` 评测，没有 `query_only` 结果
+
+两次的关键差别是：
+
+- `20260402_174122`
+  - `use_sep_loss = True`
+  - `sep_loss_weight = 0.01`
+  - `sep_loss_tau = 0.3`
+  - `use_centered_sep = False`
+- `20260402_174124`
+  - 在上面基础上额外加：
+  - `use_mean_loss = True`
+  - `mean_loss_weight = 0.01`
+  - `use_centered_sep = True`
+
+### 18.1 和现有 `700-task` 代表结果的直接对比
+
+| Run | 关键设置 | Best val loss | I+Q Task Acc | I+Q ROUGE-L |
+|---|---|---:|---:|---:|
+| baseline `20260329_164857` | 无 `sep loss` | 0.9231 | 93.23% | 50.4578% |
+| 旧 `tau=0.3` `20260401_035020` | `sep=0.01`, `tau=0.3` | 0.9312 | 92.81% | 50.4539% |
+| 最新 `sep` `20260402_174122` | `sep=0.01`, `tau=0.3` + geometry | 0.9271 | 92.69% | 50.0213% |
+| 最新 `mean+centered` `20260402_174124` | `mean=0.01` + `sep=0.01`, `tau=0.3`, `centered=True` | 0.9355 | 92.80% | 49.6288% |
+
+### 18.2 当前判断
+
+这两次新结果最值得直接记住的是：
+
+- 最新纯 `sep loss` rerun 只在 `best val loss` 上比上一轮 `tau=0.3` 稍好
+- 但它的 `instruction_and_query` routing 和 `ROUGE-L` 都没有更好
+- `mean + centered sep` 在 `700-task` 上没有复制 `200-task` 的收益
+- 它相对同日纯 `sep loss` 只带来非常小的 routing 波动，但 `ROUGE-L` 和 `best val loss` 都更差
+
+一句话总结：
+
+- 当前 `700-task` 上，baseline 仍然是最稳的代表结果
+- `sep loss` 和 `mean + centered sep` 这两条线在大规模 setting 下都还没有证明自己

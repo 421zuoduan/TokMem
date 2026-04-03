@@ -147,14 +147,6 @@ def main():
                         help='Weight for the mean-direction memory bank regularizer')
     parser.add_argument('--use_mean_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include the mean-direction memory bank regularizer')
-    parser.add_argument('--use_angular_margin_loss', type=parse_bool_arg, default=False, metavar='BOOL',
-                        help='Whether to include angular-margin routing loss inside the memory bank')
-    parser.add_argument('--angular_margin_loss_weight', type=float, default=0.01,
-                        help='Weight for the angular-margin routing loss')
-    parser.add_argument('--routing_margin_m', type=float, default=0.3,
-                        help='Angular margin applied to the positive routing class')
-    parser.add_argument('--routing_scale_s', type=float, default=16.0,
-                        help='Scale applied to bank-only routing logits')
     parser.add_argument('--use_hard_negative_loss', type=parse_bool_arg, default=False, metavar='BOOL',
                         help='Whether to include hardest-negative routing margin loss inside the memory bank')
     parser.add_argument('--hard_negative_loss_weight', type=float, default=0.01,
@@ -221,10 +213,6 @@ def main():
     print(f"Task loss weight: {args.task_loss_weight}")
     print(f"Use mean loss: {args.use_mean_loss}")
     print(f"Mean loss weight: {args.mean_loss_weight}")
-    print(f"Use angular-margin routing loss: {args.use_angular_margin_loss}")
-    print(f"Angular-margin routing loss weight: {args.angular_margin_loss_weight}")
-    print(f"Routing angular margin m: {args.routing_margin_m}")
-    print(f"Routing scale s: {args.routing_scale_s}")
     print(f"Use hard-negative routing loss: {args.use_hard_negative_loss}")
     print(f"Hard-negative routing loss weight: {args.hard_negative_loss_weight}")
     print(f"Hard-negative routing margin: {args.hard_negative_margin}")
@@ -364,10 +352,6 @@ def main():
             task_loss_weight=args.task_loss_weight,
             use_mean_loss=args.use_mean_loss,
             mean_loss_weight=args.mean_loss_weight,
-            use_angular_margin_loss=args.use_angular_margin_loss,
-            angular_margin_loss_weight=args.angular_margin_loss_weight,
-            routing_margin_m=args.routing_margin_m,
-            routing_scale_s=args.routing_scale_s,
             use_hard_negative_loss=args.use_hard_negative_loss,
             hard_negative_loss_weight=args.hard_negative_loss_weight,
             hard_negative_margin=args.hard_negative_margin,
@@ -390,7 +374,6 @@ def main():
                 "avg_total_loss": train_results["avg_total_loss"],
                 "avg_task_loss": train_results["avg_task_loss"],
                 "avg_mean_loss": train_results["avg_mean_loss"],
-                "avg_angular_margin_loss": train_results["avg_angular_margin_loss"],
                 "avg_hard_negative_loss": train_results["avg_hard_negative_loss"],
                 "avg_sep_loss": train_results["avg_sep_loss"],
                 "avg_sep_loss_raw": train_results["avg_sep_loss_raw"],

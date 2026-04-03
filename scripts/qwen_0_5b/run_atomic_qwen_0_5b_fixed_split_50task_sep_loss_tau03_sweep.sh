@@ -81,8 +81,6 @@ for WEIGHT in "${WEIGHTS[@]}"; do
         --task_loss_weight 0.0 \
         --use_mean_loss False \
         --mean_loss_weight 0.0 \
-        --use_angular_margin_loss True \
-        --angular_margin_loss_weight 0.01 \
         --use_hard_negative_loss True \
         --hard_negative_loss_weight 0.01 \
         --hard_negative_margin 0.2 \
