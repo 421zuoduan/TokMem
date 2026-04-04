@@ -22,6 +22,40 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
 - do not treat `Exact Match` or `query_only` results as the primary decision criteria unless the user explicitly asks for them
 
+## Result Analysis Workflow
+
+For archived `atomic` runs, use `scripts/analyze_atomic_run.sh` as the default entrypoint for low-routing-task analysis.
+
+- treat the script as a general archived-run analysis tool, not something tied only to baseline runs
+- prefer the shell wrapper over calling the Python module directly:
+
+```bash
+bash scripts/analyze_atomic_run.sh results/<run_folder>
+```
+
+- the script assumes the standard `instruction + query` evaluation format and does not expose a separate prompt-mode switch
+- the main output focus is tasks whose `routing acc` falls below a threshold, plus the top confused target tasks derived from final evaluation results
+- the script also attaches task definitions, task-form summaries, and representative misrouted examples for each high-confusion target
+- if archived confusion-memory summaries are present in `train_results.json`, keep them in the report as run-level context; otherwise rely on result-derived confusion only
+
+Useful optional flags:
+
+- `--threshold`: routing-accuracy cutoff, default `0.9`
+- `--top-k`: number of confused target tasks to report per failing task, default `3`
+- `--max-examples`: number of representative misrouted examples to keep per confused target, default `3`
+- `--tasks-dir`: override the NI task directory if needed
+
+The script writes these files into the analyzed run directory:
+
+- `routing_failure_analysis.json`
+- `routing_failure_analysis.md`
+
+When changing analysis behavior:
+
+- do not create repository test files for this workflow
+- if validation is needed, run the script directly in the sandbox and inspect its outputs
+- do not leave `.codex` files or other Codex-specific scratch artifacts in the repository
+
 ## Build, Test, and Development Commands
 
 Create an environment and install dependencies:

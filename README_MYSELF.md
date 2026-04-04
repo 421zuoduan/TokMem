@@ -6,6 +6,49 @@
 
 这个文件从现在开始只记录“当前最需要记住的实现变化”。
 
+## 0. 当前结果分析脚本
+
+当前归档实验的低 routing task 分析，统一用：
+
+- [atomic/analyze_baseline_failures.py](/data/ruochen/tokmem/atomic/analyze_baseline_failures.py)
+
+这不是只给某一个 baseline run 用的脚本，而是面向 `atomic` archived runs 的通用结果分析入口。
+
+默认约定：
+
+- 只按标准 `instruction + query` 评测格式分析，不再单独暴露 prompt-mode 开关
+- 重点看 `routing acc` 低于阈值的 task
+- 对每个低 routing task，统计最容易被误路由到的目标 task
+- 误路由目标完全从最终评测结果里统计，不依赖 confusion memory 本身
+- 如果 `train_results.json` 里带了 routing-bank / memory-bank 摘要，就把它作为 run 级补充上下文保留下来
+
+常用命令：
+
+```bash
+python atomic/analyze_baseline_failures.py \
+  --run-dir results/<run_folder>
+```
+
+常用参数：
+
+- `--threshold`：routing-accuracy 阈值，默认 `0.9`
+- `--top-k`：每个低 routing task 保留多少个高频误路由目标，默认 `3`
+- `--max-examples`：每个误路由目标保留多少个代表性误路由样例，默认 `3`
+- `--tasks-dir`：需要时手动指定 NI task JSON 目录
+
+输出文件会直接写到对应 run 目录下：
+
+- `routing_failure_analysis.json`
+- `routing_failure_analysis.md`
+
+当前报告里已经包含：
+
+- 低于阈值的 task 列表
+- 每个 task 的高频误路由目标
+- 源任务与目标任务的完整任务定义
+- 每个误路由目标下的代表性错误样例
+- 任务形式摘要，例如“短答案问答”“短标签分类/选择”“结构化序列到文本生成”
+
 ## 0. 2026-04-02 这轮代码结构调整
 
 这轮改动主要不是改算法本身，而是把 `fixed_split` 训练路径里的日志组织、bank-routing 指标计算和 launcher 配置关系理顺。
