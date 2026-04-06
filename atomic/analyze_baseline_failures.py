@@ -36,6 +36,18 @@ def write_text(path: Path, text: str):
         handle.write(text)
 
 
+def resolve_existing_path(run_dir: Path, candidates, label: str) -> Path:
+    for relative_path in candidates:
+        candidate = run_dir / relative_path
+        if candidate.exists():
+            return candidate
+
+    searched = ", ".join(str(run_dir / relative_path) for relative_path in candidates)
+    raise FileNotFoundError(
+        f"Could not find {label} in run directory {run_dir}. Checked: {searched}"
+    )
+
+
 def safe_round(value, digits=4):
     if value is None:
         return None
@@ -237,8 +249,19 @@ def analyze_run(
     run_dir = Path(run_dir)
     tasks_dir = Path(tasks_dir)
 
-    results_path = run_dir / "evaluation_results_instruction_and_query.json"
-    predictions_path = run_dir / "evaluation_predictions_instruction_and_query.jsonl"
+    results_path = resolve_existing_path(
+        run_dir,
+        [
+            "evaluation_results_instruction_and_query.json",
+            "evaluation_results.json",
+        ],
+        "evaluation results file",
+    )
+    predictions_path = resolve_existing_path(
+        run_dir,
+        ["evaluation_predictions_instruction_and_query.jsonl"],
+        "evaluation predictions file",
+    )
     train_results_path = run_dir / "train_results.json"
 
     results = load_json(results_path)

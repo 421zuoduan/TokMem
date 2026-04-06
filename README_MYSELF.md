@@ -6,6 +6,150 @@
 
 这个文件从现在开始只记录“当前最需要记住的实现变化”。
 
+## 0. 2026-04-04 HN 多 task token 问题
+
+这次对比的两个 run：
+
+- baseline：
+  [atomic/runs/atomic_qwen2.5_0.5b_700tasks_20260404_074034](/data/ruochen/tokmem/atomic/runs/atomic_qwen2.5_0.5b_700tasks_20260404_074034)
+- HN：
+  [atomic/runs/atomic_qwen2.5_0.5b_700tasks_hn_loss_confusion_20260404_074215](/data/ruochen/tokmem/atomic/runs/atomic_qwen2.5_0.5b_700tasks_hn_loss_confusion_20260404_074215)
+
+一句话记忆：
+
+- `hard negative` 不是把“第一个 task 选得更差”了
+- 它主要是把本来就存在的“连续生成多个 task token”问题进一步放大
+- 在当前 `full_vocab_generation` 解码和现有评测口径下，这个副作用会直接吃掉 routing 提升
+
+### 0.1 主指标结论
+
+在当前最关心的 `instruction_and_query` 上：
+
+- baseline：
+  `Task Prediction Accuracy = 0.9297`
+  `Rouge-L = 50.4234`
+- HN：
+  `Task Prediction Accuracy = 0.9267`
+  `Rouge-L = 49.9020`
+
+所以这次不是“几乎打平”，而是两个主指标都略退。
+
+### 0.2 baseline 也有多 task token，不是 HN 独有
+
+直接看 `evaluation_predictions_instruction_and_query.jsonl`：
+
+- baseline 多 task token 样本：`1597 / 35000`
+- HN 多 task token 样本：`1744 / 35000`
+- baseline 空响应样本：`1147 / 35000`
+- HN 空响应样本：`1317 / 35000`
+
+所以正确表述是：
+
+- baseline 本来就有多 task token 问题
+- HN 把这个问题恶化了
+
+### 0.3 为什么 HN 看起来 routing 更强，但最终 task acc 反而更差
+
+如果只看“第一个预测出来的 task token 对不对”，HN 实际上略好：
+
+- baseline `first predicted task accuracy = 0.9661`
+- HN `first predicted task accuracy = 0.9672`
+
+但当前评测里 `task_match` 的定义是：
+
+```python
+task_match = set(predicted_tasks) == set(expected_tasks)
+```
+
+实现位置：
+
+- [atomic/task_training.py](/data/ruochen/tokmem/atomic/task_training.py)
+
+而当前解码会把生成序列里出现的所有 reserved task token 全部收进 `predicted_tasks`：
+
+- [atomic/task_model.py](/data/ruochen/tokmem/atomic/task_model.py)
+
+因此一旦模型输出：
+
+- 第一个 task token 正确
+- 但后面又继续吐出别的 task token
+
+最终就会被评测判成 task 错误。
+
+这次统计里：
+
+- HN 相对 baseline 的净 task 回退样本：`1328`
+- 其中因为多 task token 导致的回退：`958`
+- 其中第一个 `predicted_task` 本来就是对的：`892`
+
+一句话记忆：
+
+- 当前 HN 的主要副作用不是“把第一跳路由选错”
+- 而是“让后续继续生成 task token 的概率变高”
+
+### 0.4 这些多 task token 样本的共同特点
+
+目前看到的共同特点主要有四类。
+
+第一，输入更长：
+
+- 多 task token 样本平均 `query` 更长，约 `72` 词
+- 单 task 样本平均 `query` 约 `63` 词
+- `instruction` 也整体更长
+
+第二，集中在高相似任务簇，不是随机散布：
+
+- baseline 高发族主要是：
+  `scan`、`jeopardy`、`freebase/webquestions`、`strategyqa`、`dart`
+- HN 高发族更明显是：
+  `scan`、`jeopardy`、`anli_r1`、`multirc`、`piqa`、`cls`、`cnn/webquestions`
+
+第三，额外吐出的 task 往往是同族 sibling 或固定吸附点：
+
+- `scan` 系列经常互串
+- `anli_r1` 经常继续吐 `anli_r2 / anli_r3`
+- `jeopardy` 系列经常再吐 `task306_jeopardy_answer_generation_double`
+- HN 里一批 `atomic_classification_*` task 变成明显吸附点，例如：
+  `task1207_atomic_classification_atlocation`
+  `task1216_atomic_classification_causes`
+  `task1210_atomic_classification_madeupof`
+  `task1200_atomic_classification_xeffect`
+
+第四，经常伴随空响应、极短响应或循环：
+
+- 很多样本不是“正常回答后又多吐一个 task”
+- 而是“task token 之后立刻又进入另一个 task token”
+- 结果就是 `predicted_response` 为空、残缺，或者 task token 循环到接近 `max_new_tokens=256`
+
+### 0.5 当前最重要的判断
+
+当前更像是：
+
+- `hard negative` 目标和 `full_vocab_generation` 解码方式之间存在接口冲突
+
+而不只是：
+
+- `hard negative` 这个想法本身不行
+
+换句话说，这次更应该优先改方法，而不是直接在现有实现上大规模扫参。
+
+### 0.6 下一步优先级
+
+当前优先级应该是：
+
+- 先改推理约束或两阶段解码，确保只生成一个 task token
+- 再重新评估 HN 是否真的改善 routing
+- 最后再做小范围 HN 超参 sweep
+
+不建议现在直接在现有实现上大量扫：
+
+- `hard_negative_loss_weight`
+- `memory_topk`
+- `memory_decay`
+- `start_fraction`
+
+因为如果“多 task token / 空响应”这个接口问题不先解决，很多 sweep 只是在反复调这个副作用的强弱。
+
 ## 0. 当前结果分析脚本
 
 当前归档实验的低 routing task 分析，统一用：

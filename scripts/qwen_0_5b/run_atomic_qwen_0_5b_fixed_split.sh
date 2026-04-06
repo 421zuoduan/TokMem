@@ -55,7 +55,6 @@ python -u main_in_domain_fixed_split.py \
     --max_length 1024 \
     --lr 5e-4 \
     --generation_routing full_vocab_generation \
-    --compute_memory_bank_geometry_stats True \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \

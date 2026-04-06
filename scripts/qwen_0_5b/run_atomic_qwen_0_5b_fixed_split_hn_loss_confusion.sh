@@ -56,21 +56,15 @@ python -u main_in_domain_fixed_split.py \
     --max_length 1024 \
     --lr 5e-4 \
     --generation_routing full_vocab_generation \
-    --use_task_loss False \
-    --task_loss_weight 0.0 \
-    --use_mean_loss False \
-    --mean_loss_weight 0.0 \
     --use_hard_negative_loss True \
-    --hard_negative_loss_weight 0.01 \
+    --hard_negative_loss_weight 0.2 \
     --hard_negative_margin 0.2 \
     --hard_negative_mode confusion_memory \
     --hard_negative_mining_topk 4 \
     --hard_negative_memory_topk 4 \
-    --hard_negative_memory_decay 0.98 \
+    --hard_negative_memory_decay 0.95 \
     --hard_negative_start_fraction 0.2 \
     --hard_negative_update_margin 0.2 \
-    --use_sep_loss False \
-    --sep_loss_weight 0.0 \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 1000 \
