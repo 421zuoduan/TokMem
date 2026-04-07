@@ -132,6 +132,22 @@ class NativeFunctionCallingDataset(Dataset):
         eot_token = self.tokenizer('<|eot_id|>', add_special_tokens=False)['input_ids']
         full_sequence.extend(eot_token)
         labels.extend(eot_token)
+
+        if self.max_length and len(full_sequence) > self.max_length:
+            first_target_idx = next(
+                (i for i, label in enumerate(labels) if label != -100),
+                len(labels)
+            )
+            target_length = len(full_sequence) - first_target_idx
+
+            if target_length >= self.max_length:
+                start_idx = len(full_sequence) - self.max_length
+            else:
+                prompt_budget = self.max_length - target_length
+                start_idx = max(0, first_target_idx - prompt_budget)
+
+            full_sequence = full_sequence[start_idx:]
+            labels = labels[start_idx:]
         
         # Create attention mask
         attention_mask = [1] * len(full_sequence)

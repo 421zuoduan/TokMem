@@ -44,6 +44,7 @@ logs/
 atomic/saved_models
 atomic/cached_splits
 atomic/runs
+compositional/data
 saved_models
 
 nohup.out

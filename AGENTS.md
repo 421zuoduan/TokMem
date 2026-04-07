@@ -16,11 +16,10 @@ Tests are limited. The main standalone test-like script is `atomic/test_sbert_re
 
 Unless the user explicitly says otherwise, treat the current working scope as:
 
-- only `atomic/` experiments matter right now
-- training should be done on the `Qwen2.5-0.5B-Instruct` / `0.5B` setup
-- when comparing results, prioritize `instruction_and_query` metrics
+- prioritize `compositional/` work, scripts, experiments, and code changes by default
+- start from `compositional/` entrypoints and datasets unless the task is clearly about another track
+- keep `atomic/` workflows and documentation available; they still apply when the user explicitly asks for `atomic/` work
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
-- do not treat `Exact Match` or `query_only` results as the primary decision criteria unless the user explicitly asks for them
 
 ## Result Analysis Workflow
 
@@ -33,7 +32,7 @@ For archived `atomic` runs, use `scripts/analyze_atomic_run.sh` as the default e
 bash scripts/analyze_atomic_run.sh results/<run_folder>
 ```
 
-- the script assumes the standard `instruction + query` evaluation format and does not expose a separate prompt-mode switch
+- the script assumes the standard archived evaluation format and does not expose a separate prompt-mode switch
 - the main output focus is tasks whose `routing acc` falls below a threshold, plus the top confused target tasks derived from final evaluation results
 - the script also attaches task definitions, task-form summaries, and representative misrouted examples for each high-confusion target
 - if archived confusion-memory summaries are present in `train_results.json`, keep them in the report as run-level context; otherwise rely on result-derived confusion only
@@ -56,13 +55,22 @@ When changing analysis behavior:
 - if validation is needed, run the script directly in the sandbox and inspect its outputs
 - do not leave `.codex` files or other Codex-specific scratch artifacts in the repository
 
-## Build, Test, and Development Commands
+## Environment Requirement
 
-Create an environment and install dependencies:
+Use the `tokmem` conda environment for experiments in this repository.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+source /data/ruochen/anaconda/etc/profile.d/conda.sh
+conda activate tokmem
+```
+
+Do not switch to `.venv` or another ad hoc environment for experiment runs unless the user explicitly asks for it.
+
+## Build, Test, and Development Commands
+
+Install dependencies in the active environment when needed:
+
+```bash
 pip install -r requirements.txt
 ```
 

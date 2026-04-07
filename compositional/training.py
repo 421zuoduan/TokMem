@@ -14,6 +14,7 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
     if model.lora_config and lora_lr is not None:
         # Separate learning rates for embeddings and LoRA
         embedding_params, lora_params = model.get_trainable_parameters(separate_lora=True)
+        print(f"Found {len(lora_params)} LoRA parameters")
         
         # IMPORTANT: Disable weight decay for embeddings to prevent drift of unused tool rows
         param_groups = [
@@ -64,6 +65,7 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
     total_tool_loss = 0
     tool_token_count = 0
     tool_loss_batches = 0  # Count of batches that had tool tokens
+    successful_steps = 0
     step = 0
 
     batch_loss = 0
@@ -80,6 +82,15 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
             
             # Forward pass
             logits = model(input_ids, attention_mask)
+            if not torch.isfinite(logits).all():
+                print(
+                    f"Warning: skipping non-finite logits at epoch {epoch+1}, "
+                    f"batch {batch_idx+1}/{len(dataloader)}"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                continue
+
             # Shift logits and labels for causal LM loss
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
@@ -87,26 +98,55 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
             # Flatten for cross entropy
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
+            valid_mask = shift_labels != -100
+
+            if valid_mask.sum() == 0:
+                print(
+                    f"Warning: skipping batch with no valid targets at epoch {epoch+1}, "
+                    f"batch {batch_idx+1}/{len(dataloader)}"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                continue
             
             # Calculate overall loss (ignore -100 labels)
-            loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)            
+            loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)
+            if not torch.isfinite(loss):
+                print(
+                    f"Warning: skipping non-finite loss at epoch {epoch+1}, "
+                    f"batch {batch_idx+1}/{len(dataloader)}"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                continue
+
             batch_loss += loss.item()
             
             # Calculate tool token loss
             tool_mask = torch.isin(shift_labels, torch.tensor(model.reserved_token_ids, device=device))
-            valid_mask = shift_labels != -100
             tool_token_mask = tool_mask & valid_mask
+            current_batch_tool_count = 0
             
             if tool_token_mask.sum() > 0:
                 tool_loss = F.cross_entropy(shift_logits[tool_token_mask], shift_labels[tool_token_mask])
-                batch_tool_count += tool_token_mask.sum().item()
+                current_batch_tool_count = tool_token_mask.sum().item()
+                batch_tool_count += current_batch_tool_count
             else:
                 tool_loss = torch.tensor(0.0, device=device)
-                batch_tool_count += 0
             batch_tool_loss += tool_loss.item()
             
             # Backward pass
             loss.backward()
+
+            trainable_params = model.get_trainable_parameters()
+            if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in trainable_params):
+                print(
+                    f"Warning: skipping optimizer step with non-finite gradients at epoch {epoch+1}, "
+                    f"batch {batch_idx+1}/{len(dataloader)}"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                continue
 
             # If we have an active tool mask, zero-out gradients for non-active rows
             if active_tool_ids is not None:
@@ -175,11 +215,12 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
                 scheduler.step()
             
             total_loss += loss.item()
+            successful_steps += 1
             
             # Track tool token loss
-            if batch_tool_count > 0:
+            if current_batch_tool_count > 0:
                 total_tool_loss += tool_loss.item()
-                tool_token_count += batch_tool_count
+                tool_token_count += current_batch_tool_count
                 tool_loss_batches += 1
 
             if (batch_idx + 1) % 10 == 0:
@@ -208,7 +249,7 @@ def train_native_function_calling_model(model, dataloader, num_epochs=3, lr=0.01
             
         
     
-    avg_total_loss = total_loss / (len(dataloader) * num_epochs)
+    avg_total_loss = total_loss / successful_steps if successful_steps > 0 else float("nan")
     
     if tool_token_count > 0:
         avg_tool_loss = total_tool_loss / tool_loss_batches  # Average tool loss across batches that had tool tokens

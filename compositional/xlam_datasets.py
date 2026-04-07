@@ -8,12 +8,46 @@ import json
 import pandas as pd
 import random
 import os
+from pathlib import Path
 from typing import Dict, List, Optional
 
 def load_xlam_dataset():
     """Load and convert XLAM dataset to pandas DataFrame"""
-    datasets = load_dataset("Salesforce/xlam-function-calling-60k")
-    return datasets['train'].to_pandas()
+    repo_dir = Path(__file__).resolve().parent.parent
+    candidates = [
+        repo_dir / "datasets" / "xlam-function-calling-60k",
+        repo_dir / "datasets" / "xlam",
+        repo_dir / "datasets" / "apigen",
+    ]
+
+    for local_dir in candidates:
+        if not local_dir.exists():
+            continue
+
+        data_dir = local_dir / "data"
+        parquet_paths = list(data_dir.glob("*.parquet")) if data_dir.exists() else []
+        if not parquet_paths:
+            parquet_paths = [p for p in local_dir.rglob("*.parquet") if "sft_format" not in p.parts]
+        parquet_files = sorted(str(p) for p in parquet_paths)
+        if parquet_files:
+            datasets = load_dataset("parquet", data_files={"train": parquet_files})
+            return datasets["train"].to_pandas()
+
+        jsonl_files = sorted(str(p) for p in local_dir.rglob("*.jsonl"))
+        if jsonl_files:
+            datasets = load_dataset("json", data_files={"train": jsonl_files})
+            return datasets["train"].to_pandas()
+
+        json_files = sorted(str(p) for p in local_dir.rglob("*.json"))
+        if json_files:
+            datasets = load_dataset("json", data_files={"train": json_files})
+            return datasets["train"].to_pandas()
+
+    raise FileNotFoundError(
+        "Local XLAM/APIGen dataset not found or contains no supported data files. "
+        "Put .parquet, .jsonl, or .json files under "
+        "datasets/xlam-function-calling-60k, datasets/xlam, or datasets/apigen."
+    )
 
 def extract_tool_descriptions(df, tool_names):
     """
@@ -597,6 +631,7 @@ def main():
         tool_desc_filename = f"tool_descriptions_top{args.top_k}.json"
     
     # Save in output directory
+    os.makedirs(args.output_dir, exist_ok=True)
     tool_desc_path = os.path.join(args.output_dir, tool_desc_filename)
     save_tool_descriptions(tool_descriptions, tool_desc_path)
     print(f"Saved tool descriptions: {tool_desc_path}")
@@ -647,5 +682,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

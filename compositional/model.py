@@ -515,7 +515,6 @@ class FunctionCallingModel(nn.Module):
         lora_params = []
         if self.lora_config:
             lora_params = [p for p in self.model.parameters() if p.requires_grad]
-            print(f"Found {len(lora_params)} LoRA parameters")
         
         if separate_lora and self.lora_config:
             return embedding_params, lora_params

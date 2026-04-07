@@ -1,5 +1,8 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_MODEL="$ROOT_DIR/models/Llama-3.2-3B-Instruct"
 
 # Default parameters
 NUM_ROUNDS=2
@@ -14,6 +17,10 @@ BATCH_SIZE=2
 LR=5e-3
 LORA_LR=5e-5
 MODEL="meta-llama/Llama-3.2-3B-Instruct"
+if [ -d "$LOCAL_MODEL" ]; then
+    MODEL="$LOCAL_MODEL"
+fi
+MODEL="${TOKMEM_COMPOSITIONAL_MODEL:-$MODEL}"
 START_TOOL=1
 TRAIN_SIZE=5000
 TEST_SIZE=500
@@ -219,5 +226,20 @@ if [ $? -eq 0 ]; then
     echo "✓ Training completed successfully!"
     echo ""
     echo "Results:"
-    echo "  - Checkpoints: ${CHECKPOINT_DIR}/"
-    echo "
+    if [ "$SAVE_CHECKPOINTS" = true ]; then
+        echo "  - Checkpoints: ${CHECKPOINT_DIR}/"
+    else
+        echo "  - Checkpoints disabled (SAVE_CHECKPOINTS=false)"
+    fi
+    echo ""
+    echo "Configuration used:"
+    echo "  - Method: TokMem"
+    echo "  - Rounds: $NUM_ROUNDS"
+    echo "  - Tools per round: $TOOLS_PER_ROUND"
+    echo "  - Samples per tool: $SAMPLES_PER_TOOL"
+    echo "  - Total tools covered: $((START_TOOL)) to $((START_TOOL + NUM_ROUNDS * TOOLS_PER_ROUND - 1))"
+else
+    echo ""
+    echo "✗ Training failed!"
+    exit 1
+fi
