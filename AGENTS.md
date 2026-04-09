@@ -112,6 +112,7 @@ There is no formal coverage target. For contributions, run the narrowest relevan
 - model/data changes in `atomic/`: run `python test_sbert_retriever.py` or a reduced `main_in_domain.py` configuration
 - sequential training changes in `compositional/`: run a small-round local config
 - memorization changes: run a single reduced experiment instead of the full sweep
+- do not create dedicated test-only files just for validation unless the user explicitly asks for a file to be added
 
 Name new validation scripts as `test_*.py` when they are meant to be run directly.
 
