@@ -50,5 +50,6 @@ compositional/log
 saved_models
 
 nohup.out
+*.out
 .codex
 .learnings

@@ -11,31 +11,70 @@ The experiments use tools extracted from the **XLAM** aka. APIGen dataset. A tot
 ## Methods & Scripts
 
 ### 1. TokMem (Main Method)
-`run_n_rounds_main.sh`
-This script implements the **TokMem** approach. It performs sequential training where the first round (tools 1-50) serves as an adaptation phase.
+`scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh`
+This launcher implements the **TokMem** approach. It performs sequential training where the first round (tools 1-50) serves as an adaptation phase.
 - **Key Feature**: Uses a specialized training loop in `main_sequential.py` that can freeze adapters after the initial adaptation to maintain stable memory while learning new tool distributions.
 - **Usage**:
   ```bash
-  bash run_n_rounds_main.sh
+  bash scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh
   ```
 
 ### 2. LoRA Baseline
-`run_n_rounds_lora.sh`
-This script provides a standard sequential fine-tuning baseline using LoRA.
+`scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
+This launcher provides a standard sequential fine-tuning baseline using LoRA.
 - **Key Feature**: It uses standard LoRA fine-tuning (with optional reinitialization or replay buffers) via `lora_sequential.py`. 
 - **Usage**:
   ```bash
-  bash run_n_rounds_lora.sh
+  bash scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh
   ```
 
 ### 3. ICL Baseline
-`icl_baseline.sh`
-This script evaluates the model's zero-shot or few-shot capabilities using In-Context Learning (ICL).
+`scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh`
+This launcher evaluates the model's zero-shot or few-shot capabilities using In-Context Learning (ICL).
 - **Key Feature**: Evaluates the model directly on tools 51-100 without any fine-tuning. It supports RAG-based tool retrieval to fit relevant tool descriptions into the context window.
 - **Usage**:
   ```bash
-  bash icl_baseline.sh
+  bash scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh
   ```
+
+## Run Layout
+
+All maintained compositional runs now write artifacts to:
+
+```bash
+compositional/runs/<run_name>/
+```
+
+Typical run artifacts include:
+
+- `run_config.json`
+- `run_summary.json`
+- `train_results.json`
+- `evaluation_results.json`
+- `training_summary.json`
+- `training.log`
+- `evaluation.log`
+- `gpu_monitor.log`
+- round checkpoints
+
+The old `compositional/log/`, `checkpoints_*`, and root-level result JSON layout is legacy-only and should not be used for new runs.
+
+## Legacy Migration
+
+To migrate older compositional outputs into the unified run layout:
+
+```bash
+python compositional/utils/migrate_legacy_runs.py --dry-run
+python compositional/utils/migrate_legacy_runs.py
+```
+
+## Deprecated Entry Points
+
+These older shell entrypoints remain in the repository for reference but are no longer the maintained path:
+
+- `compositional/run_n_rounds_main.sh`
+- `compositional/run_n_rounds_lora.sh`
+- `compositional/icl_baseline.sh`
 
 ## Key Components
 

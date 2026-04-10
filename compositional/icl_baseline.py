@@ -11,11 +11,42 @@ import json
 import random
 import argparse
 import os
+import sys
 import torch
 from typing import List, Dict, Any, Optional
+from contextlib import redirect_stdout
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from eval import compare_function_calls_advanced, calculate_tool_selection_accuracy
 from tool_retrieval import ToolRetriever
+from run_layout import (
+    DEFAULT_RUNS_DIR,
+    artifact_path,
+    build_run_config,
+    resolve_run_context,
+    write_json,
+)
+
+
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def resolve_run_file_path(run_context, requested_path, default_name):
+    if requested_path:
+        if os.path.isabs(requested_path):
+            return requested_path
+        return artifact_path(run_context, os.path.basename(requested_path))
+    return artifact_path(run_context, default_name)
 
 def load_tool_descriptions(filepath="tool_descriptions.json") -> Dict[str, Any]:
     """Load tool descriptions from JSON file"""
@@ -538,8 +569,13 @@ def main():
     parser.add_argument("--dtype", default="bfloat16", help="Model dtype")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to evaluate (default: None - evaluate all)")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for evaluation")
-    parser.add_argument("--output", default="icl_results.json", help="Output file for results")
+    parser.add_argument("--output", default=None, help="Output file for results")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--run_name", type=str, default=None, help="Explicit run name")
+    parser.add_argument("--run_root_dir", type=str, default=DEFAULT_RUNS_DIR,
+                       help="Root directory for compositional runs")
+    parser.add_argument("--run_tag", type=str, default=None,
+                       help="Optional tag appended to the generated run name")
     
     # RAG arguments
     parser.add_argument("--use_rag", action="store_true",
@@ -548,6 +584,16 @@ def main():
                        help="Number of tools to retrieve when using RAG (default: 10)")
     
     args = parser.parse_args()
+
+    run_context = resolve_run_context(
+        experiment_name="compositional_icl",
+        model_name=args.model_name,
+        run_root_dir=args.run_root_dir,
+        run_name=args.run_name,
+        run_tag=args.run_tag,
+    )
+    output_file = resolve_run_file_path(run_context, args.output, "evaluation_results.json")
+    training_log_file = artifact_path(run_context, "training.log")
     
     # Set random seed
     random.seed(args.seed)
@@ -563,30 +609,67 @@ def main():
     else:
         dtype = torch.float32
     
-    # Create baseline and run evaluation
-    baseline = ICLBaseline(
-        model_name=args.model_name,
-        device=args.device,
-        dtype=dtype,
-        use_rag=args.use_rag,
-        retrieval_k=args.retrieval_k
+    write_json(
+        artifact_path(run_context, "run_config.json"),
+        build_run_config(
+            vars(args),
+            run_context,
+            extra={
+                "experiment_type": "icl_baseline",
+                "artifacts": {
+                    "training_log": training_log_file,
+                    "evaluation_results": output_file,
+                },
+                "test_data": os.path.abspath(args.test_data),
+                "tool_descriptions": os.path.abspath(args.tool_descriptions),
+            },
+        ),
     )
-    
-    # Print configuration
-    if args.use_rag:
-        print(f"\n🔍 RAG enabled: Retrieving top-{args.retrieval_k} tools per query")
-    else:
-        print("\n📦 RAG disabled: Using all tools in prompt")
-    
-    metrics = baseline.run_evaluation(
-        test_data_path=args.test_data,
-        tool_descriptions_path=args.tool_descriptions,
-        max_samples=args.max_samples,
-        output_file=args.output,
-        batch_size=args.batch_size
-    )
-    
-    print("\n✅ ICL baseline evaluation complete!")
+
+    with open(training_log_file, "a", encoding="utf-8") as log_handle:
+        tee_stream = TeeStream(sys.stdout, log_handle)
+        with redirect_stdout(tee_stream):
+            print(f"Run directory: {run_context['run_dir']}")
+
+            baseline = ICLBaseline(
+                model_name=args.model_name,
+                device=args.device,
+                dtype=dtype,
+                use_rag=args.use_rag,
+                retrieval_k=args.retrieval_k
+            )
+            
+            if args.use_rag:
+                print(f"\n🔍 RAG enabled: Retrieving top-{args.retrieval_k} tools per query")
+            else:
+                print("\n📦 RAG disabled: Using all tools in prompt")
+            
+            metrics = baseline.run_evaluation(
+                test_data_path=args.test_data,
+                tool_descriptions_path=args.tool_descriptions,
+                max_samples=args.max_samples,
+                output_file=output_file,
+                batch_size=args.batch_size
+            )
+            
+            print("\n✅ ICL baseline evaluation complete!")
+
+    run_summary_payload = {
+        "run_name": run_context["run_name"],
+        "run_dir": run_context["run_dir"],
+        "timestamp": run_context["timestamp"],
+        "experiment_type": "icl_baseline",
+        "model_name": args.model_name,
+        "use_rag": args.use_rag,
+        "retrieval_k": args.retrieval_k if args.use_rag else None,
+        "metrics": metrics,
+        "artifacts": {
+            "run_config": artifact_path(run_context, "run_config.json"),
+            "training_log": training_log_file,
+            "evaluation_results": output_file,
+        },
+    }
+    write_json(artifact_path(run_context, "run_summary.json"), run_summary_payload)
 
 if __name__ == "__main__":
     main()

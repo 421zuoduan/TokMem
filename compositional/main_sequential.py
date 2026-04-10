@@ -16,6 +16,13 @@ import logging
 from model import FunctionCallingModel, print_model_info
 from dataset import create_native_dataloader, discover_available_tools
 from training import train_native_function_calling_model, eval_native_function_calling, demo_native_function_calling
+from run_layout import (
+    DEFAULT_RUNS_DIR,
+    artifact_path,
+    build_run_config,
+    resolve_run_context,
+    write_json,
+)
 
 
 def discover_all_tool_names_from_rounds(rounds, data_dir, train_max_calls_by_round, test_max_calls_by_round):
@@ -32,6 +39,7 @@ def discover_all_tool_names_from_rounds(rounds, data_dir, train_max_calls_by_rou
     """
     print("Pre-discovering all tool names from all rounds...")
     all_tool_names = []
+    seen_tool_names = set()
     
     for round_idx, round_spec in enumerate(rounds):
         round_num = round_idx + 1
@@ -58,8 +66,11 @@ def discover_all_tool_names_from_rounds(rounds, data_dir, train_max_calls_by_rou
         round_tools = discover_available_tools(train_data_file, test_data_file)
         print(f"Round {round_num} (tools {tools_range}): {len(round_tools)} tools")
         
-        # Add to complete list
-        all_tool_names.extend(round_tools)
+        # Add to complete list while preserving the first-seen order
+        for tool_name in round_tools:
+            if tool_name not in seen_tool_names:
+                all_tool_names.append(tool_name)
+                seen_tool_names.add(tool_name)
     
     print(f"Total discovered tools: {len(all_tool_names)}")
     print(f"First few tools: {all_tool_names[:5]}...")
@@ -169,6 +180,14 @@ def parse_training_rounds(rounds_str):
     return rounds
 
 
+def resolve_run_file_path(run_context, requested_path, default_name):
+    if requested_path:
+        if os.path.isabs(requested_path):
+            return requested_path
+        return artifact_path(run_context, os.path.basename(requested_path))
+    return artifact_path(run_context, default_name)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sequential Function Calling Training with Tool Progression")
     
@@ -244,12 +263,18 @@ def main():
     
     parser.add_argument("--save_checkpoints", action="store_true",
                         help="Save model checkpoints after each round")
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints",
+    parser.add_argument("--checkpoint_dir", type=str, default=None,
                         help="Directory to save checkpoints")
     parser.add_argument("--log_file", type=str, default=None,
                         help="Path to log file for evaluation results")
     parser.add_argument("--curriculum_learning", action="store_true",
                         help="Enable curriculum learning")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Explicit run name")
+    parser.add_argument("--run_root_dir", type=str, default=DEFAULT_RUNS_DIR,
+                        help="Root directory for compositional runs")
+    parser.add_argument("--run_tag", type=str, default=None,
+                        help="Optional tag appended to the generated run name")
     
     args = parser.parse_args()
 
@@ -259,20 +284,26 @@ def main():
     import sys
     from datetime import datetime
     
-    # Create log directory first
-    os.makedirs("log", exist_ok=True)
-    
-    # Configure logging - put logs in log/ directory
+    run_context = resolve_run_context(
+        experiment_name="compositional_tokmem",
+        model_name=args.model_name,
+        run_root_dir=args.run_root_dir,
+        run_name=args.run_name,
+        run_tag=args.run_tag,
+    )
+
+    training_log_file = resolve_run_file_path(run_context, args.log_file, "training.log")
+    evaluation_log_file = artifact_path(run_context, "evaluation.log")
+    checkpoint_dir = run_context["run_dir"]
+    if args.checkpoint_dir:
+        checkpoint_dir = (
+            args.checkpoint_dir
+            if os.path.isabs(args.checkpoint_dir)
+            else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
+        )
+
     log_handlers = [logging.StreamHandler(sys.stdout)]
-    if args.log_file:
-        # Ensure log file goes in log/ directory
-        log_file_path = args.log_file if args.log_file.startswith('log/') else f"log/{os.path.basename(args.log_file)}"
-        log_handlers.append(logging.FileHandler(log_file_path, mode='a'))
-    else:
-        # Create default log file in log/ directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_log_file = f"log/sequential_training_{timestamp}.log"
-        log_handlers.append(logging.FileHandler(default_log_file, mode='a'))
+    log_handlers.append(logging.FileHandler(training_log_file, mode='a'))
     
     logging.basicConfig(
         level=logging.INFO,
@@ -284,6 +315,7 @@ def main():
     # Log start time and configuration
     logger.info(f"=== Sequential Training Started at {datetime.now()} ===")
     logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
+    logger.info(f"Run directory: {run_context['run_dir']}")
     
     # Parse training rounds
     try:
@@ -355,6 +387,7 @@ def main():
     print(f"Model: {args.model_name}")
     print(f"Training rounds: {len(rounds)}")
     print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
+    print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA will be frozen after first round")
     print()
@@ -366,7 +399,7 @@ def main():
     
     # Create checkpoint directory if needed
     if args.save_checkpoints:
-        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Initialize model (will be created in first round)
     model = None
@@ -393,17 +426,6 @@ def main():
                 "target_modules": target_modules
             }
     
-    # Calculate total number of tools across all rounds
-    total_tools = len(rounds) * 10  # Assuming each round has same number of tools
-    # More robust: parse all rounds to get exact total
-    all_tool_ranges = []
-    for round_spec in rounds:
-        tools_range = round_spec['tools']
-        start, end = map(int, tools_range.split('-'))
-        all_tool_ranges.append((start, end))
-    total_tools = max(end for _, end in all_tool_ranges)
-    print(f"Total tools to be learned: {total_tools}")
-    
     # Pre-discover actual tool names from all rounds' data files
     all_tool_names = discover_all_tool_names_from_rounds(
         rounds,
@@ -411,10 +433,32 @@ def main():
         train_max_calls_by_round,
         test_max_calls_by_round,
     )
-    
-    if len(all_tool_names) != total_tools:
-        print(f"Warning: Expected {total_tools} tools but discovered {len(all_tool_names)}")
-        print("This might cause issues with tool token mapping")
+
+    if not all_tool_names:
+        parser.error("No tools discovered from the round datasets. Check --data_dir and the generated split files.")
+
+    total_tools = len(all_tool_names)
+    print(f"Total tools to be learned: {total_tools}")
+
+    write_json(
+        artifact_path(run_context, "run_config.json"),
+        build_run_config(
+            vars(args),
+            run_context,
+            extra={
+                "experiment_type": "tokmem_sequential",
+                "rounds": rounds,
+                "total_tools": total_tools,
+                "discovered_tool_count": len(all_tool_names),
+                "data_dir": os.path.abspath(args.data_dir),
+                "artifacts": {
+                    "training_log": training_log_file,
+                    "evaluation_log": evaluation_log_file,
+                    "checkpoint_dir": checkpoint_dir,
+                },
+            },
+        ),
+    )
     
     # Store results for all rounds
     all_results = []
@@ -567,13 +611,7 @@ def main():
             all_results[-1]['eval_results'] = eval_results
             
             # Log the formatted evaluation results to file
-            if args.log_file:
-                log_file_base = args.log_file if args.log_file.startswith('log/') else f"log/{os.path.basename(args.log_file)}"
-                eval_log_file = log_file_base.replace('.log', '_eval_results.log')
-            else:
-                eval_log_file = default_log_file.replace('.log', '_eval_results.log')
-            
-            with open(eval_log_file, 'a') as f:
+            with open(evaluation_log_file, 'a', encoding='utf-8') as f:
                 f.write(f"\n{'='*60}\n")
                 f.write(f"ROUND {round_num} EVALUATION - Tools: {tools_range}, Epochs: {epochs}\n")
                 f.write(f"Timestamp: {datetime.now().isoformat()}\n")
@@ -606,13 +644,7 @@ def main():
                     cumulative_results[f"tools_{prev_tools}"] = prev_eval_results
                     
                     # Also log cumulative results to eval file
-                    if args.log_file:
-                        log_file_base = args.log_file if args.log_file.startswith('log/') else f"log/{os.path.basename(args.log_file)}"
-                        eval_log_file = log_file_base.replace('.log', '_eval_results.log')
-                    else:
-                        eval_log_file = default_log_file.replace('.log', '_eval_results.log')
-                    
-                    with open(eval_log_file, 'a') as f:
+                    with open(evaluation_log_file, 'a', encoding='utf-8') as f:
                         f.write(f"\n{'='*60}\n")
                         f.write(f"ROUND {round_num} CUMULATIVE EVALUATION - Previous Tools: {prev_tools}\n")
                         f.write(f"Timestamp: {datetime.now().isoformat()}\n")
@@ -624,7 +656,7 @@ def main():
         
         # Save checkpoint if requested
         if args.save_checkpoints:
-            checkpoint_path = os.path.join(args.checkpoint_dir, f"round_{round_num}_tools_{tools_range.replace('-', '_')}.pt")
+            checkpoint_path = os.path.join(checkpoint_dir, f"round_{round_num}_tools_{tools_range.replace('-', '_')}.pt")
             print(f"Saving checkpoint to {checkpoint_path}")
             torch.save({
                 'round': round_num,
@@ -632,6 +664,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'results': round_results,
             }, checkpoint_path)
+            all_results[-1]["checkpoint_path"] = checkpoint_path
     
     # Final summary
     print("\n" + "="*60)
@@ -660,12 +693,66 @@ def main():
         print("LoRA was frozen after first round")
     print("="*60)
     
-    # Save final results summary
-    if args.save_checkpoints:
-        summary_path = os.path.join(args.checkpoint_dir, "training_summary.json")
-        with open(summary_path, 'w') as f:
-            json.dump(all_results, f, indent=2, default=str)
-        print(f"\nTraining summary saved to {summary_path}")
+    training_summary_path = artifact_path(run_context, "training_summary.json")
+    write_json(training_summary_path, all_results)
+    print(f"\nTraining summary saved to {training_summary_path}")
+
+    train_results_payload = {
+        "experiment_type": "tokmem_sequential",
+        "run_name": run_context["run_name"],
+        "num_rounds": len(all_results),
+        "avg_loss_by_round": [
+            {
+                "round": result["round"],
+                "tools": result["tools"],
+                "epochs": result["epochs"],
+                "avg_loss": result["avg_loss"],
+                "checkpoint_path": result.get("checkpoint_path"),
+            }
+            for result in all_results
+        ],
+        "final_round": all_results[-1] if all_results else None,
+    }
+    evaluation_results_payload = {
+        "experiment_type": "tokmem_sequential",
+        "run_name": run_context["run_name"],
+        "eval_after_each_round": args.eval_after_each_round,
+        "rounds": [
+            {
+                "round": result["round"],
+                "tools": result["tools"],
+                "epochs": result["epochs"],
+                "eval_results": result.get("eval_results"),
+                "cumulative_eval_results": result.get("cumulative_eval_results"),
+            }
+            for result in all_results
+            if result.get("eval_results") is not None or result.get("cumulative_eval_results") is not None
+        ],
+    }
+    write_json(artifact_path(run_context, "train_results.json"), train_results_payload)
+    write_json(artifact_path(run_context, "evaluation_results.json"), evaluation_results_payload)
+
+    best_round = min(all_results, key=lambda result: result["avg_loss"]) if all_results else None
+    run_summary_payload = {
+        "run_name": run_context["run_name"],
+        "run_dir": run_context["run_dir"],
+        "timestamp": run_context["timestamp"],
+        "experiment_type": "tokmem_sequential",
+        "model_name": args.model_name,
+        "training_rounds": args.training_rounds,
+        "num_rounds": len(all_results),
+        "best_round_by_loss": best_round,
+        "final_round": all_results[-1] if all_results else None,
+        "artifacts": {
+            "run_config": artifact_path(run_context, "run_config.json"),
+            "training_log": training_log_file,
+            "evaluation_log": evaluation_log_file,
+            "train_results": artifact_path(run_context, "train_results.json"),
+            "evaluation_results": artifact_path(run_context, "evaluation_results.json"),
+            "training_summary": training_summary_path,
+        },
+    }
+    write_json(artifact_path(run_context, "run_summary.json"), run_summary_payload)
     
     # Log completion
     logger.info(f"=== Sequential Training Completed at {datetime.now()} ===")
