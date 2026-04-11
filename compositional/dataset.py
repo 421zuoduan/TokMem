@@ -56,11 +56,12 @@ def discover_available_tools(train_data_path="function_calling_train.json", test
 class NativeFunctionCallingDataset(Dataset):
     """Dataset for function calling using native reserved special tokens as tool tokens"""
     
-    def __init__(self, data_path=None, tokenizer=None, max_length=512, model=None, mode="train"):
+    def __init__(self, data_path=None, tokenizer=None, max_length=1024, model=None, mode="train", use_eoc=False):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.model = model  # Need model for reserved token mappings
         self.mode = mode  # "train" or "eval"
+        self.use_eoc = use_eoc
         
         if data_path:
             with open(data_path, 'r') as f:
@@ -71,6 +72,21 @@ class NativeFunctionCallingDataset(Dataset):
     
     def __len__(self):
         return len(self.data)
+
+    def _get_eoc_token_id(self):
+        """Resolve the model's EOC token ID when EOC mode is enabled."""
+        if self.model is None:
+            raise ValueError("use_eoc=True requires a model with an eoc token id")
+
+        if hasattr(self.model, "get_eoc_token_id"):
+            eoc_token_id = self.model.get_eoc_token_id()
+        else:
+            eoc_token_id = getattr(self.model, "eoc_token_id", None)
+
+        if eoc_token_id is None:
+            raise ValueError("use_eoc=True requires the model to expose eoc_token_id")
+
+        return eoc_token_id
     
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -99,7 +115,8 @@ class NativeFunctionCallingDataset(Dataset):
         # Training mode: build full sequence with tools and function calls
         full_sequence = user_tokens.copy()
         labels = [-100] * len(user_tokens)  # Ignore user tokens in loss
-        
+        eoc_token_id = self._get_eoc_token_id() if self.use_eoc else None
+
         # Use multi-tool format only
         if 'tools' not in item or 'function_calls' not in item:
             raise ValueError("Data must contain 'tools' and 'function_calls' fields")
@@ -127,6 +144,10 @@ class NativeFunctionCallingDataset(Dataset):
             # Add to labels (learn to predict tool token and function call tokens)
             labels.append(tool_token_id)
             labels.extend(function_call_tokens)
+
+            if self.use_eoc:
+                full_sequence.append(eoc_token_id)
+                labels.append(eoc_token_id)
         
         # Add end-of-turn token
         eot_token = self.tokenizer('<|eot_id|>', add_special_tokens=False)['input_ids']
@@ -192,8 +213,8 @@ def collate_fn(batch, tokenizer):
     }
 
 def create_native_dataloader(model, train_data_path=None, test_data_path=None, tokenizer=None, 
-                           batch_size=4, max_length=512, eval_batch_size=32, curriculum_learning=False,
-                           validation_split=0.05, random_seed=42):
+                           batch_size=4, max_length=1024, eval_batch_size=32, curriculum_learning=False,
+                           validation_split=0.05, random_seed=42, use_eoc=False):
     """Create separate DataLoaders for training, validation and testing using pre-split data files
     
     Args:
@@ -207,6 +228,7 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
         curriculum_learning: If True, sort training data by number of function calls (ascending)
         validation_split: Ratio of training data to use for validation (default: 0.05)
         random_seed: Random seed for validation split (default: 42)
+        use_eoc: Insert explicit end-of-control tokens in training targets
     
     Returns:
         train_dataloader: Training DataLoader
@@ -226,6 +248,7 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
             tokenizer=tokenizer,
             max_length=max_length,
             model=model,
+            use_eoc=use_eoc,
         )
         
         # Split training data for validation
@@ -252,7 +275,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
                 tokenizer=tokenizer,
                 max_length=max_length,
                 model=model,
-                mode="train"
+                mode="train",
+                use_eoc=use_eoc,
             )
             train_dataset.data = train_data
             
@@ -261,7 +285,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
                 tokenizer=tokenizer,
                 max_length=max_length,
                 model=model,
-                mode="train"
+                mode="train",
+                use_eoc=use_eoc,
             )
             val_dataset.data = val_data
             
@@ -323,7 +348,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
             tokenizer=tokenizer,
             max_length=max_length,
             model=model,
-            mode="eval"  # Use eval mode for test dataset
+            mode="eval",  # Use eval mode for test dataset
+            use_eoc=use_eoc,
         )
         
         # Use larger batch size for test dataloader for efficient batch evaluation

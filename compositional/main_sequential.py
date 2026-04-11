@@ -5,6 +5,7 @@ Supports multiple rounds of training with different tool sets.
 """
 
 import argparse
+import inspect
 import random
 import numpy as np
 import torch
@@ -188,6 +189,24 @@ def resolve_run_file_path(run_context, requested_path, default_name):
     return artifact_path(run_context, default_name)
 
 
+def filter_supported_kwargs(callable_obj, **kwargs):
+    """Return only the kwargs accepted by the callable."""
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return {key: value for key, value in kwargs.items() if value is not None}
+
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return {key: value for key, value in kwargs.items() if value is not None}
+
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if value is not None and key in parameters
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sequential Function Calling Training with Tool Progression")
     
@@ -220,13 +239,27 @@ def main():
                         help="Number of demo examples to show after training")
     parser.add_argument("--use_ground_truth_tools", action="store_true",
                         help="Use ground truth tools during inference")
+    parser.add_argument("--use_eoc", action="store_true",
+                        help="Insert an explicit end-of-control token after each tool-controlled span")
+    parser.add_argument("--use_gate", action="store_true",
+                        help="Enable gate supervision and gate-controlled decoding")
+    parser.add_argument("--use_tool_loss", action="store_true",
+                        help="Enable the tool-only selection loss inside the training objective")
+    parser.add_argument("--eoc_loss_weight", type=float, default=0.1,
+                        help="Weight for the eoc boundary loss")
+    parser.add_argument("--tool_loss_weight", type=float, default=0.1,
+                        help="Weight for the tool-only selection loss")
+    parser.add_argument("--gate_loss_weight", type=float, default=0.1,
+                        help="Weight for the gate BCE loss")
+    parser.add_argument("--gate_threshold", type=float, default=0.5,
+                        help="Threshold for positive gate decisions during decoding")
     
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         help="Model dtype")
-    parser.add_argument("--max_length", type=int, default=512,
+    parser.add_argument("--max_length", type=int, default=1024,
                         help="Maximum sequence length")
     parser.add_argument("--decouple_embeddings", action="store_true",
                         help="Use separate weights for input and output tool token embeddings")
@@ -278,7 +311,17 @@ def main():
     
     args = parser.parse_args()
 
-    # No additional flags: default behavior keeps LoRA trainable unless freezing is requested
+    if args.use_gate and not args.use_eoc:
+        parser.error("--use_gate requires --use_eoc")
+    if args.use_tool_loss and not args.use_eoc:
+        parser.error("--use_tool_loss requires --use_eoc")
+    if args.max_length <= 0:
+        parser.error("--max_length must be positive")
+    if not 0.0 <= args.gate_threshold <= 1.0:
+        parser.error("--gate_threshold must be in the range [0, 1]")
+    for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight"):
+        if getattr(args, weight_name) < 0:
+            parser.error(f"--{weight_name} must be non-negative")
     
     # Setup simple logging
     import sys
@@ -387,6 +430,9 @@ def main():
     print(f"Model: {args.model_name}")
     print(f"Training rounds: {len(rounds)}")
     print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
+    print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
+    print(f"Gate: {'Enabled' if args.use_gate else 'Disabled'}")
+    print(f"Max length: {args.max_length}")
     print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA will be frozen after first round")
@@ -504,7 +550,8 @@ def main():
         if model is None:
             # First round - create new model with ALL tool slots and actual tool names
             print(f"Initializing model with {total_tools} total tool slots...")
-            model = FunctionCallingModel(
+            model_kwargs = filter_supported_kwargs(
+                FunctionCallingModel,
                 model_name=args.model_name,
                 num_tools=total_tools,  # Initialize with ALL tools
                 tool_names=all_tool_names,  # Use actual discovered tool names
@@ -513,7 +560,11 @@ def main():
                 dtype=dtype,
                 decouple_embeddings=args.decouple_embeddings,
                 lora_config=lora_config,
+                use_eoc=args.use_eoc,
+                use_gate=args.use_gate,
+                gate_threshold=args.gate_threshold,
             )
+            model = FunctionCallingModel(**model_kwargs)
             print_model_info(model, f"Model with {total_tools} tool slots")
             print(f"Model initialized with all tool names: {model.tool_names[:5]}...{model.tool_names[-5:]}")
             
@@ -530,7 +581,8 @@ def main():
         
         # Create datasets for this round
         print(f"Creating round {round_num} dataset...")
-        train_dataloader, _, test_dataloader, _, test_examples = create_native_dataloader(
+        dataloader_kwargs = filter_supported_kwargs(
+            create_native_dataloader,
             model=model,
             train_data_path=train_data_file,
             test_data_path=test_data_file,
@@ -541,7 +593,9 @@ def main():
             curriculum_learning=args.curriculum_learning,
             validation_split=0,
             random_seed=args.seed,  # Use consistent seed across all rounds
+            use_eoc=args.use_eoc,
         )
+        train_dataloader, _, test_dataloader, _, test_examples = create_native_dataloader(**dataloader_kwargs)
         
         # Store test dataloader for cumulative evaluation
         all_test_dataloaders.append((tools_range, test_dataloader))
@@ -562,16 +616,25 @@ def main():
         except Exception:
             active_tool_ids = None
 
-        round_results = train_native_function_calling_model(
-            model, 
-            train_dataloader, 
+        training_kwargs = filter_supported_kwargs(
+            train_native_function_calling_model,
+            model=model,
+            dataloader=train_dataloader,
             num_epochs=epochs,
             lr=args.lr,
             lora_lr=args.lora_lr if train_lora else None,
             device=args.device,
             active_tool_ids=active_tool_ids,
-            renorm_active_rows=(args.renorm_active_tools and round_num > 2)
+            renorm_active_rows=(args.renorm_active_tools and round_num > 2),
+            use_eoc=args.use_eoc,
+            use_gate=args.use_gate,
+            use_tool_loss=args.use_tool_loss,
+            gate_threshold=args.gate_threshold,
+            eoc_loss_weight=args.eoc_loss_weight,
+            tool_loss_weight=args.tool_loss_weight,
+            gate_loss_weight=args.gate_loss_weight,
         )
+        round_results = train_native_function_calling_model(**training_kwargs)
         
         print(f"Round {round_num} training completed! Average loss: {round_results['avg_total_loss']:.4f}")
         logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_total_loss']:.4f}")
@@ -598,8 +661,17 @@ def main():
             captured_output = io.StringIO()
             with redirect_stdout(captured_output):
                 eval_results = eval_native_function_calling(
-                    model, tokenizer, test_dataloader, args.device,
-                    use_ground_truth_tools=args.use_ground_truth_tools
+                    **filter_supported_kwargs(
+                        eval_native_function_calling,
+                        model=model,
+                        tokenizer=tokenizer,
+                        test_dataloader=test_dataloader,
+                        device=args.device,
+                        use_ground_truth_tools=args.use_ground_truth_tools,
+                        use_eoc=args.use_eoc,
+                        use_gate=args.use_gate,
+                        gate_threshold=args.gate_threshold,
+                    )
                 )
             
             # Get the captured formatted output
@@ -631,8 +703,17 @@ def main():
                     captured_output = io.StringIO()
                     with redirect_stdout(captured_output):
                         prev_eval_results = eval_native_function_calling(
-                            model, tokenizer, prev_test_dataloader, args.device,
-                            use_ground_truth_tools=args.use_ground_truth_tools
+                            **filter_supported_kwargs(
+                                eval_native_function_calling,
+                                model=model,
+                                tokenizer=tokenizer,
+                                test_dataloader=prev_test_dataloader,
+                                device=args.device,
+                                use_ground_truth_tools=args.use_ground_truth_tools,
+                                use_eoc=args.use_eoc,
+                                use_gate=args.use_gate,
+                                gate_threshold=args.gate_threshold,
+                            )
                         )
                     
                     # Get the captured formatted output
@@ -682,8 +763,17 @@ def main():
         print(f"DEMO: Testing on final round examples")
         print("="*60 + "\n")
         demo_native_function_calling(
-            model, tokenizer, test_examples[:args.demo],
-            args.device, use_ground_truth_tools=args.use_ground_truth_tools
+            **filter_supported_kwargs(
+                demo_native_function_calling,
+                model=model,
+                tokenizer=tokenizer,
+                test_examples=test_examples[:args.demo],
+                device=args.device,
+                use_ground_truth_tools=args.use_ground_truth_tools,
+                use_eoc=args.use_eoc,
+                use_gate=args.use_gate,
+                gate_threshold=args.gate_threshold,
+            )
         )
     
     print("\n" + "="*60)

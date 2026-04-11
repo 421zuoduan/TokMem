@@ -18,8 +18,19 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 
 - prioritize `compositional/` work, scripts, experiments, and code changes by default
 - start from `compositional/` entrypoints and datasets unless the task is clearly about another track
+- for `compositional/`, treat the primary research direction as end-to-end modeling of whether the next token step should enter tool generation
+- explicitly separate the "should generate a tool now" decision from the "which tool token(s) may be generated" problem when proposing methods, losses, decoding rules, or analysis
+- prefer approaches that constrain tool token generation and selection with explicit structure rather than leaving tool invocation to unconstrained free-form generation
 - keep `atomic/` workflows and documentation available; they still apply when the user explicitly asks for `atomic/` work
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
+
+More specifically, when working on `compositional/` by default:
+
+- favor end-to-end formulations that learn a gating or routing signal for tool invocation within the main model rather than relying on a separate pipeline stage unless the user explicitly asks for a staged baseline
+- discuss and evaluate tool use as two coupled but distinct subproblems:
+  1. deciding whether the next generation step should emit a tool call at all
+  2. constraining the admissible tool token generation and tool selection once tool mode is active
+- when adding experiments, analyses, or documentation, make the decoupling between invocation decision and constrained tool-token generation explicit
 
 ## Result Analysis Workflow
 

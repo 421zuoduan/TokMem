@@ -43,10 +43,24 @@ class FunctionCallingModel(nn.Module):
     
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, lora_config=None):
+                 decouple_embeddings=False, lora_config=None, use_eoc=False, use_gate=False,
+                 gate_threshold=0.5):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
-        self.num_tools = min(num_tools, 248)  # Max 248 reserved tokens available
+        self.use_eoc = use_eoc
+        self.use_gate = use_gate
+        self.gate_threshold = gate_threshold
+        if self.use_gate and not self.use_eoc:
+            raise ValueError("--use_gate requires --use_eoc")
+
+        self.max_reserved_tokens = 248  # Native Llama reserved_special_token_* count
+        self.num_tools = min(num_tools, self.max_reserved_tokens - (1 if self.use_eoc else 0))
+        self.num_reserved_slots = self.num_tools + (1 if self.use_eoc else 0)
+        if self.num_tools != num_tools:
+            print(
+                f"Adjusted num_tools from {num_tools} to {self.num_tools} to fit the "
+                f"reserved-token budget with use_eoc={self.use_eoc}"
+            )
         self.device = device
         self.dtype = dtype
         self.decouple_embeddings = decouple_embeddings
@@ -127,8 +141,8 @@ class FunctionCallingModel(nn.Module):
             original_embeddings = self.model.model.embed_tokens.weight.data
         
         # Create trainable parameters for tool tokens (coupled or decoupled)
-        # Clone the embeddings for the reserved tokens and make them parameters
-        reserved_token_indices = torch.tensor(self.reserved_token_ids, device=device)
+        # Clone the embeddings for the trainable reserved tokens and make them parameters
+        reserved_token_indices = torch.tensor(self.trainable_reserved_token_ids, device=device)
         
         if self.decouple_embeddings:
             # Separate parameters for input and output layers
@@ -146,15 +160,25 @@ class FunctionCallingModel(nn.Module):
             # Create aliases for backward compatibility
             self.trainable_tool_input_embeddings = self.trainable_tool_embeddings
             self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
+
+        if self.use_gate:
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(self.config.hidden_size, self.config.hidden_size),
+                nn.GELU(),
+                nn.Linear(self.config.hidden_size, 1),
+            ).to(device=device, dtype=original_embeddings.dtype)
+        else:
+            self.gate_mlp = None
         
         # Tool name mapping
-        self.tool_names = tool_names or [f"tool_{i}" for i in range(self.num_tools)]
+        provided_tool_names = tool_names or [f"tool_{i}" for i in range(self.num_tools)]
+        self.tool_names = list(provided_tool_names[:self.num_tools])
         self.tool_name_to_id = {name: i for i, name in enumerate(self.tool_names)}
         self.tool_id_to_name = {i: name for i, name in enumerate(self.tool_names)}
         
         # Tool token mappings (using reserved tokens)
-        self.tool_id_to_token_id = {i: self.reserved_token_ids[i] for i in range(self.num_tools)}
-        self.token_id_to_tool_id = {self.reserved_token_ids[i]: i for i in range(self.num_tools)}
+        self.tool_id_to_token_id = {i: self.tool_reserved_token_ids[i] for i in range(self.num_tools)}
+        self.token_id_to_tool_id = {self.tool_reserved_token_ids[i]: i for i in range(self.num_tools)}
         
         # Override the model's forward method to use our custom embeddings and logits
         self._setup_model_override()
@@ -181,7 +205,7 @@ class FunctionCallingModel(nn.Module):
             embeddings = self.original_embed_forward(input_ids)
             
             # Replace reserved token embeddings with trainable input embeddings
-            for i, reserved_token_id in enumerate(self.reserved_token_ids):
+            for i, reserved_token_id in enumerate(self.trainable_reserved_token_ids):
                 mask = (input_ids == reserved_token_id)
                 if mask.any():
                     embeddings[mask] = self.trainable_tool_input_embeddings[i]
@@ -194,7 +218,7 @@ class FunctionCallingModel(nn.Module):
             logits = self.original_lm_head_forward(hidden_states)
             
             # Replace reserved token logits with trainable output projections
-            for i, reserved_token_id in enumerate(self.reserved_token_ids):
+            for i, reserved_token_id in enumerate(self.trainable_reserved_token_ids):
                 tool_logits = torch.matmul(hidden_states, self.trainable_tool_output_embeddings[i])
                 logits[..., reserved_token_id] = tool_logits
             
@@ -233,16 +257,42 @@ class FunctionCallingModel(nn.Module):
         
         # Sort by token ID to get consistent ordering
         sorted_reserved = sorted(reserved_tokens.items(), key=lambda x: x[1])
+        if len(sorted_reserved) < self.num_reserved_slots:
+            raise ValueError(
+                f"Tokenizer only exposes {len(sorted_reserved)} reserved_special_token_* entries, "
+                f"but {self.num_reserved_slots} are required"
+            )
+
+        # Take the first num_tools reserved tokens as tool tokens
+        self.tool_reserved_token_names = [token for token, _ in sorted_reserved[:self.num_tools]]
+        self.tool_reserved_token_ids = [token_id for _, token_id in sorted_reserved[:self.num_tools]]
+
+        # Keep backward-compatible tool-only aliases
+        self.reserved_token_names = list(self.tool_reserved_token_names)
+        self.reserved_token_ids = list(self.tool_reserved_token_ids)
+
+        # Optional EOC token occupies the next reserved slot
+        if self.use_eoc:
+            self.eoc_token_name = sorted_reserved[self.num_tools][0]
+            self.eoc_token_id = sorted_reserved[self.num_tools][1]
+        else:
+            self.eoc_token_name = None
+            self.eoc_token_id = None
+
+        self.trainable_reserved_token_names = list(self.tool_reserved_token_names)
+        self.trainable_reserved_token_ids = list(self.tool_reserved_token_ids)
+        if self.use_eoc:
+            self.trainable_reserved_token_names.append(self.eoc_token_name)
+            self.trainable_reserved_token_ids.append(self.eoc_token_id)
         
-        # Take first num_tools reserved tokens
-        self.reserved_token_names = [token for token, _ in sorted_reserved[:self.num_tools]]
-        self.reserved_token_ids = [token_id for _, token_id in sorted_reserved[:self.num_tools]]
-        
-        print(f"Using {len(self.reserved_token_ids)} reserved tokens as tool tokens:")
-        for name, token_id in zip(self.reserved_token_names[:5], self.reserved_token_ids[:5]):
+        print(f"Using {len(self.tool_reserved_token_ids)} reserved tokens as tool tokens:")
+        for name, token_id in zip(self.tool_reserved_token_names[:5], self.tool_reserved_token_ids[:5]):
             print(f"  {name}: {token_id}")
-        if len(self.reserved_token_ids) > 5:
-            print(f"  ... and {len(self.reserved_token_ids) - 5} more")
+        if len(self.tool_reserved_token_ids) > 5:
+            print(f"  ... and {len(self.tool_reserved_token_ids) - 5} more")
+        if self.use_eoc:
+            print(f"Using reserved token as eoc: {self.eoc_token_name} -> {self.eoc_token_id}")
+        print(f"Trainable reserved slots: {self.num_reserved_slots}")
         print(f"Embedding coupling mode: {'Decoupled' if self.decouple_embeddings else 'Coupled'}")
     
     def _print_parameter_breakdown(self):
@@ -254,26 +304,84 @@ class FunctionCallingModel(nn.Module):
         else:
             token_params = self.trainable_tool_embeddings.numel()
             print(f"Tokenized memory parameters: {token_params:,} (shared)")
+
+        gate_params = 0
+        if self.gate_mlp is not None:
+            gate_params = sum(p.numel() for p in self.gate_mlp.parameters())
+            print(f"Gate parameters: {gate_params:,}")
         
         # Count LoRA parameters if using LoRA
         if self.lora_config:
             lora_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             total_params = sum(p.numel() for p in self.model.parameters())
             print(f"LoRA parameters: {lora_params:,}")
-            print(f"Total trainable: {token_params + lora_params:,} ({(token_params + lora_params)/total_params*100:.4f}%)")
+            print(f"Total trainable: {token_params + gate_params + lora_params:,} ({(token_params + gate_params + lora_params)/total_params*100:.4f}%)")
         else:
             total_params = sum(p.numel() for p in self.model.parameters())
-            print(f"Total trainable: {token_params:,} ({token_params/total_params*100:.4f}%)")
+            print(f"Total trainable: {token_params + gate_params:,} ({(token_params + gate_params)/total_params*100:.4f}%)")
     
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, return_hidden_states=False):
         """
         Forward pass for function calling training
         
         Sequence: [User] [Reserved_Tool_Token] [Function_Call] <|eot_id|>
         """
         # Use the model's forward method directly (our overrides handle the custom embeddings/logits)
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=return_hidden_states,
+            return_dict=True
+        )
+        if return_hidden_states:
+            return outputs.logits, outputs.hidden_states[-1]
         return outputs.logits
+
+    def get_eoc_token_id(self):
+        """Get the reserved token ID for eoc when enabled."""
+        return self.eoc_token_id
+
+    def is_tool_token_id(self, token_id):
+        """Check whether a token ID belongs to the tool token set."""
+        return token_id in self.token_id_to_tool_id
+
+    def mask_logits_to_tool_tokens(self, logits):
+        """Mask logits so only tool token IDs remain valid."""
+        if not self.tool_reserved_token_ids:
+            return logits
+        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=logits.device)
+        masked_logits = torch.full_like(logits, float("-inf"))
+        masked_logits[..., tool_token_ids] = logits[..., tool_token_ids]
+        return masked_logits
+
+    def _get_gate_scores(self, hidden_states):
+        """Project hidden states to scalar gate logits."""
+        if self.gate_mlp is None:
+            return None
+        return self.gate_mlp(hidden_states).squeeze(-1)
+
+    def _sample_next_tokens(self, logits, temperature=0.6, top_p=0.9, do_sample=False):
+        """Sample or decode greedily from a batch of logits."""
+        if do_sample:
+            if temperature <= 0:
+                raise ValueError("temperature must be positive when sampling")
+            logits = logits / temperature
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                logits = logits.clone()
+                for i in range(logits.size(0)):
+                    indices_to_remove = sorted_indices[i][sorted_indices_to_remove[i]]
+                    logits[i, indices_to_remove] = -float("inf")
+
+            probs = torch.softmax(logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+        return torch.argmax(logits, dim=-1)
 
     
     def generate_with_tool_prediction(self, user_tokens, user_mask, tokenizer, 
@@ -282,20 +390,66 @@ class FunctionCallingModel(nn.Module):
         self.eval()
         
         with torch.no_grad():
-            # Use native generation - our overrides make the custom embeddings/logits transparent
-            generated = self.model.generate(
-                input_ids=user_tokens,
-                attention_mask=user_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True
-            )
+            if not self.use_gate:
+                # Use native generation - our overrides make the custom embeddings/logits transparent
+                generated = self.model.generate(
+                    input_ids=user_tokens,
+                    attention_mask=user_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True
+                )
+                return self._parse_generated_sequences(generated, user_tokens, tokenizer)
+
+            batch_size = user_tokens.shape[0]
+            device = user_tokens.device
+            input_ids = user_tokens.clone()
+            attention_mask = user_mask.clone()
+            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+            for step in range(max_new_tokens):
+                logits, hidden_states = self.forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    return_hidden_states=True
+                )
+                next_logits = logits[:, -1, :].clone()
+                last_hidden_states = hidden_states[:, -1, :]
+
+                gate_context = torch.zeros(batch_size, dtype=torch.bool, device=device)
+                if step == 0:
+                    gate_context[:] = True
+                else:
+                    gate_context = input_ids[:, -1] == self.eoc_token_id
+
+                active_gate_rows = gate_context & ~finished
+                if active_gate_rows.any():
+                    gate_scores = self._get_gate_scores(last_hidden_states[active_gate_rows])
+                    gate_positive = torch.sigmoid(gate_scores) >= self.gate_threshold
+                    if gate_positive.any():
+                        active_indices = active_gate_rows.nonzero(as_tuple=False).squeeze(-1)
+                        positive_indices = active_indices[gate_positive]
+                        next_logits[positive_indices] = self.mask_logits_to_tool_tokens(next_logits[positive_indices])
+
+                next_tokens = self._sample_next_tokens(
+                    next_logits,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample
+                )
+                next_tokens = next_tokens.masked_fill(finished, tokenizer.eos_token_id)
+
+                input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
+                attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device)], dim=-1)
+                finished = finished | (next_tokens == tokenizer.eos_token_id)
+                if finished.all():
+                    break
             
             # Parse the generated sequences
-            return self._parse_generated_sequences(generated, user_tokens, tokenizer)
+            return self._parse_generated_sequences(input_ids, user_tokens, tokenizer)
 
     def generate_with_ground_truth_tools(self, user_tokens, user_mask, tokenizer, ground_truth_tools,
                                        max_new_tokens=256, temperature=0.6, top_p=0.9, do_sample=False):
@@ -385,8 +539,13 @@ class FunctionCallingModel(nn.Module):
                 if token_id.item() == tokenizer.eos_token_id:
                     break
                 valid_tokens.append(token_id.item())
-            
-            if not valid_tokens:
+
+            if self.use_eoc and self.eoc_token_id is not None:
+                display_tokens = [token_id for token_id in valid_tokens if token_id != self.eoc_token_id]
+            else:
+                display_tokens = list(valid_tokens)
+
+            if not display_tokens:
                 results.append({
                     'predicted_tools': [],
                     'function_calls': [],
@@ -401,7 +560,7 @@ class FunctionCallingModel(nn.Module):
             # Find all tool tokens and their positions
             tool_positions = []
             for j, token_id in enumerate(valid_tokens):
-                if token_id in self.token_id_to_tool_id:
+                if self.is_tool_token_id(token_id):
                     tool_id = self.token_id_to_tool_id[token_id]
                     tool_name = self.tool_id_to_name[tool_id]
                     tool_positions.append({
@@ -418,16 +577,19 @@ class FunctionCallingModel(nn.Module):
             for idx, tool_info in enumerate(tool_positions):
                 start_pos = tool_info['position'] + 1  # Position after tool token
                 
-                # Find end position (next tool token or end of sequence)
-                if idx + 1 < len(tool_positions):
+                # Find end position. Prefer eoc when enabled, then fall back to the next tool or end of sequence.
+                end_pos = len(valid_tokens)
+                if self.use_eoc and self.eoc_token_id is not None:
+                    for j in range(start_pos, len(valid_tokens)):
+                        if valid_tokens[j] == self.eoc_token_id:
+                            end_pos = j
+                            break
+                if end_pos == len(valid_tokens) and idx + 1 < len(tool_positions):
                     end_pos = tool_positions[idx + 1]['position']
-                else:
+                if end_pos == len(valid_tokens):
                     # Last tool - function call goes to end of sequence (excluding EOT if present)
-                    end_pos = len(valid_tokens)
-                    # Check if last tokens are EOT tokens and exclude them
                     eot_tokens = tokenizer('<|eot_id|>', add_special_tokens=False)['input_ids']
                     if len(eot_tokens) > 0 and end_pos >= len(eot_tokens):
-                        # Check if the last tokens match EOT
                         if valid_tokens[-len(eot_tokens):] == eot_tokens:
                             end_pos -= len(eot_tokens)
                 
@@ -447,7 +609,7 @@ class FunctionCallingModel(nn.Module):
             
             # If no tool tokens found, treat entire sequence as function call
             if not tool_positions:
-                function_call = tokenizer.decode(valid_tokens, skip_special_tokens=True).strip()
+                function_call = tokenizer.decode(display_tokens, skip_special_tokens=True).strip()
                 predicted_tools = []
                 function_calls = [function_call] if function_call else []
             
@@ -455,7 +617,7 @@ class FunctionCallingModel(nn.Module):
             result = {
                 'predicted_tools': predicted_tools,
                 'function_calls': function_calls,
-                'full_generated_sequence': tokenizer.decode(valid_tokens, skip_special_tokens=True),
+                'full_generated_sequence': tokenizer.decode(display_tokens, skip_special_tokens=True),
                 # Backward compatibility - use first tool if available
                 'predicted_tool_id': predicted_tools[0]['tool_id'] if predicted_tools else None,
                 'predicted_tool_name': predicted_tools[0]['tool_name'] if predicted_tools else 'none',
@@ -510,12 +672,15 @@ class FunctionCallingModel(nn.Module):
             embedding_params.extend([self.trainable_tool_input_embeddings, self.trainable_tool_output_embeddings])
         else:
             embedding_params.append(self.trainable_tool_embeddings)
+
+        if self.gate_mlp is not None:
+            embedding_params.extend(list(self.gate_mlp.parameters()))
         
         # Get LoRA parameters if using LoRA
         lora_params = []
         if self.lora_config:
             lora_params = [p for p in self.model.parameters() if p.requires_grad]
-        
+
         if separate_lora and self.lora_config:
             return embedding_params, lora_params
         else:

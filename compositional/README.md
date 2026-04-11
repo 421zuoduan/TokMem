@@ -2,6 +2,30 @@
 
 This directory contains the compositional memory recall experiments.
 
+## EOC / Gate Modes
+
+The sequential TokMem path now supports three explicit modes:
+
+| Mode | `--use_eoc` | `--use_gate` | Behavior |
+| --- | --- | --- | --- |
+| Baseline | off | off | Original TokMem decoding and training |
+| EOC only | on | off | Adds explicit `eoc` boundary supervision, but keeps full-vocab decoding |
+| EOC + gate | on | on | Adds `eoc` supervision plus gate loss and gated tool-only decoding |
+
+`--use_gate` requires `--use_eoc`.
+`--use_tool_loss` also requires `--use_eoc`.
+
+Useful flags:
+
+- `--use_eoc`
+- `--use_gate`
+- `--use_tool_loss`
+- `--eoc_loss_weight` default `0.1`
+- `--tool_loss_weight` default `0.1`
+- `--gate_loss_weight` default `0.1`
+- `--gate_threshold` default `0.5`
+- `--max_length` default `1024`
+
 ## Experimental Setup
 
 The experiments use tools extracted from the **XLAM** aka. APIGen dataset. A total of 100 tools are used:
