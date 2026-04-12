@@ -40,6 +40,7 @@ trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
 
 python -u main_sequential.py \
     --training_rounds "51-100:1" \
+    --epochs 1 \
     --batch_size 4 \
     --train_max_function_calls 4 \
     --test_max_function_calls 4 \

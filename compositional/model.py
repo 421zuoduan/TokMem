@@ -383,6 +383,30 @@ class FunctionCallingModel(nn.Module):
 
         return torch.argmax(logits, dim=-1)
 
+    def _generation_forward_step(
+        self,
+        input_ids,
+        attention_mask,
+        past_key_values=None,
+        return_hidden_states=False,
+    ):
+        """Run one cached generation step and return only the newest position outputs."""
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+            output_hidden_states=return_hidden_states,
+            return_dict=True,
+        )
+
+        next_logits = outputs.logits[:, -1, :]
+        last_hidden_states = None
+        if return_hidden_states:
+            last_hidden_states = outputs.hidden_states[-1][:, -1, :]
+
+        return next_logits, last_hidden_states, outputs.past_key_values
+
     
     def generate_with_tool_prediction(self, user_tokens, user_mask, tokenizer, 
                                      max_new_tokens=256, temperature=0.6, top_p=0.9, do_sample=False):
@@ -409,15 +433,17 @@ class FunctionCallingModel(nn.Module):
             input_ids = user_tokens.clone()
             attention_mask = user_mask.clone()
             finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            step_input_ids = user_tokens
+            past_key_values = None
 
             for step in range(max_new_tokens):
-                logits, hidden_states = self.forward(
-                    input_ids=input_ids,
+                next_logits, last_hidden_states, past_key_values = self._generation_forward_step(
+                    input_ids=step_input_ids,
                     attention_mask=attention_mask,
+                    past_key_values=past_key_values,
                     return_hidden_states=True
                 )
-                next_logits = logits[:, -1, :].clone()
-                last_hidden_states = hidden_states[:, -1, :]
+                next_logits = next_logits.clone()
 
                 gate_context = torch.zeros(batch_size, dtype=torch.bool, device=device)
                 if step == 0:
@@ -447,6 +473,7 @@ class FunctionCallingModel(nn.Module):
                 finished = finished | (next_tokens == tokenizer.eos_token_id)
                 if finished.all():
                     break
+                step_input_ids = next_tokens.unsqueeze(-1)
             
             # Parse the generated sequences
             return self._parse_generated_sequences(input_ids, user_tokens, tokenizer)

@@ -223,6 +223,8 @@ def main():
     # Training arguments  
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Training batch size")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override the epoch count for a single no-adaptation training round")
     parser.add_argument("--lr", type=float, default=5e-3,
                         help="Learning rate for tokenized memory embeddings")
     parser.add_argument("--lora_lr", type=float, default=5e-4,
@@ -317,6 +319,8 @@ def main():
         parser.error("--use_tool_loss requires --use_eoc")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
+    if args.epochs is not None and args.epochs <= 0:
+        parser.error("--epochs must be positive")
     if not 0.0 <= args.gate_threshold <= 1.0:
         parser.error("--gate_threshold must be in the range [0, 1]")
     for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight"):
@@ -363,6 +367,10 @@ def main():
     # Parse training rounds
     try:
         rounds = parse_training_rounds(args.training_rounds)
+        if args.epochs is not None:
+            if len(rounds) != 1:
+                parser.error("--epochs only supports single-round no-adaptation runs")
+            rounds[0]["epochs"] = args.epochs
         print(f"Parsed {len(rounds)} training rounds:")
         for i, round_spec in enumerate(rounds, 1):
             print(f"  Round {i}: Tools {round_spec['tools']}, {round_spec['epochs']} epochs")
