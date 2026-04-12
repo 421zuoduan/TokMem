@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="compositional_tokmem_wo_adapt_llama_1b_50tools_${RUN_ID}"
+RUN_NAME="tokmem_wo_adapt_llama_1b_50tools_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"

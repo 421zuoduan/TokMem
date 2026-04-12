@@ -203,6 +203,121 @@ def _generate_results(
     )
 
 
+def _empty_generation_result():
+    """Return a safe empty prediction payload for a failed example."""
+    return {
+        "predicted_tools": [],
+        "function_calls": [],
+        "full_generated_sequence": "",
+        "predicted_tool_id": None,
+        "predicted_tool_name": "none",
+        "function_call": "",
+        "tool_token_used": None,
+    }
+
+
+def _generate_results_with_example_fallback(
+    model,
+    tokenizer,
+    input_ids,
+    attention_mask,
+    raw_examples,
+    batch_idx,
+    use_gate,
+    use_eoc,
+    gate_threshold,
+    use_ground_truth_tools,
+):
+    """Generate batch results, falling back to per-example decoding on batch failures."""
+    batch_size = len(raw_examples)
+
+    if use_ground_truth_tools:
+        batch_results = []
+        for i in range(batch_size):
+            example = raw_examples[i]
+            expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
+            single_input = input_ids[i : i + 1]
+            single_mask = attention_mask[i : i + 1]
+            try:
+                single_result = _generate_results(
+                    model,
+                    tokenizer,
+                    single_input,
+                    single_mask,
+                    use_gate=use_gate,
+                    use_eoc=use_eoc,
+                    gate_threshold=gate_threshold,
+                    use_ground_truth_tools=True,
+                    ground_truth_tools=expected_tools,
+                    max_new_tokens=256,
+                    temperature=0.6,
+                    top_p=0.9,
+                    do_sample=False,
+                )
+                batch_results.extend(single_result)
+            except Exception as exc:
+                print(f"   Error generating example {i + 1} in batch {batch_idx + 1}: {str(exc)}")
+                batch_results.append(_empty_generation_result())
+        return batch_results
+
+    try:
+        batch_results = _generate_results(
+            model,
+            tokenizer,
+            input_ids,
+            attention_mask,
+            use_gate=use_gate,
+            use_eoc=use_eoc,
+            gate_threshold=gate_threshold,
+            use_ground_truth_tools=False,
+            max_new_tokens=256,
+            temperature=0.6,
+            top_p=0.9,
+            do_sample=False,
+        )
+    except Exception as exc:
+        print(f"   Error processing batch {batch_idx + 1}: {str(exc)}")
+        print(f"   Falling back to per-example generation for batch {batch_idx + 1}")
+        batch_results = []
+        for i in range(batch_size):
+            single_input = input_ids[i : i + 1]
+            single_mask = attention_mask[i : i + 1]
+            try:
+                single_result = _generate_results(
+                    model,
+                    tokenizer,
+                    single_input,
+                    single_mask,
+                    use_gate=use_gate,
+                    use_eoc=use_eoc,
+                    gate_threshold=gate_threshold,
+                    use_ground_truth_tools=False,
+                    max_new_tokens=256,
+                    temperature=0.6,
+                    top_p=0.9,
+                    do_sample=False,
+                )
+                batch_results.extend(single_result)
+            except Exception as single_exc:
+                print(f"   Error generating example {i + 1} in batch {batch_idx + 1}: {str(single_exc)}")
+                batch_results.append(_empty_generation_result())
+
+    if len(batch_results) < batch_size:
+        print(
+            f"   Warning: batch {batch_idx + 1} produced {len(batch_results)} results for "
+            f"{batch_size} examples; padding the remainder with empty predictions"
+        )
+        batch_results.extend(_empty_generation_result() for _ in range(batch_size - len(batch_results)))
+    elif len(batch_results) > batch_size:
+        print(
+            f"   Warning: batch {batch_idx + 1} produced {len(batch_results)} results for "
+            f"{batch_size} examples; truncating extras"
+        )
+        batch_results = batch_results[:batch_size]
+
+    return batch_results
+
+
 def train_native_function_calling_model(
     model,
     dataloader,
@@ -762,58 +877,20 @@ def eval_native_function_calling(
         if batch_idx % 10 == 0 or processed_examples == total_examples:
             print(f"   Progress: {processed_examples}/{total_examples} ({100 * processed_examples / total_examples:.1f}%)")
 
-        try:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            if use_ground_truth_tools:
-                batch_results = []
-                for i in range(batch_size):
-                    example = batch["raw_data"][i]
-                    expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
-                    single_input = input_ids[i : i + 1]
-                    single_mask = attention_mask[i : i + 1]
-                    single_result = _generate_results(
-                        model,
-                        tokenizer,
-                        single_input,
-                        single_mask,
-                        use_gate=resolved_use_gate,
-                        use_eoc=resolved_use_eoc,
-                        gate_threshold=gate_threshold,
-                        use_ground_truth_tools=True,
-                        ground_truth_tools=expected_tools,
-                        max_new_tokens=256,
-                        temperature=0.6,
-                        top_p=0.9,
-                        do_sample=False,
-                    )
-                    batch_results.extend(single_result)
-            else:
-                batch_results = _generate_results(
-                    model,
-                    tokenizer,
-                    input_ids,
-                    attention_mask,
-                    use_gate=resolved_use_gate,
-                    use_eoc=resolved_use_eoc,
-                    gate_threshold=gate_threshold,
-                    use_ground_truth_tools=False,
-                    max_new_tokens=256,
-                    temperature=0.6,
-                    top_p=0.9,
-                    do_sample=False,
-                )
-        except Exception as exc:
-            print(f"   Error processing batch {batch_idx + 1}: {str(exc)}")
-            for _ in range(batch_size):
-                f1_scores.append(0.0)
-                precision_scores.append(0.0)
-                recall_scores.append(0.0)
-                tool_f1_scores.append(0.0)
-                tool_precision_scores.append(0.0)
-                tool_recall_scores.append(0.0)
-            continue
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        batch_results = _generate_results_with_example_fallback(
+            model=model,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            raw_examples=batch["raw_data"],
+            batch_idx=batch_idx,
+            use_gate=resolved_use_gate,
+            use_eoc=resolved_use_eoc,
+            gate_threshold=gate_threshold,
+            use_ground_truth_tools=use_ground_truth_tools,
+        )
 
         for i in range(batch_size):
             example = batch["raw_data"][i]

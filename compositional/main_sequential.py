@@ -332,7 +332,7 @@ def main():
     from datetime import datetime
     
     run_context = resolve_run_context(
-        experiment_name="compositional_tokmem",
+        experiment_name="tokmem",
         model_name=args.model_name,
         run_root_dir=args.run_root_dir,
         run_name=args.run_name,
