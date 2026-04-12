@@ -27,6 +27,7 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 More specifically, when working on `compositional/` by default:
 
 - favor end-to-end formulations that learn a gating or routing signal for tool invocation within the main model rather than relying on a separate pipeline stage unless the user explicitly asks for a staged baseline
+- when referring to the `baseline` in `compositional/`, interpret it as the TokMem setting without the adaptation stage; do not treat `baseline` as a non-TokMem method unless the user explicitly says so
 - discuss and evaluate tool use as two coupled but distinct subproblems:
   1. deciding whether the next generation step should emit a tool call at all
   2. constraining the admissible tool token generation and tool selection once tool mode is active

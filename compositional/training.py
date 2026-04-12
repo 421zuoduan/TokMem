@@ -804,15 +804,27 @@ def eval_native_function_calling(
                     top_p=0.9,
                     do_sample=False,
                 )
+        except Exception as exc:
+            print(f"   Error processing batch {batch_idx + 1}: {str(exc)}")
+            for _ in range(batch_size):
+                f1_scores.append(0.0)
+                precision_scores.append(0.0)
+                recall_scores.append(0.0)
+                tool_f1_scores.append(0.0)
+                tool_precision_scores.append(0.0)
+                tool_recall_scores.append(0.0)
+            continue
 
-            for i in range(batch_size):
-                example = batch["raw_data"][i]
-                result = batch_results[i]
+        for i in range(batch_size):
+            example = batch["raw_data"][i]
+            result = batch_results[i]
+            expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
+            expected_calls = example.get("function_calls", [example.get("function_call", "{}")])
+            expected_call_count = len(expected_calls)
+            breakdown = call_count_breakdown[expected_call_count]
+            breakdown["total"] += 1
 
-                expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
-                expected_calls = example.get("function_calls", [example.get("function_call", "{}")])
-                expected_call_count = len(expected_calls)
-
+            try:
                 if "predicted_tools" in result and result["predicted_tools"]:
                     predicted_tools = [tool_info["tool_name"] for tool_info in result["predicted_tools"]]
                     predicted_calls = result["function_calls"]
@@ -831,6 +843,7 @@ def eval_native_function_calling(
                 tool_match = Counter(predicted_tools) == Counter(expected_tools)
                 if tool_match:
                     tool_correct += 1
+                    breakdown["tool_correct"] += 1
 
                 eval_result = compare_function_calls_advanced(
                     predicted_calls,
@@ -840,38 +853,38 @@ def eval_native_function_calling(
 
                 if eval_result.exact_match:
                     exact_matches += 1
+                    breakdown["exact_matches"] += 1
 
                 f1_scores.append(eval_result.f1_score)
                 precision_scores.append(eval_result.precision)
                 recall_scores.append(eval_result.recall)
-
-                call_count_breakdown[expected_call_count]["total"] += 1
-                if eval_result.exact_match:
-                    call_count_breakdown[expected_call_count]["exact_matches"] += 1
-                if tool_match:
-                    call_count_breakdown[expected_call_count]["tool_correct"] += 1
-                call_count_breakdown[expected_call_count]["f1_scores"].append(eval_result.f1_score)
-                call_count_breakdown[expected_call_count]["precision_scores"].append(eval_result.precision)
-                call_count_breakdown[expected_call_count]["recall_scores"].append(eval_result.recall)
-                call_count_breakdown[expected_call_count]["tool_f1_scores"].append(tool_f1_result["f1_score"])
-                call_count_breakdown[expected_call_count]["tool_precision_scores"].append(tool_f1_result["precision"])
-                call_count_breakdown[expected_call_count]["tool_recall_scores"].append(tool_f1_result["recall"])
+                breakdown["f1_scores"].append(eval_result.f1_score)
+                breakdown["precision_scores"].append(eval_result.precision)
+                breakdown["recall_scores"].append(eval_result.recall)
+                breakdown["tool_f1_scores"].append(tool_f1_result["f1_score"])
+                breakdown["tool_precision_scores"].append(tool_f1_result["precision"])
+                breakdown["tool_recall_scores"].append(tool_f1_result["recall"])
 
                 if "parse_errors" in eval_result.details:
                     current_parse_errors = eval_result.details["parse_errors"]["outputs"]
                     parse_errors += current_parse_errors
-                    call_count_breakdown[expected_call_count]["parse_errors"] += current_parse_errors
-
-        except Exception as exc:
-            print(f"   Error processing batch {batch_idx + 1}: {str(exc)}")
-            for _ in range(batch_size):
+                    breakdown["parse_errors"] += current_parse_errors
+            except Exception as exc:
+                print(
+                    f"   Error evaluating example {i + 1} in batch {batch_idx + 1}: {str(exc)}"
+                )
                 f1_scores.append(0.0)
                 precision_scores.append(0.0)
                 recall_scores.append(0.0)
                 tool_f1_scores.append(0.0)
                 tool_precision_scores.append(0.0)
                 tool_recall_scores.append(0.0)
-            continue
+                breakdown["f1_scores"].append(0.0)
+                breakdown["precision_scores"].append(0.0)
+                breakdown["recall_scores"].append(0.0)
+                breakdown["tool_f1_scores"].append(0.0)
+                breakdown["tool_precision_scores"].append(0.0)
+                breakdown["tool_recall_scores"].append(0.0)
 
     eval_time = time.time() - start_time
 

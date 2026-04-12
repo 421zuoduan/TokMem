@@ -23,8 +23,8 @@ def normalize_json_string(text: str) -> str:
         # Fallback: basic normalization
         return re.sub(r'\s+', ' ', text.strip())
 
-def extract_json_from_text(text: str) -> Dict[str, Any]:
-    """Extract JSON object from text, handling various formats"""
+def extract_json_from_text(text: str) -> Any:
+    """Extract a JSON-like value from text, handling objects, arrays, scalars, and call syntax."""
     if not text or not isinstance(text, str):
         return {'raw_text': str(text), 'parse_error': True}
     
@@ -72,8 +72,8 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
     # Fallback to raw text
     return {'raw_text': text, 'parse_error': True}
 
-def parse_function_call(call_input: Union[str, Dict]) -> Dict[str, Any]:
-    """Parse function call from various input formats"""
+def parse_function_call(call_input: Union[str, Dict, List, int, float, bool, None]) -> Any:
+    """Parse function call from various input formats."""
     if isinstance(call_input, dict):
         return call_input
     elif isinstance(call_input, str):
@@ -81,12 +81,21 @@ def parse_function_call(call_input: Union[str, Dict]) -> Dict[str, Any]:
     else:
         return {'raw_text': str(call_input), 'parse_error': True}
 
-def normalize_function_call(call: Dict[str, Any]) -> str:
-    """Convert function call to normalized AST representation"""
-    if 'parse_error' in call or 'raw_text' in call:
+def _is_parse_error_payload(call: Any) -> bool:
+    return isinstance(call, dict) and ('parse_error' in call or 'raw_text' in call)
+
+def normalize_function_call(call: Any) -> str:
+    """Convert a parsed function call into a stable comparable string."""
+    if _is_parse_error_payload(call):
         # Handle unparseable calls by normalizing the raw text
         raw_text = call.get('raw_text', str(call))
         return normalize_json_string(raw_text)
+
+    if not isinstance(call, dict):
+        try:
+            return json.dumps(call, sort_keys=True, separators=(',', ':'))
+        except (TypeError, ValueError):
+            return str(call)
     
     # Handle structured calls - convert to AST representation
     if len(call) == 1:
@@ -145,8 +154,8 @@ def compare_function_calls_advanced(
         'normalized_outputs': norm_outputs,
         'normalized_targets': norm_targets,
         'parse_errors': {
-            'outputs': sum(1 for call in parsed_outputs if 'parse_error' in call),
-            'targets': sum(1 for call in parsed_targets if 'parse_error' in call)
+            'outputs': sum(1 for call in parsed_outputs if _is_parse_error_payload(call)),
+            'targets': sum(1 for call in parsed_targets if _is_parse_error_payload(call))
         }
     }
     
@@ -204,15 +213,18 @@ def extract_tool_names(calls: List[Union[str, Dict]]) -> List[str]:
     
     for call in calls:
         parsed_call = parse_function_call(call)
-        
-        if 'parse_error' in parsed_call:
+
+        if _is_parse_error_payload(parsed_call):
             # Try to extract function name from raw text
             raw_text = parsed_call.get('raw_text', '')
             match = re.match(r'^(\w+)\s*\(', raw_text)
             if match:
                 tool_names.append(match.group(1))
             continue
-            
+
+        if not isinstance(parsed_call, dict):
+            continue
+
         # Extract function name from structured call
         if len(parsed_call) == 1:
             func_name = next(iter(parsed_call.keys()))
@@ -270,5 +282,4 @@ def calculate_tool_selection_accuracy(output_calls: List[Union[str, Dict]],
         'missing_tools': list(target_tool_set - output_tool_set),
         'extra_tools': list(output_tool_set - target_tool_set)
     }
-
 
