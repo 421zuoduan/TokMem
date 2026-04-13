@@ -55,7 +55,6 @@ python -u main_sequential.py \
     --renorm_active_tools \
     --use_eoc \
     --use_gate \
-    --use_tool_loss \
     --eoc_loss_weight 0.1 \
     --tool_loss_weight 0.1 \
     --gate_loss_weight 0.1 \

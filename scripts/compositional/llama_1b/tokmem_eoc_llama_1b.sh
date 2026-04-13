@@ -37,7 +37,7 @@ trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
 
 python -u main_sequential.py \
     --training_rounds "51-100:1" \
-    --epochs 1 \
+    --epochs 3 \
     --batch_size 4 \
     --train_max_function_calls 4 \
     --test_max_function_calls 4 \
@@ -51,7 +51,6 @@ python -u main_sequential.py \
     --seed 42 \
     --renorm_active_tools \
     --use_eoc \
-    --use_tool_loss \
     --eoc_loss_weight 0.1 \
     --tool_loss_weight 0.1 \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
