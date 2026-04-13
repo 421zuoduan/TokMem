@@ -49,4 +49,8 @@
 - `7`-`8` 来自当前根目录 `tokmem_eoc_only.out`、`tokmem_eoc_gate.out` 的 3-epoch 无 task loss 日志。
  
 
-##
+## TODO
+
+1. 因为现在 gate 的梯度不会传导回 memory embedding 了, 所以需要重跑 gate 的代码
+2. gate 从 mlp 换成 linear 再试一下
+3. 在所有 token 上算 gate, 

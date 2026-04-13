@@ -128,6 +128,44 @@ There is no formal coverage target. For contributions, run the narrowest relevan
 
 Name new validation scripts as `test_*.py` when they are meant to be run directly.
 
+## Documentation Update Rules
+
+When code changes affect how people run, interpret, analyze, or compare experiments, update the relevant documentation in the same change. Do not leave behavior changes only in code when existing docs would become misleading.
+
+Documentation updates are required when changes affect any of the following:
+
+- training or evaluation entrypoints, launcher scripts, CLI flags, default values, or required environment setup
+- run artifact layout, checkpoint naming, log files, saved JSON outputs, or the meaning of files under `compositional/runs/`, `atomic/logs/`, or `results/`
+- dataset sources, filtering rules, split construction, sample-count assumptions, generated file names, or cached-data behavior
+- metric definitions, evaluation logic, analysis workflow, or the interpretation of reported numbers such as `routing acc`, `Task Prediction Accuracy`, `Rouge-L`, exact match, tool accuracy, or parse-error-related metrics
+- model behavior that changes the research meaning of an experiment, such as new gating logic, decoding constraints, loss terms, adaptation behavior, memory-token semantics, or tool-token generation rules
+- analysis or visualization tooling assumptions, especially when scripts rely on specific run files, config fields, checkpoint structure, or result JSON schema
+
+Documentation updates are usually not required for:
+
+- pure refactors that do not change external behavior or experiment interpretation
+- local cleanup, renaming, comments, or internal helper extraction with no effect on usage or outputs
+- bug fixes whose observable behavior exactly matches what the docs already say
+
+Choose documentation emphasis based on the type of change:
+
+- if the change is primarily a model-method change, prioritize documents that explain the research idea and evaluation meaning
+  - update method/design docs first
+  - make the changed hypothesis, supervision, decoding rule, or metric interpretation explicit
+  - explain what is different from the previous method and how comparisons should be read
+- if the change is primarily a code-implementation or workflow change, prioritize documents that explain how to run and inspect the system
+  - update run-layout docs, README sections, launcher usage, artifact descriptions, and analysis-tool assumptions first
+  - make file-level output changes, CLI changes, and operational caveats explicit
+- if a change affects both method and implementation, update both layers instead of collapsing everything into one brief note
+
+When deciding where to document:
+
+- use `docs/compositional/` or `docs/atomic/` for experiment-track-specific design, method, data, and workflow notes
+- use nearby `README.md` files for stable usage instructions, maintained entrypoints, and artifact-layout summaries
+- use `results/README.md` and per-run `run_summary.md` only for archived experiment records, not as the primary place to document new code behavior
+
+If a code change removes, renames, or stops producing an artifact, the docs should say that explicitly rather than silently dropping the file from examples.
+
 ## Experiment Archival
 
 Successful experiment runs should be archived under `results/` in a dedicated run folder so future comparisons do not depend on files still living under `atomic/logs/` or other working directories.

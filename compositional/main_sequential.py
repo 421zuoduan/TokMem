@@ -189,6 +189,18 @@ def resolve_run_file_path(run_context, requested_path, default_name):
     return artifact_path(run_context, default_name)
 
 
+def strip_call_count_breakdown(value):
+    if isinstance(value, dict):
+        return {
+            key: strip_call_count_breakdown(subvalue)
+            for key, subvalue in value.items()
+            if key != "call_count_breakdown"
+        }
+    if isinstance(value, list):
+        return [strip_call_count_breakdown(item) for item in value]
+    return value
+
+
 def filter_supported_kwargs(callable_obj, **kwargs):
     """Return only the kwargs accepted by the callable."""
     try:
@@ -355,8 +367,7 @@ def main():
         run_tag=args.run_tag,
     )
 
-    training_log_file = resolve_run_file_path(run_context, args.log_file, "training.log")
-    evaluation_log_file = artifact_path(run_context, "evaluation.log")
+    evaluation_log_file = resolve_run_file_path(run_context, args.log_file, "evaluation.log")
     tensorboard_log_dir = artifact_path(run_context, "tensorboard") if args.tensorboard else None
     checkpoint_dir = run_context["run_dir"]
     if args.checkpoint_dir:
@@ -366,6 +377,7 @@ def main():
             else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
         )
     tensorboard_writer = None
+    open(evaluation_log_file, "a", encoding="utf-8").close()
     if args.tensorboard:
         os.makedirs(tensorboard_log_dir, exist_ok=True)
         try:
@@ -378,7 +390,7 @@ def main():
         tensorboard_writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     log_handlers = [logging.StreamHandler(sys.stdout)]
-    log_handlers.append(logging.FileHandler(training_log_file, mode='a'))
+    log_handlers.append(logging.FileHandler(evaluation_log_file, mode='a'))
     
     logging.basicConfig(
         level=logging.INFO,
@@ -537,7 +549,6 @@ def main():
                 "discovered_tool_count": len(all_tool_names),
                 "data_dir": os.path.abspath(args.data_dir),
                 "artifacts": {
-                    "training_log": training_log_file,
                     "evaluation_log": evaluation_log_file,
                     "checkpoint_dir": checkpoint_dir,
                     "tensorboard_log_dir": tensorboard_log_dir,
@@ -839,26 +850,6 @@ def main():
         print(f"TensorBoard logs: {tensorboard_log_dir}")
     print("="*60)
     
-    training_summary_path = artifact_path(run_context, "training_summary.json")
-    write_json(training_summary_path, all_results)
-    print(f"\nTraining summary saved to {training_summary_path}")
-
-    train_results_payload = {
-        "experiment_type": "tokmem_sequential",
-        "run_name": run_context["run_name"],
-        "num_rounds": len(all_results),
-        "avg_loss_by_round": [
-            {
-                "round": result["round"],
-                "tools": result["tools"],
-                "epochs": result["epochs"],
-                "avg_loss": result["avg_loss"],
-                "checkpoint_path": result.get("checkpoint_path"),
-            }
-            for result in all_results
-        ],
-        "final_round": all_results[-1] if all_results else None,
-    }
     evaluation_results_payload = {
         "experiment_type": "tokmem_sequential",
         "run_name": run_context["run_name"],
@@ -875,31 +866,10 @@ def main():
             if result.get("eval_results") is not None or result.get("cumulative_eval_results") is not None
         ],
     }
-    write_json(artifact_path(run_context, "train_results.json"), train_results_payload)
-    write_json(artifact_path(run_context, "evaluation_results.json"), evaluation_results_payload)
-
-    best_round = min(all_results, key=lambda result: result["avg_loss"]) if all_results else None
-    run_summary_payload = {
-        "run_name": run_context["run_name"],
-        "run_dir": run_context["run_dir"],
-        "timestamp": run_context["timestamp"],
-        "experiment_type": "tokmem_sequential",
-        "model_name": args.model_name,
-        "training_rounds": args.training_rounds,
-        "num_rounds": len(all_results),
-        "best_round_by_loss": best_round,
-        "final_round": all_results[-1] if all_results else None,
-        "artifacts": {
-            "run_config": artifact_path(run_context, "run_config.json"),
-            "training_log": training_log_file,
-            "evaluation_log": evaluation_log_file,
-            "train_results": artifact_path(run_context, "train_results.json"),
-            "evaluation_results": artifact_path(run_context, "evaluation_results.json"),
-            "training_summary": training_summary_path,
-            "tensorboard_log_dir": tensorboard_log_dir,
-        },
-    }
-    write_json(artifact_path(run_context, "run_summary.json"), run_summary_payload)
+    write_json(
+        artifact_path(run_context, "evaluation_results.json"),
+        strip_call_count_breakdown(evaluation_results_payload),
+    )
     if tensorboard_writer is not None:
         tensorboard_writer.close()
     

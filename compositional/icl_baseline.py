@@ -48,6 +48,18 @@ def resolve_run_file_path(run_context, requested_path, default_name):
         return artifact_path(run_context, os.path.basename(requested_path))
     return artifact_path(run_context, default_name)
 
+
+def strip_call_count_breakdown(value):
+    if isinstance(value, dict):
+        return {
+            key: strip_call_count_breakdown(subvalue)
+            for key, subvalue in value.items()
+            if key != "call_count_breakdown"
+        }
+    if isinstance(value, list):
+        return [strip_call_count_breakdown(item) for item in value]
+    return value
+
 def load_tool_descriptions(filepath="tool_descriptions.json") -> Dict[str, Any]:
     """Load tool descriptions from JSON file"""
     if not os.path.exists(filepath):
@@ -488,7 +500,7 @@ class ICLBaseline:
         
         # Save results
         output_data = {
-            'metrics': final_metrics,
+            'metrics': strip_call_count_breakdown(final_metrics),
             'detailed_results': results,
             'config': {
                 'model_name': self.model_name,
@@ -593,7 +605,7 @@ def main():
         run_tag=args.run_tag,
     )
     output_file = resolve_run_file_path(run_context, args.output, "evaluation_results.json")
-    training_log_file = artifact_path(run_context, "training.log")
+    evaluation_log_file = artifact_path(run_context, "evaluation.log")
     
     # Set random seed
     random.seed(args.seed)
@@ -617,7 +629,7 @@ def main():
             extra={
                 "experiment_type": "icl_baseline",
                 "artifacts": {
-                    "training_log": training_log_file,
+                    "evaluation_log": evaluation_log_file,
                     "evaluation_results": output_file,
                 },
                 "test_data": os.path.abspath(args.test_data),
@@ -626,7 +638,7 @@ def main():
         ),
     )
 
-    with open(training_log_file, "a", encoding="utf-8") as log_handle:
+    with open(evaluation_log_file, "a", encoding="utf-8") as log_handle:
         tee_stream = TeeStream(sys.stdout, log_handle)
         with redirect_stdout(tee_stream):
             print(f"Run directory: {run_context['run_dir']}")
@@ -653,23 +665,6 @@ def main():
             )
             
             print("\n✅ ICL baseline evaluation complete!")
-
-    run_summary_payload = {
-        "run_name": run_context["run_name"],
-        "run_dir": run_context["run_dir"],
-        "timestamp": run_context["timestamp"],
-        "experiment_type": "icl_baseline",
-        "model_name": args.model_name,
-        "use_rag": args.use_rag,
-        "retrieval_k": args.retrieval_k if args.use_rag else None,
-        "metrics": metrics,
-        "artifacts": {
-            "run_config": artifact_path(run_context, "run_config.json"),
-            "training_log": training_log_file,
-            "evaluation_results": output_file,
-        },
-    }
-    write_json(artifact_path(run_context, "run_summary.json"), run_summary_payload)
 
 if __name__ == "__main__":
     main()

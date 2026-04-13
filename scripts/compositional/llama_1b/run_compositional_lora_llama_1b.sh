@@ -39,16 +39,6 @@ python xlam_datasets.py \
     --test_multi_tool_ratios "0.5,0.5" \
     --output_dir "$ROOT_DIR/compositional/data"
 
-while true; do
-    {
-        echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader
-    } >> "$RUN_DIR/gpu_monitor.log"
-    sleep 10
-done &
-MONITOR_PID=$!
-trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
-
 python -u lora_sequential.py \
     --training_rounds "1-50:1,51-100:1" \
     --batch_size 2 \

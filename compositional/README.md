@@ -73,17 +73,23 @@ All maintained compositional runs now write artifacts to:
 compositional/runs/<run_name>/
 ```
 
-Typical run artifacts include:
+Maintained runs keep the following artifacts:
 
 - `run_config.json`
-- `run_summary.json`
-- `train_results.json`
 - `evaluation_results.json`
+- `evaluation.log`
+- round checkpoints
+- launcher script snapshot
+- optional `tensorboard/`
+
+Maintained runs do not keep:
+
+- `train_results.json`
 - `training_summary.json`
 - `training.log`
-- `evaluation.log`
+- `run_summary.json`
 - `gpu_monitor.log`
-- round checkpoints
+- `call_count_breakdown` inside `evaluation_results.json`
 
 The old `compositional/log/`, `checkpoints_*`, and root-level result JSON layout is legacy-only and should not be used for new runs.
 
