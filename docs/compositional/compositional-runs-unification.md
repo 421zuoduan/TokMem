@@ -1,8 +1,23 @@
-# Compositional Runs 统一设计
+# Compositional Runs Unification
+
+## 说明
+
+这份文档整理自 docs/compositional/ 下多份按日期命名的草稿、设计和计划文档，按主题合并，便于后续集中查阅。
+
+## 来源文档
+
+- 2026-04-09-compositional-runs-unification-design.md
+- 2026-04-09-compositional-runs-unification-plan.md
+
+---
+
+## 原文：2026-04-09-compositional-runs-unification-design.md
+
+## Compositional Runs 统一设计
 
 日期：2026-04-09
 
-## 目标
+### 目标
 
 将 `compositional/` 下所有实验入口统一为类似 `atomic/` 的 run 布局：
 
@@ -16,7 +31,7 @@
 - LoRA sequential baseline
 - ICL baseline
 
-## 当前问题
+### 当前问题
 
 现在 `compositional/` 的运行产物分散在多个互不一致的位置：
 
@@ -31,13 +46,13 @@
 3. shell launcher 的组织方式和 `atomic/` 不对齐。
 4. 旧结果难以统一查看、比较和归档。
 
-## 非目标
+### 非目标
 
 - 不把共享输入数据从 `compositional/data/` 搬进每个 run 目录。
 - 不修改训练目标或评测逻辑，除非产物管理需要。
 - 不继续把旧的 shell 脚本作为主要维护入口。
 
-## 目标布局
+### 目标布局
 
 每个 run 统一放在：
 
@@ -71,9 +86,9 @@ compositional/runs/<run_name>/
 - ICL run 没有训练阶段时，不生成 `train_results.json` 这类训练专属文件。
 - 共享输入数据文件仍留在原位置，但对应路径会记录在 `run_config.json` 中。
 
-## Python 侧架构改动
+### Python 侧架构改动
 
-### 1. 新增 compositional run layout 模块
+#### 1. 新增 compositional run layout 模块
 
 新增：
 
@@ -94,7 +109,7 @@ compositional/runs/<run_name>/
 - `COMPOSITIONAL_RUNS_DIR`
 - `COMPOSITIONAL_RUN_TIMESTAMP`
 
-### 2. 改造 TokMem sequential 入口
+#### 2. 改造 TokMem sequential 入口
 
 修改：
 
@@ -118,7 +133,7 @@ CLI 新增参数：
 - `--run_root_dir`
 - `--run_tag`
 
-### 3. 改造 LoRA sequential 入口
+#### 3. 改造 LoRA sequential 入口
 
 修改：
 
@@ -141,7 +156,7 @@ LoRA 侧还需要在 summary/config 中保留这些元信息：
 - replay buffer 配置
 - 每一轮的 checkpoint 路径
 
-### 4. 改造 ICL baseline 入口
+#### 4. 改造 ICL baseline 入口
 
 修改：
 
@@ -161,7 +176,7 @@ ICL 侧还需要保留这些元信息：
 - retrieval `k`
 - 启用 RAG 时的 prompt reduction 相关指标
 
-## Shell Launcher 改动
+### Shell Launcher 改动
 
 旧的 compositional shell 脚本不再作为维护中的主入口。
 
@@ -186,7 +201,7 @@ ICL 侧还需要保留这些元信息：
 
 现有 compositional shell 脚本仍可保留在仓库中作为历史参考，但不再是文档推荐入口。
 
-## 旧产物迁移
+### 旧产物迁移
 
 新增：
 
@@ -220,7 +235,7 @@ ICL 侧还需要保留这些元信息：
 - 在可恢复时生成 `run_config.json`
 - 明确说明缺失了哪些 artifact
 
-## 旧路径读取兼容
+### 旧路径读取兼容
 
 完成这次重构后，所有需要读取 compositional run 的代码路径都必须把 `compositional/runs/<run_name>/` 视为唯一规范位置。
 
@@ -235,7 +250,7 @@ ICL 侧还需要保留这些元信息：
 1. 先执行一次旧产物迁移
 2. 之后只围绕 `compositional/runs/` 工作
 
-## 文档改动
+### 文档改动
 
 修改：
 
@@ -248,7 +263,7 @@ ICL 侧还需要保留这些元信息：
 - 不再推荐 `compositional/*.sh` 作为主入口
 - 记录旧产物迁移脚本的使用方式
 
-## 验证计划
+### 验证计划
 
 验证以产物完整性为主，尽量避免高成本全量训练：
 
@@ -258,9 +273,9 @@ ICL 侧还需要保留这些元信息：
 4. 跑一个缩小版 ICL launcher，检查生成的 run 目录产物
 5. 核对每个 run 是否都包含预期的 config、日志、结果文件和 checkpoint
 
-## 风险
+### 风险
 
-### 风险 1：旧产物分组存在歧义
+#### 风险 1：旧产物分组存在歧义
 
 部分旧日志和 checkpoint 目录可能缺少足够信息，无法精确还原 run 边界。
 
@@ -270,7 +285,7 @@ ICL 侧还需要保留这些元信息：
 - 保留原始文件名
 - 在 `run_summary.json` 中记录 provenance 和不确定性
 
-### 风险 2：日志逻辑重复
+#### 风险 2：日志逻辑重复
 
 `main_sequential.py` 和 `lora_sequential.py` 现在有相似但独立的日志代码。
 
@@ -279,7 +294,7 @@ ICL 侧还需要保留这些元信息：
 - 这次先统一路径和布局层
 - 除非重复代码影响正确性，否则不在同一改动里做大规模日志重构
 
-### 风险 3：run 命名不稳定
+#### 风险 3：run 命名不稳定
 
 如果 shell 和 Python 两边的 run 命名规则不完全一致，就会导致路径不匹配。
 
@@ -288,7 +303,7 @@ ICL 侧还需要保留这些元信息：
 - shell launcher 显式传入 `--run_name`
 - `run_layout.py` 统一定义命名和规范化规则
 
-## 文件改动汇总
+### 文件改动汇总
 
 新增：
 
@@ -310,3 +325,235 @@ ICL 侧还需要保留这些元信息：
 - `compositional/run_n_rounds_main.sh`
 - `compositional/run_n_rounds_lora.sh`
 - `compositional/icl_baseline.sh`
+
+---
+
+## 原文：2026-04-09-compositional-runs-unification-plan.md
+
+## Compositional Runs 统一实现计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 将 compositional 的 TokMem、LoRA、ICL 三类入口统一到 `compositional/runs/<run_name>/` 布局，并提供新的 llama 1B launcher 与旧产物迁移脚本。
+
+**Architecture:** 复用 atomic 的思路，在 `compositional/run_layout.py` 中集中处理 run 命名、目录、配置和 JSON 写盘。三个 Python 入口都接入这层统一布局；shell launcher 统一负责生成 `RUN_NAME`、脚本快照和 GPU 日志；旧产物通过单独迁移脚本归并到 `compositional/runs/`。
+
+**Tech Stack:** Python, Bash, PyTorch, Transformers, PEFT, JSON, `pytest`/直接脚本验证
+
+---
+
+#### Task 1: 统一 run 布局基础模块
+
+**Files:**
+- Create: `compositional/run_layout.py`
+- Test: `python -m py_compile compositional/run_layout.py`
+
+- [ ] **Step 1: 写出 run layout 模块**
+
+实现内容：
+
+- `DEFAULT_RUNS_DIR`
+- `normalize_label`
+- `resolve_timestamp`
+- `resolve_run_context`
+- `build_command_string`
+- `build_run_config`
+- `write_json`
+- `artifact_path`
+
+- [ ] **Step 2: 运行语法检查**
+
+Run: `python -m py_compile compositional/run_layout.py`
+Expected: PASS，无输出
+
+#### Task 2: 改造 TokMem sequential 入口
+
+**Files:**
+- Modify: `compositional/main_sequential.py`
+- Test: `python -m py_compile compositional/main_sequential.py`
+
+- [ ] **Step 1: 接入 run context**
+
+改动内容：
+
+- 新增 `--run_name` `--run_root_dir` `--run_tag`
+- 在 logging 之前创建 run context
+- 默认日志文件改为 run 目录下的 `training.log`
+- 默认评测日志改为 run 目录下的 `evaluation.log`
+
+- [ ] **Step 2: 统一结果文件输出**
+
+改动内容：
+
+- checkpoint 存到 run 目录
+- 生成 `run_config.json`
+- 生成 `train_results.json`
+- 生成 `evaluation_results.json`
+- 生成 `run_summary.json`
+- 保留 `training_summary.json`
+
+- [ ] **Step 3: 运行语法检查**
+
+Run: `python -m py_compile compositional/main_sequential.py`
+Expected: PASS，无输出
+
+#### Task 3: 改造 LoRA sequential 入口
+
+**Files:**
+- Modify: `compositional/lora_sequential.py`
+- Test: `python -m py_compile compositional/lora_sequential.py`
+
+- [ ] **Step 1: 接入 run context 和 run 内日志**
+
+改动内容：
+
+- 新增 `--run_name` `--run_root_dir` `--run_tag`
+- 默认 `training.log` 和 `evaluation.log` 写入 run 目录
+- checkpoint 目录写入 run 目录
+
+- [ ] **Step 2: 统一结果文件输出**
+
+改动内容：
+
+- 生成 `run_config.json`
+- 生成 `train_results.json`
+- 生成 `evaluation_results.json`
+- 生成 `run_summary.json`
+- 保留 `training_summary.json`
+
+- [ ] **Step 3: 运行语法检查**
+
+Run: `python -m py_compile compositional/lora_sequential.py`
+Expected: PASS，无输出
+
+#### Task 4: 改造 ICL baseline 入口
+
+**Files:**
+- Modify: `compositional/icl_baseline.py`
+- Test: `python -m py_compile compositional/icl_baseline.py`
+
+- [ ] **Step 1: 接入 run context**
+
+改动内容：
+
+- 新增 `--run_name` `--run_root_dir` `--run_tag`
+- 默认输出目录改到 `compositional/runs/<run_name>/`
+- 默认结果文件改为 `evaluation_results.json`
+
+- [ ] **Step 2: 增加 run 级元信息文件**
+
+改动内容：
+
+- 生成 `run_config.json`
+- 生成 `run_summary.json`
+- 在 run 目录内写 `training.log`
+
+- [ ] **Step 3: 运行语法检查**
+
+Run: `python -m py_compile compositional/icl_baseline.py`
+Expected: PASS，无输出
+
+#### Task 5: 新建 llama 1B launcher
+
+**Files:**
+- Create: `scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh`
+- Create: `scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
+- Create: `scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh`
+- Test: `bash -n scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh`
+- Test: `bash -n scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
+- Test: `bash -n scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh`
+
+- [ ] **Step 1: 写 TokMem launcher**
+
+要求：
+
+- 生成 `RUN_TIMESTAMP`
+- 生成 `RUN_NAME`
+- 创建 `RUN_DIR`
+- 快照当前脚本到 `RUN_DIR`
+- 将 GPU monitor 写入 `RUN_DIR/gpu_monitor.log`
+- 调用 `compositional/main_sequential.py`
+
+- [ ] **Step 2: 写 LoRA launcher**
+
+要求：
+
+- 与 TokMem launcher 保持同风格
+- 调用 `compositional/lora_sequential.py`
+
+- [ ] **Step 3: 写 ICL launcher**
+
+要求：
+
+- 与 TokMem launcher 保持同风格
+- 调用 `compositional/icl_baseline.py`
+
+- [ ] **Step 4: 检查三个 shell 脚本语法**
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh`
+Expected: PASS，无输出
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
+Expected: PASS，无输出
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh`
+Expected: PASS，无输出
+
+#### Task 6: 补旧产物迁移脚本
+
+**Files:**
+- Create: `compositional/utils/migrate_legacy_runs.py`
+- Test: `python -m py_compile compositional/utils/migrate_legacy_runs.py`
+
+- [ ] **Step 1: 实现 legacy 扫描与归并逻辑**
+
+目标：
+
+- 扫描 `compositional/log/`
+- 扫描 `compositional/checkpoints_*`
+- 扫描 `compositional/icl_results*.json`
+- 迁移到 `compositional/runs/`
+
+- [ ] **Step 2: 实现 dry-run 和执行模式**
+
+目标：
+
+- `--dry-run` 只打印动作
+- 非 dry-run 实际移动文件
+
+- [ ] **Step 3: 运行语法检查**
+
+Run: `python -m py_compile compositional/utils/migrate_legacy_runs.py`
+Expected: PASS，无输出
+
+#### Task 7: 更新 README 并做轻量验证
+
+**Files:**
+- Modify: `compositional/README.md`
+- Test: `python -m py_compile compositional/main_sequential.py compositional/lora_sequential.py compositional/icl_baseline.py compositional/run_layout.py compositional/utils/migrate_legacy_runs.py`
+
+- [ ] **Step 1: 更新 README**
+
+需要写清楚：
+
+- 新 launcher 路径
+- 新的 `compositional/runs/` 布局
+- 旧脚本不再作为维护入口
+- 旧产物迁移脚本位置
+
+- [ ] **Step 2: 跑统一语法检查**
+
+Run: `python -m py_compile compositional/main_sequential.py compositional/lora_sequential.py compositional/icl_baseline.py compositional/run_layout.py compositional/utils/migrate_legacy_runs.py`
+Expected: PASS，无输出
+
+- [ ] **Step 3: 跑 shell 语法检查**
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh`
+Expected: PASS，无输出
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
+Expected: PASS，无输出
+
+Run: `bash -n scripts/compositional/llama_1b/run_compositional_icl_llama_1b.sh`
+Expected: PASS，无输出
+

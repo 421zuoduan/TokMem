@@ -49,6 +49,7 @@ compositional/data
 compositional/runs
 compositional/log
 saved_models
+docs/compositional/archive
 
 .hf-cache
 nohup.out
