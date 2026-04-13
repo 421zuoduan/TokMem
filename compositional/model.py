@@ -4,6 +4,19 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 import json
 
+
+def build_gate_head(hidden_size, gate_network):
+    """Build the configurable gate head used for gated decoding."""
+    if gate_network == "linear":
+        return nn.Linear(hidden_size, 1)
+    if gate_network == "mlp":
+        return nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, 1),
+        )
+    raise ValueError(f"Unsupported gate_network: {gate_network}")
+
 def count_parameters(model):
     """Count trainable and total parameters in a model"""
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -44,12 +57,13 @@ class FunctionCallingModel(nn.Module):
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
                  decouple_embeddings=False, lora_config=None, use_eoc=False, use_gate=False,
-                 gate_threshold=0.5):
+                 gate_threshold=0.5, gate_network="mlp"):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         self.use_eoc = use_eoc
         self.use_gate = use_gate
         self.gate_threshold = gate_threshold
+        self.gate_network = gate_network
         if self.use_gate and not self.use_eoc:
             raise ValueError("--use_gate requires --use_eoc")
 
@@ -162,11 +176,10 @@ class FunctionCallingModel(nn.Module):
             self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
 
         if self.use_gate:
-            self.gate_mlp = nn.Sequential(
-                nn.Linear(self.config.hidden_size, self.config.hidden_size),
-                nn.GELU(),
-                nn.Linear(self.config.hidden_size, 1),
-            ).to(device=device, dtype=original_embeddings.dtype)
+            self.gate_mlp = build_gate_head(self.config.hidden_size, self.gate_network).to(
+                device=device,
+                dtype=original_embeddings.dtype,
+            )
         else:
             self.gate_mlp = None
         

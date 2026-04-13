@@ -216,6 +216,7 @@ python main_sequential.py \
     --lora_lr $LORA_LR \
     --eval_batch_size 16 \
     --seed 42 \
+    --tensorboard \
     $([ "$CURRICULUM_LEARNING" = "true" ] && echo "--curriculum_learning") \
     $([ "$EVAL_ALL_PREVIOUS" = "true" ] && echo "--eval_all_previous") \
     $([ "$RENORM_ACTIVE_TOOLS" = "true" ] && echo "--renorm_active_tools")

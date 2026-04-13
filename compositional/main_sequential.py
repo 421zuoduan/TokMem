@@ -207,7 +207,7 @@ def filter_supported_kwargs(callable_obj, **kwargs):
     }
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Sequential Function Calling Training with Tool Progression")
     
     # Model arguments
@@ -243,6 +243,8 @@ def main():
                         help="Use ground truth tools during inference")
     parser.add_argument("--use_eoc", action="store_true",
                         help="Insert an explicit end-of-control token after each tool-controlled span")
+    parser.add_argument("--use_eoc_loss", action="store_true",
+                        help="Add eoc loss on top of the eoc-enabled training targets")
     parser.add_argument("--use_gate", action="store_true",
                         help="Enable gate supervision and gate-controlled decoding")
     parser.add_argument("--use_tool_loss", action="store_true",
@@ -255,6 +257,8 @@ def main():
                         help="Weight for the gate BCE loss")
     parser.add_argument("--gate_threshold", type=float, default=0.5,
                         help="Threshold for positive gate decisions during decoding")
+    parser.add_argument("--gate_network", type=str, default="mlp", choices=["mlp", "linear"],
+                        help="Gate head architecture used when --use_gate is enabled")
     
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
@@ -310,11 +314,17 @@ def main():
                         help="Root directory for compositional runs")
     parser.add_argument("--run_tag", type=str, default=None,
                         help="Optional tag appended to the generated run name")
-    
-    args = parser.parse_args()
+    parser.add_argument("--tensorboard", action="store_true",
+                        help="Write TensorBoard logs under the current run directory")
 
+    return parser
+
+
+def validate_args(args, parser):
     if args.use_gate and not args.use_eoc:
         parser.error("--use_gate requires --use_eoc")
+    if args.use_eoc_loss and not args.use_eoc:
+        parser.error("--use_eoc_loss requires --use_eoc")
     if args.use_tool_loss and not args.use_eoc:
         parser.error("--use_tool_loss requires --use_eoc")
     if args.max_length <= 0:
@@ -326,7 +336,13 @@ def main():
     for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight"):
         if getattr(args, weight_name) < 0:
             parser.error(f"--{weight_name} must be non-negative")
-    
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(args, parser)
+
     # Setup simple logging
     import sys
     from datetime import datetime
@@ -341,6 +357,7 @@ def main():
 
     training_log_file = resolve_run_file_path(run_context, args.log_file, "training.log")
     evaluation_log_file = artifact_path(run_context, "evaluation.log")
+    tensorboard_log_dir = artifact_path(run_context, "tensorboard") if args.tensorboard else None
     checkpoint_dir = run_context["run_dir"]
     if args.checkpoint_dir:
         checkpoint_dir = (
@@ -348,6 +365,17 @@ def main():
             if os.path.isabs(args.checkpoint_dir)
             else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
         )
+    tensorboard_writer = None
+    if args.tensorboard:
+        os.makedirs(tensorboard_log_dir, exist_ok=True)
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except ModuleNotFoundError as exc:
+            parser.error(
+                "--tensorboard requires the 'tensorboard' package in the active environment. "
+                "Run `pip install -r requirements.txt` inside the tokmem environment."
+            )
+        tensorboard_writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     log_handlers = [logging.StreamHandler(sys.stdout)]
     log_handlers.append(logging.FileHandler(training_log_file, mode='a'))
@@ -439,7 +467,10 @@ def main():
     print(f"Training rounds: {len(rounds)}")
     print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
+    print(f"EOC loss: {'Enabled' if args.use_eoc and args.use_eoc_loss else 'Disabled'}")
     print(f"Gate: {'Enabled' if args.use_gate else 'Disabled'}")
+    if args.use_gate:
+        print(f"Gate network: {args.gate_network}")
     print(f"Max length: {args.max_length}")
     print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
@@ -509,6 +540,7 @@ def main():
                     "training_log": training_log_file,
                     "evaluation_log": evaluation_log_file,
                     "checkpoint_dir": checkpoint_dir,
+                    "tensorboard_log_dir": tensorboard_log_dir,
                 },
             },
         ),
@@ -518,6 +550,8 @@ def main():
     all_results = []
     # Store test dataloaders for cumulative evaluation
     all_test_dataloaders = []
+    tensorboard_step_offset = 0
+    tensorboard_epoch_offset = 0
     
     # Training loop for each round
     for round_idx, round_spec in enumerate(rounds):
@@ -571,6 +605,7 @@ def main():
                 use_eoc=args.use_eoc,
                 use_gate=args.use_gate,
                 gate_threshold=args.gate_threshold,
+                gate_network=args.gate_network,
             )
             model = FunctionCallingModel(**model_kwargs)
             print_model_info(model, f"Model with {total_tools} tool slots")
@@ -635,14 +670,25 @@ def main():
             active_tool_ids=active_tool_ids,
             renorm_active_rows=(args.renorm_active_tools and round_num > 2),
             use_eoc=args.use_eoc,
+            use_eoc_loss=args.use_eoc_loss,
             use_gate=args.use_gate,
             use_tool_loss=args.use_tool_loss,
             gate_threshold=args.gate_threshold,
             eoc_loss_weight=args.eoc_loss_weight,
             tool_loss_weight=args.tool_loss_weight,
             gate_loss_weight=args.gate_loss_weight,
+            tensorboard_writer=tensorboard_writer,
+            tensorboard_step_offset=tensorboard_step_offset,
+            tensorboard_epoch_offset=tensorboard_epoch_offset,
+            tensorboard_round=round_num,
         )
         round_results = train_native_function_calling_model(**training_kwargs)
+        tensorboard_step_offset = round_results.get("tensorboard_next_step", tensorboard_step_offset)
+        tensorboard_epoch_offset = round_results.get("tensorboard_next_epoch", tensorboard_epoch_offset)
+        if tensorboard_writer is not None:
+            for metric_name, metric_value in round_results.get("avg_loss_metrics", {}).items():
+                tensorboard_writer.add_scalar(f"round/avg_{metric_name}", metric_value, round_num)
+            tensorboard_writer.flush()
         
         print(f"Round {round_num} training completed! Average loss: {round_results['avg_total_loss']:.4f}")
         logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_total_loss']:.4f}")
@@ -789,6 +835,8 @@ def main():
     print(f"Trained {len(rounds)} rounds with different tool sets")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA was frozen after first round")
+    if tensorboard_log_dir:
+        print(f"TensorBoard logs: {tensorboard_log_dir}")
     print("="*60)
     
     training_summary_path = artifact_path(run_context, "training_summary.json")
@@ -848,9 +896,12 @@ def main():
             "train_results": artifact_path(run_context, "train_results.json"),
             "evaluation_results": artifact_path(run_context, "evaluation_results.json"),
             "training_summary": training_summary_path,
+            "tensorboard_log_dir": tensorboard_log_dir,
         },
     }
     write_json(artifact_path(run_context, "run_summary.json"), run_summary_payload)
+    if tensorboard_writer is not None:
+        tensorboard_writer.close()
     
     # Log completion
     logger.info(f"=== Sequential Training Completed at {datetime.now()} ===")

@@ -52,10 +52,11 @@ python -u main_sequential.py \
     --eval_batch_size 16 \
     --max_length 1024 \
     --seed 42 \
+    --tensorboard \
     --renorm_active_tools \
     --use_eoc \
     --use_gate \
-    --eoc_loss_weight 0.1 \
+    --use_tool_loss \
     --tool_loss_weight 0.1 \
     --gate_loss_weight 0.1 \
     --gate_threshold 0.5 \

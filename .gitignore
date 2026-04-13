@@ -35,6 +35,7 @@ env/
 
 
 .spec-workflow
+docs/superpowers
 
 
 datasets/
@@ -49,6 +50,7 @@ compositional/runs
 compositional/log
 saved_models
 
+.hf-cache
 nohup.out
 *.out
 .codex

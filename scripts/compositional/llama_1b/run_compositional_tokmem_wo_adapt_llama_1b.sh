@@ -52,6 +52,7 @@ python -u main_sequential.py \
     --eval_batch_size 16 \
     --max_length 1024 \
     --seed 42 \
+    --tensorboard \
     --renorm_active_tools \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \

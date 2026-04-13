@@ -49,10 +49,9 @@ python -u main_sequential.py \
     --eval_batch_size 16 \
     --max_length 1024 \
     --seed 42 \
+    --tensorboard \
     --renorm_active_tools \
     --use_eoc \
-    --eoc_loss_weight 0.1 \
-    --tool_loss_weight 0.1 \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
     --run_tag "llama_1b_eoc_only"

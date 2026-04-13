@@ -5,14 +5,22 @@ import torch
 import torch.nn.functional as F
 
 
-def _resolve_mode_flags(model, use_eoc=None, use_gate=None):
+LOSS_METRIC_ORDER = ("total_loss", "ar_loss", "eoc_loss", "tool_loss", "gate_loss")
+
+
+def _resolve_mode_flags(model, use_eoc=None, use_gate=None, use_eoc_loss=None):
     resolved_use_eoc = bool(getattr(model, "use_eoc", False) if use_eoc is None else use_eoc)
     resolved_use_gate = bool(getattr(model, "use_gate", False) if use_gate is None else use_gate)
+    resolved_use_eoc_loss = bool(
+        getattr(model, "use_eoc_loss", False) if use_eoc_loss is None else use_eoc_loss
+    )
 
     if resolved_use_gate and not resolved_use_eoc:
         raise ValueError("use_gate=True requires use_eoc=True")
+    if resolved_use_eoc_loss and not resolved_use_eoc:
+        raise ValueError("use_eoc_loss=True requires use_eoc=True")
 
-    return resolved_use_eoc, resolved_use_gate
+    return resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss
 
 
 def _call_method_with_supported_kwargs(method, **kwargs):
@@ -34,6 +42,51 @@ def _ground_truth_gate_supported(model):
 
 def _is_tool_token_id(token_id, model):
     return token_id in getattr(model, "token_id_to_tool_id", {})
+
+
+def _metric_value_to_float(value):
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().item())
+    return float(value)
+
+
+def _build_loss_metrics(total_loss, ar_loss, extra_loss_metrics=None):
+    metrics = {
+        "total_loss": total_loss,
+        "ar_loss": ar_loss,
+    }
+    if extra_loss_metrics:
+        for metric_name, metric_value in extra_loss_metrics.items():
+            if metric_value is not None:
+                metrics[metric_name] = metric_value
+    return metrics
+
+
+def _ordered_metric_items(metrics):
+    emitted = set()
+    for metric_name in LOSS_METRIC_ORDER:
+        if metric_name in metrics:
+            emitted.add(metric_name)
+            yield metric_name, metrics[metric_name]
+    for metric_name, metric_value in metrics.items():
+        if metric_name not in emitted:
+            yield metric_name, metric_value
+
+
+def _average_metrics(metric_totals, count):
+    if count <= 0:
+        return {}
+    return {
+        metric_name: metric_total / count
+        for metric_name, metric_total in metric_totals.items()
+    }
+
+
+def _write_scalar_metrics(writer, prefix, metrics, step):
+    if writer is None:
+        return
+    for metric_name, metric_value in _ordered_metric_items(metrics):
+        writer.add_scalar(f"{prefix}/{metric_name}", _metric_value_to_float(metric_value), step)
 
 
 def compute_tool_subset_targets(shift_labels, model):
@@ -330,18 +383,28 @@ def train_native_function_calling_model(
     renorm_active_rows=False,
     use_eoc=None,
     use_gate=None,
+    use_eoc_loss=False,
     use_tool_loss=False,
     eoc_loss_weight=0.1,
     tool_loss_weight=0.1,
     gate_loss_weight=0.1,
     gate_threshold=0.5,
+    tensorboard_writer=None,
+    tensorboard_step_offset=0,
+    tensorboard_epoch_offset=0,
+    tensorboard_round=None,
 ):
     """Train the native function calling model using reserved tokens."""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
 
     model.train()
-    resolved_use_eoc, resolved_use_gate = _resolve_mode_flags(model, use_eoc, use_gate)
+    resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss = _resolve_mode_flags(
+        model,
+        use_eoc,
+        use_gate,
+        use_eoc_loss,
+    )
 
     # Set up optimizer with different learning rates for embeddings and LoRA.
     if model.lora_config and lora_lr is not None:
@@ -398,7 +461,8 @@ def train_native_function_calling_model(
     print(f"Warmup steps: {total_steps // 10}")
     print(
         "Mode: "
-        f"use_eoc={resolved_use_eoc}, use_gate={resolved_use_gate}, use_tool_loss={use_tool_loss}, "
+        f"use_eoc={resolved_use_eoc}, use_eoc_loss={resolved_use_eoc_loss}, "
+        f"use_gate={resolved_use_gate}, use_tool_loss={use_tool_loss}, "
         f"eoc_loss_weight={eoc_loss_weight}, tool_loss_weight={tool_loss_weight}, "
         f"gate_loss_weight={gate_loss_weight}, gate_threshold={gate_threshold}"
     )
@@ -420,11 +484,7 @@ def train_native_function_calling_model(
     print(f"Tool token IDs to monitor: {model.reserved_token_ids}")
     print()
 
-    total_loss = 0.0
-    total_ar_loss = 0.0
-    total_eoc_loss = 0.0
-    total_tool_loss = 0.0
-    total_gate_loss = 0.0
+    total_loss_metrics = defaultdict(float)
     total_valid_positions = 0
     total_eoc_positions = 0
     total_tool_positions = 0
@@ -435,11 +495,7 @@ def train_native_function_calling_model(
     step = 0
 
     window_batches = 0
-    window_total_loss = 0.0
-    window_ar_loss = 0.0
-    window_eoc_loss = 0.0
-    window_tool_loss = 0.0
-    window_gate_loss = 0.0
+    window_loss_metrics = defaultdict(float)
     window_valid_positions = 0
     window_eoc_positions = 0
     window_tool_positions = 0
@@ -452,6 +508,9 @@ def train_native_function_calling_model(
         print("Warning: use_gate=True but model has no gate_mlp; gate loss will stay zero until the model-side hook lands.")
 
     for epoch in range(num_epochs):
+        epoch_loss_metrics = defaultdict(float)
+        epoch_successful_steps = 0
+
         for batch_idx, batch in enumerate(dataloader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -510,7 +569,7 @@ def train_native_function_calling_model(
             eoc_count = int(masks["eoc_mask"].sum().item())
             tool_count = int(masks["tool_mask"].sum().item())
 
-            if resolved_use_eoc and eoc_count > 0:
+            if resolved_use_eoc_loss and eoc_count > 0:
                 eoc_loss = F.cross_entropy(shift_logits[masks["eoc_mask"]], shift_labels[masks["eoc_mask"]])
 
             if resolved_use_eoc and use_tool_loss and tool_count > 0:
@@ -529,16 +588,29 @@ def train_native_function_calling_model(
                     model,
                 )
                 if gate_targets.numel() > 0 and has_gate_head:
-                    gate_logits = model.gate_mlp(gate_hidden_states).squeeze(-1)
+                    # Stop gate BCE gradients at the branch input so routing supervision
+                    # updates only the gate head, not the backbone or reserved-token embeddings.
+                    gate_logits = model.gate_mlp(gate_hidden_states.detach()).squeeze(-1)
                     gate_loss = F.binary_cross_entropy_with_logits(gate_logits, gate_targets)
 
             loss = ar_loss
             if resolved_use_eoc:
-                loss = loss + eoc_loss_weight * eoc_loss
+                if resolved_use_eoc_loss:
+                    loss = loss + eoc_loss_weight * eoc_loss
                 if use_tool_loss:
                     loss = loss + tool_loss_weight * tool_loss
             if resolved_use_gate:
                 loss = loss + gate_loss_weight * gate_loss
+
+            step_loss_metrics = _build_loss_metrics(
+                total_loss=loss,
+                ar_loss=ar_loss,
+                extra_loss_metrics={
+                    "eoc_loss": eoc_loss if resolved_use_eoc_loss else None,
+                    "tool_loss": tool_loss if resolved_use_eoc and use_tool_loss else None,
+                    "gate_loss": gate_loss if resolved_use_gate else None,
+                },
+            )
 
             if not torch.isfinite(loss):
                 print(
@@ -620,11 +692,6 @@ def train_native_function_calling_model(
                 optimizer.zero_grad()
                 scheduler.step()
 
-            total_loss += loss.item()
-            total_ar_loss += ar_loss.item()
-            total_eoc_loss += eoc_loss.item()
-            total_tool_loss += tool_loss.item()
-            total_gate_loss += gate_loss.item()
             total_valid_positions += int(valid_mask.sum().item())
             total_eoc_positions += eoc_count
             total_tool_positions += tool_count
@@ -632,17 +699,36 @@ def train_native_function_calling_model(
             total_gate_initial_positions += gate_initial_count
             total_gate_eoc_positions += gate_eoc_count
             successful_steps += 1
+            epoch_successful_steps += 1
+            for metric_name, metric_value in step_loss_metrics.items():
+                metric_float = _metric_value_to_float(metric_value)
+                total_loss_metrics[metric_name] += metric_float
+                epoch_loss_metrics[metric_name] += metric_float
+                window_loss_metrics[metric_name] += metric_float
 
             window_batches += 1
-            window_total_loss += loss.item()
-            window_ar_loss += ar_loss.item()
-            window_eoc_loss += eoc_loss.item()
-            window_tool_loss += tool_loss.item()
-            window_gate_loss += gate_loss.item()
             window_valid_positions += int(valid_mask.sum().item())
             window_eoc_positions += eoc_count
             window_tool_positions += tool_count
             window_gate_positions += int(gate_targets.numel()) if gate_targets is not None else 0
+            if tensorboard_writer is not None:
+                tensorboard_step = tensorboard_step_offset + successful_steps
+                _write_scalar_metrics(tensorboard_writer, "train", step_loss_metrics, tensorboard_step)
+                tensorboard_writer.add_scalar("train/valid_positions", int(valid_mask.sum().item()), tensorboard_step)
+                if resolved_use_eoc:
+                    tensorboard_writer.add_scalar("train/eoc_positions", eoc_count, tensorboard_step)
+                    tensorboard_writer.add_scalar("train/tool_positions", tool_count, tensorboard_step)
+                if resolved_use_gate:
+                    tensorboard_writer.add_scalar(
+                        "train/gate_positions",
+                        int(gate_targets.numel()) if gate_targets is not None else 0,
+                        tensorboard_step,
+                    )
+                if tensorboard_round is not None:
+                    tensorboard_writer.add_scalar("train/round", tensorboard_round, tensorboard_step)
+                for lr_idx, lr_value in enumerate(scheduler.get_last_lr()):
+                    group_name = optimizer.param_groups[lr_idx].get("name", f"group_{lr_idx}")
+                    tensorboard_writer.add_scalar(f"train/lr_{group_name}", lr_value, tensorboard_step)
 
             if (batch_idx + 1) % 10 == 0:
                 lr_values = scheduler.get_last_lr()
@@ -652,29 +738,24 @@ def train_native_function_calling_model(
                     lr_info = f"LR: {lr_values[0]:.6f}"
 
                 window_denom = max(1, window_batches)
-                tool_loss_fragment = (
-                    f"Tool: {(window_tool_loss / window_denom):.4f}, "
-                    if use_tool_loss
-                    else ""
-                )
+                window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
+                tool_loss_fragment = ""
+                if "tool_loss" in window_avg_metrics:
+                    tool_loss_fragment = f"Tool: {window_avg_metrics['tool_loss']:.4f}, "
                 print(
                     f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
-                    f"Loss: {window_total_loss / window_denom:.4f}, "
-                    f"AR: {window_ar_loss / window_denom:.4f}, "
-                    f"EOC: {window_eoc_loss / window_denom:.4f}, "
+                    f"Loss: {window_avg_metrics.get('total_loss', 0.0):.4f}, "
+                    f"AR: {window_avg_metrics.get('ar_loss', 0.0):.4f}, "
+                    f"EOC: {window_avg_metrics.get('eoc_loss', 0.0):.4f}, "
                     f"{tool_loss_fragment}"
-                    f"Gate: {window_gate_loss / window_denom:.4f}, "
+                    f"Gate: {window_avg_metrics.get('gate_loss', 0.0):.4f}, "
                     f"Sites(valid/eoc/tool/gate): {window_valid_positions}/{window_eoc_positions}/"
                     f"{window_tool_positions}/{window_gate_positions}, "
                     f"{lr_info}"
                 )
 
                 window_batches = 0
-                window_total_loss = 0.0
-                window_ar_loss = 0.0
-                window_eoc_loss = 0.0
-                window_tool_loss = 0.0
-                window_gate_loss = 0.0
+                window_loss_metrics = defaultdict(float)
                 window_valid_positions = 0
                 window_eoc_positions = 0
                 window_tool_positions = 0
@@ -682,19 +763,28 @@ def train_native_function_calling_model(
 
             step += 1
 
-    avg_total_loss = total_loss / successful_steps if successful_steps > 0 else float("nan")
-    avg_ar_loss = total_ar_loss / successful_steps if successful_steps > 0 else float("nan")
-    avg_eoc_loss = total_eoc_loss / successful_steps if successful_steps > 0 else float("nan")
-    avg_tool_loss = total_tool_loss / successful_steps if successful_steps > 0 else float("nan")
-    avg_gate_loss = total_gate_loss / successful_steps if successful_steps > 0 else float("nan")
+        if tensorboard_writer is not None and epoch_successful_steps > 0:
+            tensorboard_epoch = tensorboard_epoch_offset + epoch + 1
+            epoch_avg_metrics = _average_metrics(epoch_loss_metrics, epoch_successful_steps)
+            _write_scalar_metrics(tensorboard_writer, "epoch", epoch_avg_metrics, tensorboard_epoch)
+            if tensorboard_round is not None:
+                tensorboard_writer.add_scalar("epoch/round", tensorboard_round, tensorboard_epoch)
+
+    avg_loss_metrics = _average_metrics(total_loss_metrics, successful_steps)
+    default_inactive_avg = 0.0 if successful_steps > 0 else float("nan")
+    avg_total_loss = avg_loss_metrics.get("total_loss", float("nan"))
+    avg_ar_loss = avg_loss_metrics.get("ar_loss", float("nan"))
+    avg_eoc_loss = avg_loss_metrics.get("eoc_loss", default_inactive_avg)
+    avg_tool_loss = avg_loss_metrics.get("tool_loss", default_inactive_avg)
+    avg_gate_loss = avg_loss_metrics.get("gate_loss", default_inactive_avg)
 
     print("\nTraining completed!")
     print(f"Average total loss: {avg_total_loss:.4f}")
     print(f"Average AR loss:    {avg_ar_loss:.4f}")
-    if resolved_use_eoc:
+    if resolved_use_eoc_loss:
         print(f"Average EOC loss:   {avg_eoc_loss:.4f}")
-        if use_tool_loss:
-            print(f"Average Tool loss:  {avg_tool_loss:.4f}")
+    if resolved_use_eoc and use_tool_loss:
+        print(f"Average Tool loss:  {avg_tool_loss:.4f}")
     if resolved_use_gate:
         print(f"Average Gate loss:   {avg_gate_loss:.4f}")
     print(f"Total valid supervised positions: {total_valid_positions}")
@@ -719,8 +809,12 @@ def train_native_function_calling_model(
         "total_gate_positions": total_gate_positions,
         "successful_steps": successful_steps,
         "use_eoc": resolved_use_eoc,
+        "use_eoc_loss": resolved_use_eoc_loss,
         "use_gate": resolved_use_gate,
         "use_tool_loss": use_tool_loss,
+        "avg_loss_metrics": avg_loss_metrics,
+        "tensorboard_next_step": tensorboard_step_offset + successful_steps,
+        "tensorboard_next_epoch": tensorboard_epoch_offset + num_epochs,
     }
 
 
@@ -736,7 +830,7 @@ def demo_native_function_calling(
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
-    resolved_use_eoc, resolved_use_gate = _resolve_mode_flags(model, use_eoc, use_gate)
+    resolved_use_eoc, resolved_use_gate, _ = _resolve_mode_flags(model, use_eoc, use_gate)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     ground_truth_gate_active = use_ground_truth_tools and resolved_use_gate and _ground_truth_gate_supported(model)
     if resolved_use_gate and (not use_ground_truth_tools or ground_truth_gate_active):
@@ -827,7 +921,7 @@ def eval_native_function_calling(
     import time
 
     model.eval()
-    resolved_use_eoc, resolved_use_gate = _resolve_mode_flags(model, use_eoc, use_gate)
+    resolved_use_eoc, resolved_use_gate, _ = _resolve_mode_flags(model, use_eoc, use_gate)
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"

@@ -65,6 +65,7 @@ python -u main_sequential.py \
     --lora_lr 5e-5 \
     --eval_batch_size 16 \
     --seed 42 \
+    --tensorboard \
     --renorm_active_tools \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
