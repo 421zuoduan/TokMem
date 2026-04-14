@@ -1,6 +1,10 @@
 import inspect
+import os
+import tempfile
+from pathlib import Path
 from collections import defaultdict
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -82,11 +86,233 @@ def _average_metrics(metric_totals, count):
     }
 
 
-def _write_scalar_metrics(writer, prefix, metrics, step):
-    if writer is None:
+def _append_loss_plot_record(plot_history, step, round_num, metrics):
+    if plot_history is None:
         return
+
+    record = {
+        "step": int(step),
+        "round": int(round_num) if round_num is not None else None,
+    }
     for metric_name, metric_value in _ordered_metric_items(metrics):
-        writer.add_scalar(f"{prefix}/{metric_name}", _metric_value_to_float(metric_value), step)
+        record[metric_name] = _metric_value_to_float(metric_value)
+    plot_history.setdefault("loss_steps", []).append(record)
+
+
+def _append_lr_plot_records(plot_history, step, round_num, optimizer, lr_values):
+    if plot_history is None:
+        return
+
+    records = plot_history.setdefault("lr_steps", [])
+    for lr_idx, lr_value in enumerate(lr_values):
+        group_name = optimizer.param_groups[lr_idx].get("name", f"group_{lr_idx}")
+        records.append(
+            {
+                "step": int(step),
+                "round": int(round_num) if round_num is not None else None,
+                "group": group_name,
+                "lr": float(lr_value),
+            }
+        )
+
+
+def _draw_round_boundaries(ax, round_boundaries):
+    if not round_boundaries:
+        return
+
+    for boundary in round_boundaries[:-1]:
+        boundary_step = boundary.get("step")
+        if boundary_step is None:
+            continue
+        ax.axvline(boundary_step, color="gray", linestyle="--", linewidth=1.0, alpha=0.35)
+
+
+def _moving_average(values, window_size):
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return values
+
+    window_size = max(1, min(int(window_size), values.size))
+    if window_size == 1:
+        return values.copy()
+
+    cumsum = np.cumsum(np.insert(values, 0, 0.0))
+    smoothed = (cumsum[window_size:] - cumsum[:-window_size]) / window_size
+    prefix = np.array(
+        [values[: idx + 1].mean() for idx in range(window_size - 1)],
+        dtype=np.float64,
+    )
+    return np.concatenate([prefix, smoothed])
+
+
+def _trend_window(num_points):
+    if num_points <= 1:
+        return 1
+    return min(num_points, max(20, min(100, num_points // 40 or 1)))
+
+
+def _build_loss_plot_series(loss_steps):
+    series = {}
+    for metric_name in LOSS_METRIC_ORDER:
+        points = [(record["step"], record[metric_name]) for record in loss_steps if metric_name in record]
+        if not points:
+            continue
+        x_values = np.asarray([point[0] for point in points], dtype=np.int64)
+        y_values = np.asarray([point[1] for point in points], dtype=np.float64)
+        finite_mask = np.isfinite(y_values)
+        if not finite_mask.any():
+            continue
+        x_values = x_values[finite_mask]
+        y_values = y_values[finite_mask]
+        smooth_values = _moving_average(y_values, _trend_window(len(y_values)))
+        series[metric_name] = {
+            "x": x_values,
+            "y": y_values,
+            "smooth": smooth_values,
+        }
+    return series
+
+
+def _loss_ylim(loss_series):
+    preferred_metrics = [
+        metric_name for metric_name in ("total_loss", "ar_loss") if metric_name in loss_series
+    ]
+    metrics_for_scale = preferred_metrics or list(loss_series.keys())
+    if not metrics_for_scale:
+        return None
+
+    scale_values = np.concatenate([loss_series[metric_name]["smooth"] for metric_name in metrics_for_scale])
+    scale_values = scale_values[np.isfinite(scale_values)]
+    if scale_values.size == 0:
+        return None
+
+    upper_bound = float(np.percentile(scale_values, 99.5))
+    initial_window = min(50, scale_values.size)
+    initial_peak = float(np.max(scale_values[:initial_window]))
+    overall_peak = float(np.max(scale_values))
+    upper_bound = max(upper_bound, initial_peak * 1.05)
+    if upper_bound <= 0:
+        upper_bound = overall_peak if overall_peak > 0 else 1.0
+
+    if upper_bound >= overall_peak * 0.98:
+        return None
+    return 0.0, upper_bound
+
+
+def _plot_loss_trends(ax, loss_steps):
+    loss_series = _build_loss_plot_series(loss_steps)
+    if not loss_series:
+        return
+
+    line_styles = {
+        "total_loss": {"color": "#1f77b4", "linewidth": 2.4, "alpha": 0.98, "linestyle": "-"},
+        "ar_loss": {"color": "#ff7f0e", "linewidth": 2.0, "alpha": 0.92, "linestyle": "-"},
+        "tool_loss": {"color": "#2ca02c", "linewidth": 1.5, "alpha": 0.8, "linestyle": "--"},
+        "eoc_loss": {"color": "#9467bd", "linewidth": 1.4, "alpha": 0.75, "linestyle": "--"},
+        "gate_loss": {"color": "#d62728", "linewidth": 1.4, "alpha": 0.75, "linestyle": "--"},
+    }
+
+    y_limits = _loss_ylim(loss_series)
+    clip_level = y_limits[1] if y_limits is not None else None
+
+    for metric_name in LOSS_METRIC_ORDER:
+        metric_series = loss_series.get(metric_name)
+        if metric_series is None:
+            continue
+        style = line_styles.get(metric_name, {"linewidth": 1.5, "alpha": 0.8, "linestyle": "-"})
+        smooth_values = metric_series["smooth"]
+        display_values = np.minimum(smooth_values, clip_level) if clip_level is not None else smooth_values
+        label = metric_name.replace("_", " ")
+        ax.plot(metric_series["x"], display_values, label=label, **style)
+
+        if clip_level is not None:
+            spike_mask = smooth_values > clip_level
+            if spike_mask.any():
+                ax.scatter(
+                    metric_series["x"][spike_mask],
+                    np.full(int(spike_mask.sum()), clip_level),
+                    color=style.get("color"),
+                    alpha=0.35,
+                    marker="o",
+                    s=10,
+                    linewidths=0,
+                )
+
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+
+
+def save_training_plot_images(plot_history, loss_plot_path, lr_plot_path, run_name):
+    loss_steps = plot_history.get("loss_steps", []) if plot_history else []
+    lr_steps = plot_history.get("lr_steps", []) if plot_history else []
+    round_boundaries = plot_history.get("round_boundaries", []) if plot_history else []
+
+    if not loss_steps and not lr_steps:
+        return []
+
+    if "MPLCONFIGDIR" not in os.environ:
+        mpl_config_dir = Path(tempfile.gettempdir()) / "tokmem-matplotlib"
+        mpl_config_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(mpl_config_dir)
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Saving training plots requires matplotlib in the active environment."
+        ) from exc
+
+    saved_paths = []
+
+    if loss_steps:
+        loss_plot_path = Path(loss_plot_path)
+        loss_plot_path.parent.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        _plot_loss_trends(ax, loss_steps)
+        _draw_round_boundaries(ax, round_boundaries)
+        ax.set_title(f"{run_name} Loss Trend")
+        ax.set_xlabel("Global Step")
+        ax.set_ylabel("Loss")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(loss_plot_path, dpi=200)
+        plt.close(fig)
+        saved_paths.append(str(loss_plot_path))
+
+    if lr_steps:
+        lr_plot_path = Path(lr_plot_path)
+        lr_plot_path.parent.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        group_names = []
+        for record in lr_steps:
+            group_name = record["group"]
+            if group_name not in group_names:
+                group_names.append(group_name)
+
+        for group_name in group_names:
+            points = [(record["step"], record["lr"]) for record in lr_steps if record["group"] == group_name]
+            if not points:
+                continue
+            x_values = [point[0] for point in points]
+            y_values = [point[1] for point in points]
+            ax.plot(x_values, y_values, label=group_name, linewidth=1.5)
+
+        _draw_round_boundaries(ax, round_boundaries)
+        ax.set_title(f"{run_name} Learning Rate Schedule")
+        ax.set_xlabel("Global Step")
+        ax.set_ylabel("Learning Rate")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(lr_plot_path, dpi=200)
+        plt.close(fig)
+        saved_paths.append(str(lr_plot_path))
+
+    return saved_paths
 
 
 def compute_tool_subset_targets(shift_labels, model):
@@ -389,10 +615,9 @@ def train_native_function_calling_model(
     tool_loss_weight=0.1,
     gate_loss_weight=0.1,
     gate_threshold=0.5,
-    tensorboard_writer=None,
-    tensorboard_step_offset=0,
-    tensorboard_epoch_offset=0,
-    tensorboard_round=None,
+    plot_history=None,
+    plot_step_offset=0,
+    plot_round=None,
 ):
     """Train the native function calling model using reserved tokens."""
     from torch.optim import AdamW
@@ -508,9 +733,6 @@ def train_native_function_calling_model(
         print("Warning: use_gate=True but model has no gate_mlp; gate loss will stay zero until the model-side hook lands.")
 
     for epoch in range(num_epochs):
-        epoch_loss_metrics = defaultdict(float)
-        epoch_successful_steps = 0
-
         for batch_idx, batch in enumerate(dataloader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -657,6 +879,7 @@ def train_native_function_calling_model(
                 except Exception as exc:
                     print(f"Warning: failed to apply active tool grad mask: {exc}")
 
+            current_lr_values = [float(param_group["lr"]) for param_group in optimizer.param_groups]
             if (step + 1) % gradient_accumulation_steps == 0:
                 optimizer.step()
 
@@ -699,11 +922,9 @@ def train_native_function_calling_model(
             total_gate_initial_positions += gate_initial_count
             total_gate_eoc_positions += gate_eoc_count
             successful_steps += 1
-            epoch_successful_steps += 1
             for metric_name, metric_value in step_loss_metrics.items():
                 metric_float = _metric_value_to_float(metric_value)
                 total_loss_metrics[metric_name] += metric_float
-                epoch_loss_metrics[metric_name] += metric_float
                 window_loss_metrics[metric_name] += metric_float
 
             window_batches += 1
@@ -711,27 +932,19 @@ def train_native_function_calling_model(
             window_eoc_positions += eoc_count
             window_tool_positions += tool_count
             window_gate_positions += int(gate_targets.numel()) if gate_targets is not None else 0
-            if tensorboard_writer is not None:
-                tensorboard_step = tensorboard_step_offset + successful_steps
-                _write_scalar_metrics(tensorboard_writer, "train", step_loss_metrics, tensorboard_step)
-                tensorboard_writer.add_scalar("train/valid_positions", int(valid_mask.sum().item()), tensorboard_step)
-                if resolved_use_eoc:
-                    tensorboard_writer.add_scalar("train/eoc_positions", eoc_count, tensorboard_step)
-                    tensorboard_writer.add_scalar("train/tool_positions", tool_count, tensorboard_step)
-                if resolved_use_gate:
-                    tensorboard_writer.add_scalar(
-                        "train/gate_positions",
-                        int(gate_targets.numel()) if gate_targets is not None else 0,
-                        tensorboard_step,
-                    )
-                if tensorboard_round is not None:
-                    tensorboard_writer.add_scalar("train/round", tensorboard_round, tensorboard_step)
-                for lr_idx, lr_value in enumerate(scheduler.get_last_lr()):
-                    group_name = optimizer.param_groups[lr_idx].get("name", f"group_{lr_idx}")
-                    tensorboard_writer.add_scalar(f"train/lr_{group_name}", lr_value, tensorboard_step)
+            if plot_history is not None:
+                plot_step = plot_step_offset + successful_steps
+                _append_loss_plot_record(plot_history, plot_step, plot_round, step_loss_metrics)
+                _append_lr_plot_records(
+                    plot_history,
+                    plot_step,
+                    plot_round,
+                    optimizer,
+                    current_lr_values,
+                )
 
             if (batch_idx + 1) % 10 == 0:
-                lr_values = scheduler.get_last_lr()
+                lr_values = current_lr_values
                 if model.lora_config and lora_lr is not None:
                     lr_info = f"LR(emb/lora): {lr_values[0]:.6f}/{lr_values[1]:.6f}"
                 else:
@@ -762,14 +975,6 @@ def train_native_function_calling_model(
                 window_gate_positions = 0
 
             step += 1
-
-        if tensorboard_writer is not None and epoch_successful_steps > 0:
-            tensorboard_epoch = tensorboard_epoch_offset + epoch + 1
-            epoch_avg_metrics = _average_metrics(epoch_loss_metrics, epoch_successful_steps)
-            _write_scalar_metrics(tensorboard_writer, "epoch", epoch_avg_metrics, tensorboard_epoch)
-            if tensorboard_round is not None:
-                tensorboard_writer.add_scalar("epoch/round", tensorboard_round, tensorboard_epoch)
-
     avg_loss_metrics = _average_metrics(total_loss_metrics, successful_steps)
     default_inactive_avg = 0.0 if successful_steps > 0 else float("nan")
     avg_total_loss = avg_loss_metrics.get("total_loss", float("nan"))
@@ -813,8 +1018,8 @@ def train_native_function_calling_model(
         "use_gate": resolved_use_gate,
         "use_tool_loss": use_tool_loss,
         "avg_loss_metrics": avg_loss_metrics,
-        "tensorboard_next_step": tensorboard_step_offset + successful_steps,
-        "tensorboard_next_epoch": tensorboard_epoch_offset + num_epochs,
+        "plot_next_step": plot_step_offset + successful_steps,
+        "plot_end_step": plot_step_offset + successful_steps,
     }
 
 

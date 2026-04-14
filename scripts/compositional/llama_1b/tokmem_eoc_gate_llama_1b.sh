@@ -45,11 +45,13 @@ python -u main_sequential.py \
     --tensorboard \
     --renorm_active_tools \
     --use_eoc \
+    --use_eoc_loss \
     --use_gate \
-    --use_tool_loss \
-    --tool_loss_weight 0.1 \
+    --gate_network linear \
     --gate_loss_weight 0.1 \
     --gate_threshold 0.5 \
+    --use_tool_loss \
+    --tool_loss_weight 0.1 \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
     --run_tag "llama_1b_eoc_gate"

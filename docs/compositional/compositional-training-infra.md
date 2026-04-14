@@ -399,13 +399,13 @@ Expected: parser exits with `--epochs only supports single-round no-adaptation r
 
 ## 原文：2026-04-13-compositional-tensorboard-design.md
 
-## Compositional `main_sequential` TensorBoard 设计
+## Compositional `main_sequential` 训练曲线图片导出设计
 
 日期：2026-04-13
 
 ### 目标
 
-在现有 `compositional/main_sequential.py` 训练链路中保留一份 TensorBoard 日志，用来查看训练过程中各类 loss 的变化，而不影响默认训练行为。
+在现有 `compositional/main_sequential.py` 训练链路中保留一份训练曲线可视化产物，用来查看训练过程中 loss 和 learning rate 的变化，同时不再生成 TensorBoard event 文件。
 
 ### 范围
 
@@ -422,107 +422,90 @@ Expected: parser exits with `--epochs only supports single-round no-adaptation r
 
 ### 方案
 
-采用现有训练循环内直接写 TensorBoard 的方式：
+采用“训练中收集数值、训练后统一绘图”的方式：
 
 - 在 `main_sequential.py` 新增 `--tensorboard` 开关，默认关闭
-- 当开关开启时，在当前 run 目录下创建 `tensorboard/` 子目录
-- `main_sequential.py` 创建单个 `SummaryWriter`，并传给 `training.py`
-- `training.py` 负责按 step 和 epoch 写入标量
+- 当开关开启时，不在训练过程中绘图
+- `training.py` 只收集 step 级 loss 和 learning rate 历史
+- 训练结束后由 `main_sequential.py` 调用统一绘图函数
+- 图片直接写到当前 run 根目录，而不是 `tensorboard/` 子目录
 
 ### 记录内容
 
-按 step 记录：
+训练结束后导出两张图片：
 
-- `train/total_loss`
-- `train/ar_loss`
-- `train/eoc_loss`
-- `train/tool_loss`
-- `train/gate_loss`
-- `train/lr_embeddings`
-- `train/lr_lora`（有 LoRA 参数组时）
-- `train/valid_positions`
-- `train/eoc_positions`
-- `train/tool_positions`
-- `train/gate_positions`
-- `train/round`
+- `loss_step.png`
+  - 横轴是全局 step
+  - 纵轴是 loss
+  - 主要用于展示平滑后的训练趋势，而不是逐 batch 原始抖动
+  - 包含 `total_loss`、`ar_loss`，以及按实验配置启用的 `eoc_loss`、`tool_loss`、`gate_loss`
+- `lr_step.png`
+  - 横轴是全局 step
+  - 纵轴是 learning rate
+  - 每个 optimizer param group 一条曲线，例如 `embeddings`、`lora`
+  - 记录当前 step 实际使用的学习率，而不是下一个 step 的值
 
-按 epoch 记录：
-
-- `epoch/total_loss`
-- `epoch/ar_loss`
-- `epoch/eoc_loss`
-- `epoch/tool_loss`
-- `epoch/gate_loss`
-
-按 round 记录：
-
-- `round/avg_total_loss`
-- `round/avg_ar_loss`
-- `round/avg_eoc_loss`
-- `round/avg_tool_loss`
-- `round/avg_gate_loss`
+多 round 训练时，两张图都会标出 round 边界。
 
 ### 兼容性
 
-- 默认不启用 TensorBoard，旧脚本不受影响
-- 只有显式传 `--tensorboard` 才尝试导入 `SummaryWriter`
-- 如果环境未安装 `tensorboard`，在启用 `--tensorboard` 时给出明确报错
-- `requirements.txt` 补充 `tensorboard` 依赖
+- 默认不启用图片导出，旧脚本不受影响
+- 继续复用 `--tensorboard` 开关，避免维护中的 launcher 全部改名
+- 如果环境未安装 `matplotlib`，在启用 `--tensorboard` 时给出明确报错
+- `requirements.txt` 补充 `matplotlib` 依赖
 
 ---
 
 ## 原文：2026-04-13-compositional-tensorboard-plan.md
 
-## Compositional TensorBoard Implementation Plan
+## Compositional Training Plot Export Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add optional TensorBoard logging to the existing `compositional/main_sequential.py` training path so training losses can be inspected over time.
+**Goal:** Add optional static PNG plot export to the existing `compositional/main_sequential.py` training path so training losses and learning rates can be inspected after training completes.
 
-**Architecture:** `main_sequential.py` owns CLI/configuration and the run-scoped TensorBoard directory, while `training.py` owns step-level and epoch-level scalar logging inside the existing training loop. The feature remains opt-in through a single CLI flag.
+**Architecture:** `main_sequential.py` owns CLI/configuration and the run-scoped output paths, while `training.py` owns step-level metric collection inside the existing training loop. After training, a shared plotting helper renders `loss_step.png` and `lr_step.png` into the run root. The feature remains opt-in through a single CLI flag.
 
-**Tech Stack:** Python, PyTorch, TensorBoard, existing compositional training pipeline
+**Tech Stack:** Python, PyTorch, matplotlib, existing compositional training pipeline
 
 ---
 
 ### File Structure
 
 - Modify: `requirements.txt`
-  Add the missing TensorBoard package dependency.
+  Add the plotting dependency.
 
 - Modify: `compositional/main_sequential.py`
-  Add the CLI switch, create the writer under the run directory, pass logging context into the training function, and include the TensorBoard artifact path in run metadata.
+  Reuse the existing CLI switch, define output PNG paths under the run directory, pass plot-collection context into the training function, and include the image artifact paths in run metadata.
 
 - Modify: `compositional/training.py`
-  Accept the writer and logging offsets, emit step-level and epoch-level scalars, and return enough information for round-level summaries.
+  Accept plot-history state, collect step-level loss and lr series, and expose enough information to mark round boundaries before final rendering.
 
 ### Task 1: Add the CLI Surface and Run Artifact Wiring
 
 **Files:**
 - Modify: `compositional/main_sequential.py`
 
-- [ ] Confirm current CLI has no TensorBoard flag
-- [ ] Add `--tensorboard` as a default-off flag
-- [ ] Create `run_dir/tensorboard/` only when the flag is enabled
-- [ ] Initialize `SummaryWriter` lazily with a clear error if `tensorboard` is missing
-- [ ] Record the TensorBoard directory in run metadata and summaries
+- [ ] Reuse `--tensorboard` as a default-off plotting flag
+- [ ] Define `loss_step.png` and `lr_step.png` under the run root when the flag is enabled
+- [ ] Check `matplotlib` lazily with a clear error if it is missing
+- [ ] Record the PNG artifact paths in run metadata
 
-### Task 2: Add Training-Loop Scalar Logging
+### Task 2: Add Training-Loop Metric Collection and Final Rendering
 
 **Files:**
 - Modify: `compositional/training.py`
 
-- [ ] Extend `train_native_function_calling_model(...)` to accept an optional writer plus step and epoch offsets
-- [ ] Emit per-step loss, lr, position-count, and round scalars
-- [ ] Accumulate epoch metrics and emit per-epoch averages
-- [ ] Return updated global step / epoch counters for multi-round training
+- [ ] Extend `train_native_function_calling_model(...)` to accept optional plot-history state plus global step offsets
+- [ ] Collect per-step loss and lr values during training
+- [ ] Return updated global step counters for multi-round training
+- [ ] Render the two PNG plots only once, after training completes
 
 ### Task 3: Validate the Integration
 
 **Files:**
 - Modify: `requirements.txt`
 
-- [ ] Run `python compositional/main_sequential.py --help` in the `tokmem` environment and confirm the new flag is exposed
+- [ ] Run `python compositional/main_sequential.py --help` in the `tokmem` environment and confirm the plotting flag is exposed
 - [ ] Run `python -m py_compile compositional/main_sequential.py compositional/training.py`
 - [ ] Inspect the diff to ensure only the intended code paths changed
-

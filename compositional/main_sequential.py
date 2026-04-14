@@ -16,7 +16,12 @@ import logging
 
 from model import FunctionCallingModel, print_model_info
 from dataset import create_native_dataloader, discover_available_tools
-from training import train_native_function_calling_model, eval_native_function_calling, demo_native_function_calling
+from training import (
+    demo_native_function_calling,
+    eval_native_function_calling,
+    save_training_plot_images,
+    train_native_function_calling_model,
+)
 from run_layout import (
     DEFAULT_RUNS_DIR,
     artifact_path,
@@ -327,7 +332,7 @@ def build_parser():
     parser.add_argument("--run_tag", type=str, default=None,
                         help="Optional tag appended to the generated run name")
     parser.add_argument("--tensorboard", action="store_true",
-                        help="Write TensorBoard logs under the current run directory")
+                        help="Save post-training loss and learning-rate plots under the current run directory")
 
     return parser
 
@@ -368,7 +373,8 @@ def main():
     )
 
     evaluation_log_file = resolve_run_file_path(run_context, args.log_file, "evaluation.log")
-    tensorboard_log_dir = artifact_path(run_context, "tensorboard") if args.tensorboard else None
+    loss_plot_path = artifact_path(run_context, "loss_step.png") if args.tensorboard else None
+    lr_plot_path = artifact_path(run_context, "lr_step.png") if args.tensorboard else None
     checkpoint_dir = run_context["run_dir"]
     if args.checkpoint_dir:
         checkpoint_dir = (
@@ -376,18 +382,15 @@ def main():
             if os.path.isabs(args.checkpoint_dir)
             else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
         )
-    tensorboard_writer = None
     open(evaluation_log_file, "a", encoding="utf-8").close()
     if args.tensorboard:
-        os.makedirs(tensorboard_log_dir, exist_ok=True)
         try:
-            from torch.utils.tensorboard import SummaryWriter
-        except ModuleNotFoundError as exc:
+            import matplotlib  # noqa: F401
+        except ModuleNotFoundError:
             parser.error(
-                "--tensorboard requires the 'tensorboard' package in the active environment. "
-                "Run `pip install -r requirements.txt` inside the tokmem environment."
+                "--tensorboard now saves loss/lr PNG plots and requires the 'matplotlib' package "
+                "in the active environment. Run `pip install -r requirements.txt` inside the tokmem environment."
             )
-        tensorboard_writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
     log_handlers = [logging.StreamHandler(sys.stdout)]
     log_handlers.append(logging.FileHandler(evaluation_log_file, mode='a'))
@@ -551,7 +554,8 @@ def main():
                 "artifacts": {
                     "evaluation_log": evaluation_log_file,
                     "checkpoint_dir": checkpoint_dir,
-                    "tensorboard_log_dir": tensorboard_log_dir,
+                    "loss_plot": loss_plot_path,
+                    "lr_plot": lr_plot_path,
                 },
             },
         ),
@@ -561,8 +565,8 @@ def main():
     all_results = []
     # Store test dataloaders for cumulative evaluation
     all_test_dataloaders = []
-    tensorboard_step_offset = 0
-    tensorboard_epoch_offset = 0
+    plot_history = {"loss_steps": [], "lr_steps": [], "round_boundaries": []} if args.tensorboard else None
+    plot_step_offset = 0
     
     # Training loop for each round
     for round_idx, round_spec in enumerate(rounds):
@@ -688,18 +692,20 @@ def main():
             eoc_loss_weight=args.eoc_loss_weight,
             tool_loss_weight=args.tool_loss_weight,
             gate_loss_weight=args.gate_loss_weight,
-            tensorboard_writer=tensorboard_writer,
-            tensorboard_step_offset=tensorboard_step_offset,
-            tensorboard_epoch_offset=tensorboard_epoch_offset,
-            tensorboard_round=round_num,
+            plot_history=plot_history,
+            plot_step_offset=plot_step_offset,
+            plot_round=round_num,
         )
         round_results = train_native_function_calling_model(**training_kwargs)
-        tensorboard_step_offset = round_results.get("tensorboard_next_step", tensorboard_step_offset)
-        tensorboard_epoch_offset = round_results.get("tensorboard_next_epoch", tensorboard_epoch_offset)
-        if tensorboard_writer is not None:
-            for metric_name, metric_value in round_results.get("avg_loss_metrics", {}).items():
-                tensorboard_writer.add_scalar(f"round/avg_{metric_name}", metric_value, round_num)
-            tensorboard_writer.flush()
+        plot_step_offset = round_results.get("plot_next_step", plot_step_offset)
+        if plot_history is not None:
+            plot_history["round_boundaries"].append(
+                {
+                    "round": round_num,
+                    "step": round_results.get("plot_end_step", plot_step_offset),
+                    "tools": tools_range,
+                }
+            )
         
         print(f"Round {round_num} training completed! Average loss: {round_results['avg_total_loss']:.4f}")
         logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_total_loss']:.4f}")
@@ -846,8 +852,17 @@ def main():
     print(f"Trained {len(rounds)} rounds with different tool sets")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA was frozen after first round")
-    if tensorboard_log_dir:
-        print(f"TensorBoard logs: {tensorboard_log_dir}")
+    if args.tensorboard:
+        saved_plot_paths = save_training_plot_images(
+            plot_history,
+            loss_plot_path,
+            lr_plot_path,
+            run_context["run_name"],
+        )
+        if saved_plot_paths:
+            print("Saved training plots:")
+            for saved_plot_path in saved_plot_paths:
+                print(f"  {saved_plot_path}")
     print("="*60)
     
     evaluation_results_payload = {
@@ -870,8 +885,6 @@ def main():
         artifact_path(run_context, "evaluation_results.json"),
         strip_call_count_breakdown(evaluation_results_payload),
     )
-    if tensorboard_writer is not None:
-        tensorboard_writer.close()
     
     # Log completion
     logger.info(f"=== Sequential Training Completed at {datetime.now()} ===")

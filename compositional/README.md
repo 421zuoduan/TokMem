@@ -80,7 +80,8 @@ Maintained runs keep the following artifacts:
 - `evaluation.log`
 - round checkpoints
 - launcher script snapshot
-- optional `tensorboard/`
+- optional `loss_step.png`
+- optional `lr_step.png`
 
 Maintained runs do not keep:
 
@@ -90,6 +91,11 @@ Maintained runs do not keep:
 - `run_summary.json`
 - `gpu_monitor.log`
 - `call_count_breakdown` inside `evaluation_results.json`
+
+Passing `--tensorboard` on the maintained TokMem path now saves two static PNG trend plots directly under the run directory after training finishes:
+
+- `loss_step.png`
+- `lr_step.png`
 
 The old `compositional/log/`, `checkpoints_*`, and root-level result JSON layout is legacy-only and should not be used for new runs.
 

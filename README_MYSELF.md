@@ -6,9 +6,9 @@
  
 | 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
 | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.620 | 0.848 | 0.693 | 0.422 | 0.190 |
+| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.610 | 0.842 | 0.683 | 0.420 | 0.804 |
 | `7` | eoc-only | 3 | 0.005 | √ | × | × | × |  |  |  | 0.582 | 0.848 | 0.655 | 0.408 | 5.064 |
-| `8` | eoc+gate | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.586 | 0.825 | 0.666 | 0.416 | 13.114 |
+| `8` | eoc+gate_linear | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 |
 | `4` | eoc-only | 3 | 0.005 | √ | × | √ | × | 0.1 |  |  | 0.578 | 0.845 | 0.666 | 0.386 | 10.218 |
 | `5` | eoc+gate | 3 | 0.005 | √ | √ | √ | × | 0.1 |  | 0.1 | 0.628 | 0.859 | 0.707 | 0.442 | 0.458 |
 | `2` | eoc-only | 3 | 0.005 | √ | × | √ | √ | 0.1 | 0.1 |  | 0.666 | 0.888 | 0.679 | 0.400 | 0.974 |
@@ -24,6 +24,18 @@
 - `Parse Error Rate` 是越低越好；它高时表示结构化输出本身已经损坏，即使 `Tool F1` 或 `Arguments F1` 不算太低，最终 `Exact Match Acc` 也可能上不去。
 - 当前 `gate` 在训练时主要作为额外监督项存在，并不会直接改变 teacher-forcing 下的 token 选择；但在推理时会影响 `eoc` 之后
 - `7` 和 `8` 这组来自 `tokmem_eoc_only.out`、`tokmem_eoc_gate.out` 的实验虽然保留了 `eoc token`，但没有开启 `eoc loss` 和 `tool selection loss`；因此它们的训练目标分别是 `AR` 和 `AR + gate`
+
+
+
+**gate mlp vs linear**
+
+100 memory + 1 eoc token
+
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate | Gate Params | Trainable Params |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  | eoc+gate_mlp | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.668 | 0.878 | 0.734 | 0.478 | 0.410 | 4,198,401 | 4,302,849 |
+| `8` | eoc+gate_linear | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 | 2,049 | 106,497 |
+
 
 ### 训练 loss
 

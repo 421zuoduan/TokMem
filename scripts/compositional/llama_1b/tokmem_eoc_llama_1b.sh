@@ -42,6 +42,7 @@ python -u main_sequential.py \
     --tensorboard \
     --renorm_active_tools \
     --use_eoc \
+    --use_eoc_loss \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
     --run_tag "llama_1b_eoc_only"
