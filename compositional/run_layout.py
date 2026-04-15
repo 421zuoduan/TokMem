@@ -77,6 +77,48 @@ def write_json(path, payload):
         json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
 
 
+def _summary_loss_value(results, key, enabled):
+    if not enabled:
+        return None
+    return results.get(key)
+
+
+def build_training_summary_payload(run_name, all_results, experiment_type="tokmem_sequential"):
+    rounds = []
+    for result in all_results:
+        metrics = result.get("results", {})
+        rounds.append(
+            {
+                "round": result["round"],
+                "tools": result["tools"],
+                "epochs": result["epochs"],
+                "avg_total_loss": metrics.get("avg_total_loss", result.get("avg_loss")),
+                "avg_ar_loss": metrics.get("avg_ar_loss"),
+                "avg_eoc_loss": _summary_loss_value(
+                    metrics,
+                    "avg_eoc_loss",
+                    metrics.get("use_eoc_loss", False),
+                ),
+                "avg_tool_loss": _summary_loss_value(
+                    metrics,
+                    "avg_tool_loss",
+                    metrics.get("use_tool_loss", False),
+                ),
+                "avg_gate_loss": _summary_loss_value(
+                    metrics,
+                    "avg_gate_loss",
+                    metrics.get("use_gate", False),
+                ),
+            }
+        )
+
+    return {
+        "experiment_type": experiment_type,
+        "run_name": run_name,
+        "rounds": rounds,
+    }
+
+
 def build_command_string():
     return shlex.join(sys.argv)
 

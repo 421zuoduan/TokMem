@@ -77,6 +77,7 @@ Maintained runs keep the following artifacts:
 
 - `run_config.json`
 - `evaluation_results.json`
+- `training_summary.json`
 - `evaluation.log`
 - round checkpoints
 - launcher script snapshot
@@ -86,11 +87,12 @@ Maintained runs keep the following artifacts:
 Maintained runs do not keep:
 
 - `train_results.json`
-- `training_summary.json`
 - `training.log`
 - `run_summary.json`
 - `gpu_monitor.log`
 - `call_count_breakdown` inside `evaluation_results.json`
+
+`training_summary.json` is intentionally compact: it only keeps final per-round average losses such as `avg_total_loss`, `avg_ar_loss`, `avg_eoc_loss`, `avg_tool_loss`, and `avg_gate_loss`. It does not keep step-level or batch-level training traces.
 
 Passing `--tensorboard` on the maintained TokMem path now saves two static PNG trend plots directly under the run directory after training finishes:
 

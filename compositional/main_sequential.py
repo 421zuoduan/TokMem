@@ -25,6 +25,7 @@ from training import (
 from run_layout import (
     DEFAULT_RUNS_DIR,
     artifact_path,
+    build_training_summary_payload,
     build_run_config,
     resolve_run_context,
     write_json,
@@ -884,6 +885,14 @@ def main():
     write_json(
         artifact_path(run_context, "evaluation_results.json"),
         strip_call_count_breakdown(evaluation_results_payload),
+    )
+    write_json(
+        artifact_path(run_context, "training_summary.json"),
+        build_training_summary_payload(
+            run_name=run_context["run_name"],
+            all_results=all_results,
+            experiment_type="tokmem_sequential",
+        ),
     )
     
     # Log completion
