@@ -222,6 +222,7 @@ bash icl_baseline.sh
 
 - `Tool Prediction Accuracy`
   - 可以近似看作 compositional 场景里的 routing 是否做对
+  - `evaluation_results.json` 里的这个字段表示全量测试集整体值；按 `2/3/4 call(s)` 的分桶值只在 `evaluation.log` 里单独打印
 - `Average F1 Score`
   - 看整个 function call 序列生成得是否接近标注
 - `Average Tool F1 Score`

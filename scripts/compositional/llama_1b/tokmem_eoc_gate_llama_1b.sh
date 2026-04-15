@@ -13,7 +13,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=6
 
 cd "$ROOT_DIR/compositional"
 
@@ -45,7 +45,6 @@ python -u main_sequential.py \
     --tensorboard \
     --renorm_active_tools \
     --use_eoc \
-    --use_eoc_loss \
     --use_gate \
     --gate_network linear \
     --gate_loss_weight 0.1 \

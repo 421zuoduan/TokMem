@@ -84,6 +84,8 @@ Maintained runs keep the following artifacts:
 - optional `loss_step.png`
 - optional `lr_step.png`
 
+Top-level metrics in `evaluation_results.json`, including `tool_accuracy`, are overall values over the full evaluation set. Per-call-count breakdowns are printed in `evaluation.log`.
+
 Maintained runs do not keep:
 
 - `train_results.json`

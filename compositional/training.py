@@ -1307,8 +1307,8 @@ def eval_native_function_calling(
     print("-" * 50)
     for call_count in sorted(call_count_breakdown.keys()):
         stats = call_count_breakdown[call_count]
-        tool_accuracy = stats["tool_correct"] / stats["total"] if stats["total"] > 0 else 0.0
-        print(f"   {call_count} call(s): {tool_accuracy:.3f} ({stats['tool_correct']}/{stats['total']})")
+        per_call_tool_accuracy = stats["tool_correct"] / stats["total"] if stats["total"] > 0 else 0.0
+        print(f"   {call_count} call(s): {per_call_tool_accuracy:.3f} ({stats['tool_correct']}/{stats['total']})")
     print("=" * 50)
 
     print("\n📊 AVERAGE F1 SCORE (Function Calls):")
