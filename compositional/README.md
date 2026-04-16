@@ -6,18 +6,20 @@ This directory contains the compositional memory recall experiments.
 
 The sequential TokMem path now separates enabling EOC tokens from adding the EOC loss:
 
-| Mode | `--use_eoc` | `--use_eoc_loss` | `--use_gate` | `--use_toolmix` | Behavior |
-| --- | --- | --- | --- | --- | --- |
-| Baseline | off | off | off | off | Original TokMem decoding and training |
-| EOC token only | on | off | off | off | Inserts explicit `eoc` tokens, but does not add EOC loss |
-| EOC loss | on | on | off | off | Inserts explicit `eoc` tokens and adds EOC loss |
-| EOC + gate | on | on/off | on | off | Uses the shared `routing_probe` for gating; `--probe_from eoc` keeps the original boundary-state behavior and `--probe_from tool` probes the current token state |
-| EOC + toolmix | on | on/off | on/off | on | Uses the shared `routing_probe` on BOS and gold `eoc` decision sites to mix tool-token CE with tool-selection loss; `--probe_from` changes which hidden state feeds that shared probe |
+| Mode | `--use_eoc` | `--use_eoc_loss` | `--use_gate` | `--use_toolmix` | `--use_logit_bias` | Behavior |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | off | off | off | off | off | Original TokMem decoding and training |
+| EOC token only | on | off | off | off | off | Inserts explicit `eoc` tokens, but does not add EOC loss |
+| EOC loss | on | on | off | off | off | Inserts explicit `eoc` tokens and adds EOC loss |
+| EOC + gate | on | on/off | on | off | off | Uses the shared `routing_probe` for gating; `--probe_from eoc` keeps the original boundary-state behavior and `--probe_from tool` probes the current token state |
+| EOC + toolmix | on | on/off | on/off | on | off | Uses the shared `routing_probe` on BOS and gold `eoc` decision sites to mix tool-token CE with tool-selection loss; `--probe_from` changes which hidden state feeds that shared probe |
+| EOC + logit bias | on | on/off | on/off | on/off | on | Trains a detached external tool prior on assistant-start and gold-`eoc` boundary states, then adds its tool-only log-probabilities back to the main logits as a soft decode-time bias |
 
 `--use_gate` requires `--use_eoc`.
 `--use_eoc_loss` requires `--use_eoc`.
 `--use_tool_loss` also requires `--use_eoc`.
 `--use_toolmix` also requires `--use_eoc`.
+`--use_logit_bias` also requires `--use_eoc`.
 
 Useful flags:
 
@@ -26,13 +28,17 @@ Useful flags:
 - `--use_gate`
 - `--use_tool_loss`
 - `--use_toolmix`
+- `--use_logit_bias`
 - `--eoc_loss_weight` default `0.1`
 - `--tool_loss_weight` default `0.1`
 - `--gate_loss_weight` default `0.1`
 - `--toolmix_loss_weight` default `0.1`
+- `--logit_bias_loss_weight` default `0.1`
 - `--gate_threshold` default `0.5`
 - `--gate_network` default `linear`, choices: `mlp`, `linear`
 - `--probe_from` default `eoc`, choices: `eoc`, `tool`
+- `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
+- `--logit_bias_scale` default `1.0`
 - `--max_length` default `1024`
 
 `--probe_from` applies to the shared `routing_probe` used by both `--use_gate` and `--use_toolmix`:
@@ -51,6 +57,42 @@ When `--use_toolmix` is enabled, training keeps the existing `eoc` target format
 
 When `--use_gate` and `--use_toolmix` are enabled together, they still share one `routing_probe`. Training adds the shared routing BCE once through `--toolmix_loss_weight`. `--gate_loss_weight` applies to the pure gate path.
 
+Batch logs and `training_summary.json` now compute `GateProb` / `avg_gate_prob` and `ToolmixProb` / `avg_toolmix_prob` after excluding boundary sites whose next gold token is `<|eot_id|>`. The BCE losses still use the full boundary set.
+
+When `--use_logit_bias` is enabled, training and decoding use a separate external tool selector:
+
+- candidate boundary positions stay fixed to the assistant-start boundary and every gold/generated `eoc`
+- the selected boundary hidden state is always the boundary state itself
+- training detaches each boundary hidden state before sending it into `logit_bias_head`
+- the auxiliary CE runs only on boundary sites whose next gold token is a tool token
+- the auxiliary loss updates only `logit_bias_head`, while backbone, TokMem embeddings, and the main autoregressive path keep their own gradients
+- decoding takes the prior head's tool logits, applies `log_softmax` within the tool subset, subtracts the uniform-tool baseline, scales by `--logit_bias_scale`, and adds the result only to tool-token columns in the full vocabulary logits
+
+`--use_logit_bias` is compatible with `--use_gate` and `--use_toolmix`. The decode order is:
+
+1. compute full-vocab logits
+2. if `--use_gate --probe_from tool` is active, sample the provisional routing token from the raw logits first
+3. add the soft tool-only bias on boundary rows for standalone sampling, JS truncation, and any post-gate tool-only resampling
+4. run any existing gate or JS truncation masking logic
+
+## Gate Trace Utility
+
+To inspect gate probabilities per sample instead of the training-log average, use:
+
+```bash
+python compositional/utils/gate_trace_samples.py \
+  --checkpoint_path compositional/runs/<run_name>/round_1_tools_51_100.pt
+```
+
+The script:
+
+- restores the checkpoint and the matching data split from `run_config.json`
+- reruns sample-level generation to separate `full_correct` and `not_full_correct` examples
+- exports teacher-forced gate traces on BOS and every gold `eoc` boundary
+- writes one JSON file with per-sample `gate_sites`, where each site includes its boundary type, source token, next gold token, routing logit, routing probability, thresholded prediction, and correctness
+
+For a sample with `k` gold tool calls, the exported trace contains `k + 1` gate sites: one BOS site and one site after each gold `eoc`.
+
 ## Experimental Setup
 
 The experiments use tools extracted from the **XLAM** aka. APIGen dataset. A total of 100 tools are used:
@@ -67,6 +109,14 @@ This launcher implements the **TokMem** approach. It performs sequential trainin
   ```bash
   bash scripts/compositional/llama_1b/run_compositional_tokmem_llama_1b.sh
   ```
+
+Single-round maintained launchers for direct comparisons on tools `51-100` live in the same directory:
+
+- `scripts/compositional/llama_1b/tokmem_baseline_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_gate_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_toolmix_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
 
 ### 2. LoRA Baseline
 `scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`
@@ -115,7 +165,7 @@ Maintained runs do not keep:
 - `gpu_monitor.log`
 - `call_count_breakdown` inside `evaluation_results.json`
 
-`training_summary.json` is intentionally compact: it only keeps final per-round average losses such as `avg_total_loss`, `avg_ar_loss`, `avg_eoc_loss`, `avg_tool_loss`, `avg_gate_loss`, and when enabled `avg_toolmix_aux_loss`, `avg_toolmix_prob`, and `toolmix_alpha`. It does not keep step-level or batch-level training traces.
+`training_summary.json` is intentionally compact: it only keeps final per-round average losses such as `avg_total_loss`, `avg_ar_loss`, `avg_eoc_loss`, `avg_tool_loss`, `avg_gate_loss`, and when enabled `avg_toolmix_aux_loss`, `avg_toolmix_prob`, `toolmix_alpha`, and `avg_logit_bias_loss`. Its gate/toolmix probability means follow the same non-`<|eot_id|>` boundary filter used by the batch logs. It does not keep step-level or batch-level training traces.
 
 Passing `--tensorboard` on the maintained TokMem path now saves two static PNG trend plots directly under the run directory after training finishes:
 

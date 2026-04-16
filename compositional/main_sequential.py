@@ -271,6 +271,8 @@ def build_parser():
                         help="Enable the tool-only selection loss inside the training objective")
     parser.add_argument("--use_toolmix", dest="use_toolmix", action="store_true",
                         help="Enable toolmix loss mixing on BOS/EOC boundary states")
+    parser.add_argument("--use_logit_bias", action="store_true",
+                        help="Train an external detached tool prior head and use it as a soft decode-time logit bias")
     parser.add_argument("--eoc_loss_weight", type=float, default=0.1,
                         help="Weight for the eoc boundary loss")
     parser.add_argument("--tool_loss_weight", type=float, default=0.1,
@@ -279,12 +281,18 @@ def build_parser():
                         help="Weight for the gate BCE loss")
     parser.add_argument("--toolmix_loss_weight", type=float, default=0.1,
                         help="Weight for the auxiliary toolmix BCE loss")
+    parser.add_argument("--logit_bias_loss_weight", type=float, default=0.1,
+                        help="Weight for the detached tool-prior CE loss")
     parser.add_argument("--gate_threshold", type=float, default=0.5,
                         help="Threshold for positive gate decisions during decoding")
     parser.add_argument("--gate_network", type=str, default="linear", choices=["mlp", "linear"],
                         help="Routing probe architecture used when --use_gate or --use_toolmix is enabled")
-    parser.add_argument("--probe_from", type=str, default="eoc", choices=["eoc", "tool"],
+    parser.add_argument("--probe_from", type=str, default="tool", choices=["eoc", "tool"],
                         help="Hidden-state source used by the shared routing probe for gate/toolmix")
+    parser.add_argument("--logit_bias_network", type=str, default="linear", choices=["mlp", "linear"],
+                        help="Architecture used by the detached tool prior head")
+    parser.add_argument("--logit_bias_scale", type=float, default=1.0,
+                        help="Multiplier applied to the prior head log-softmax bias at decode time")
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use")
@@ -358,13 +366,21 @@ def validate_args(args, parser):
         parser.error("--use_tool_loss requires --use_eoc")
     if args.use_toolmix and not args.use_eoc:
         parser.error("--use_toolmix requires --use_eoc")
+    if args.use_logit_bias and not args.use_eoc:
+        parser.error("--use_logit_bias requires --use_eoc")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
     if args.epochs is not None and args.epochs <= 0:
         parser.error("--epochs must be positive")
     if not 0.0 <= args.gate_threshold <= 1.0:
         parser.error("--gate_threshold must be in the range [0, 1]")
-    for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight", "toolmix_loss_weight"):
+    for weight_name in (
+        "eoc_loss_weight",
+        "tool_loss_weight",
+        "gate_loss_weight",
+        "toolmix_loss_weight",
+        "logit_bias_loss_weight",
+    ):
         if getattr(args, weight_name) < 0:
             parser.error(f"--{weight_name} must be non-negative")
 
@@ -501,11 +517,16 @@ def main():
     print(f"Gate: {'Enabled' if args.use_gate else 'Disabled'}")
     print(f"JS truncation: {'Enabled' if args.use_js_trunc else 'Disabled'}")
     print(f"Toolmix: {'Enabled' if args.use_toolmix else 'Disabled'}")
+    print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
     if args.use_gate or args.use_toolmix:
         print(f"Routing probe network: {args.gate_network}")
         print(f"Routing probe source: {args.probe_from}")
     if args.use_toolmix:
         print(f"Toolmix loss weight: {args.toolmix_loss_weight}")
+    if args.use_logit_bias:
+        print(f"Logit bias network: {args.logit_bias_network}")
+        print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
+        print(f"Logit bias scale: {args.logit_bias_scale}")
     print(f"Max length: {args.max_length}")
     print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
@@ -643,6 +664,9 @@ def main():
                 gate_threshold=args.gate_threshold,
                 gate_network=args.gate_network,
                 use_toolmix=args.use_toolmix,
+                use_logit_bias=args.use_logit_bias,
+                logit_bias_network=args.logit_bias_network,
+                logit_bias_scale=args.logit_bias_scale,
                 probe_from=args.probe_from,
             )
             model = FunctionCallingModel(**model_kwargs)
@@ -711,6 +735,7 @@ def main():
             use_eoc_loss=args.use_eoc_loss,
             use_gate=args.use_gate,
             use_js_trunc=args.use_js_trunc,
+            use_logit_bias=args.use_logit_bias,
             use_tool_loss=args.use_tool_loss,
             use_toolmix=args.use_toolmix,
             gate_threshold=args.gate_threshold,
@@ -718,6 +743,7 @@ def main():
             tool_loss_weight=args.tool_loss_weight,
             gate_loss_weight=args.gate_loss_weight,
             toolmix_loss_weight=args.toolmix_loss_weight,
+            logit_bias_loss_weight=args.logit_bias_loss_weight,
             plot_history=plot_history,
             plot_step_offset=plot_step_offset,
             plot_round=round_num,
@@ -768,6 +794,7 @@ def main():
                         use_eoc=args.use_eoc,
                         use_gate=args.use_gate,
                         use_js_trunc=args.use_js_trunc,
+                        use_logit_bias=args.use_logit_bias,
                         gate_threshold=args.gate_threshold,
                     )
                 )
@@ -811,6 +838,7 @@ def main():
                                 use_eoc=args.use_eoc,
                                 use_gate=args.use_gate,
                                 use_js_trunc=args.use_js_trunc,
+                                use_logit_bias=args.use_logit_bias,
                                 gate_threshold=args.gate_threshold,
                             )
                         )
@@ -872,6 +900,7 @@ def main():
                 use_eoc=args.use_eoc,
                 use_gate=args.use_gate,
                 use_js_trunc=args.use_js_trunc,
+                use_logit_bias=args.use_logit_bias,
                 gate_threshold=args.gate_threshold,
             )
         )

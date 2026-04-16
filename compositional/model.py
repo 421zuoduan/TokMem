@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -16,6 +17,18 @@ def build_routing_probe(hidden_size, gate_network):
             nn.Linear(hidden_size, 1),
         )
     raise ValueError(f"Unsupported gate_network: {gate_network}")
+
+def build_logit_bias_head(hidden_size, num_tools, network_type):
+    """Build the external prior head used to bias tool-token logits."""
+    if network_type == "linear":
+        return nn.Linear(hidden_size, num_tools)
+    if network_type == "mlp":
+        return nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, num_tools),
+        )
+    raise ValueError(f"Unsupported logit_bias_network: {network_type}")
 
 JS_TRUNCATION_THRESHOLD = 0.6
 
@@ -76,13 +89,15 @@ class FunctionCallingModel(nn.Module):
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
                  decouple_embeddings=False, lora_config=None, use_eoc=False, use_gate=False,
                  gate_threshold=0.5, gate_network="mlp", use_toolmix=False, use_js_trunc=False,
-                 enable_routing_probe=None, probe_from="eoc"):
+                 enable_routing_probe=None, probe_from="eoc", use_logit_bias=False,
+                 logit_bias_network="linear", logit_bias_scale=1.0):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         self.use_eoc = use_eoc
         self.use_gate = use_gate
         self.use_toolmix = use_toolmix
         self.use_js_trunc = use_js_trunc
+        self.use_logit_bias = use_logit_bias
         self.probe_from = probe_from
         self.enable_routing_probe = (
             bool(enable_routing_probe)
@@ -91,6 +106,8 @@ class FunctionCallingModel(nn.Module):
         )
         self.gate_threshold = gate_threshold
         self.gate_network = gate_network
+        self.logit_bias_network = logit_bias_network
+        self.logit_bias_scale = logit_bias_scale
         self.toolmix_alpha = None
         if self.probe_from not in {"eoc", "tool"}:
             raise ValueError(f"Unsupported probe_from: {self.probe_from}")
@@ -104,6 +121,10 @@ class FunctionCallingModel(nn.Module):
             raise ValueError("--use_toolmix requires --use_eoc")
         if self.enable_routing_probe and not self.use_eoc:
             raise ValueError("--enable_routing_probe requires --use_eoc")
+        if self.use_logit_bias and not self.use_eoc:
+            raise ValueError("--use_logit_bias requires --use_eoc")
+        if self.logit_bias_network not in {"linear", "mlp"}:
+            raise ValueError(f"Unsupported logit_bias_network: {self.logit_bias_network}")
 
         self.max_reserved_tokens = 248  # Native Llama reserved_special_token_* count
         self.num_tools = min(num_tools, self.max_reserved_tokens - (1 if self.use_eoc else 0))
@@ -220,6 +241,15 @@ class FunctionCallingModel(nn.Module):
             )
         else:
             self.routing_probe = None
+
+        if self.use_logit_bias:
+            self.logit_bias_head = build_logit_bias_head(
+                self.config.hidden_size,
+                self.num_tools,
+                self.logit_bias_network,
+            ).to(device=device, dtype=original_embeddings.dtype)
+        else:
+            self.logit_bias_head = None
         
         # Tool name mapping
         provided_tool_names = tool_names or [f"tool_{i}" for i in range(self.num_tools)]
@@ -361,20 +391,25 @@ class FunctionCallingModel(nn.Module):
             routing_probe_params = sum(p.numel() for p in self.routing_probe.parameters())
             print(f"Routing probe parameters: {routing_probe_params:,}")
 
+        logit_bias_params = 0
+        if self.logit_bias_head is not None:
+            logit_bias_params = sum(p.numel() for p in self.logit_bias_head.parameters())
+            print(f"Logit bias head parameters: {logit_bias_params:,}")
+
         # Count LoRA parameters if using LoRA
         if self.lora_config:
             lora_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             total_params = sum(p.numel() for p in self.model.parameters())
             print(f"LoRA parameters: {lora_params:,}")
             print(
-                f"Total trainable: {token_params + routing_probe_params + lora_params:,} "
-                f"({(token_params + routing_probe_params + lora_params)/total_params*100:.4f}%)"
+                f"Total trainable: {token_params + routing_probe_params + logit_bias_params + lora_params:,} "
+                f"({(token_params + routing_probe_params + logit_bias_params + lora_params)/total_params*100:.4f}%)"
             )
         else:
             total_params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Total trainable: {token_params + routing_probe_params:,} "
-                f"({(token_params + routing_probe_params)/total_params*100:.4f}%)"
+                f"Total trainable: {token_params + routing_probe_params + logit_bias_params:,} "
+                f"({(token_params + routing_probe_params + logit_bias_params)/total_params*100:.4f}%)"
             )
     
     def forward(self, input_ids, attention_mask, return_hidden_states=False):
@@ -416,6 +451,31 @@ class FunctionCallingModel(nn.Module):
         if self.routing_probe is None:
             return None
         return self.routing_probe(hidden_states).squeeze(-1)
+
+    def _get_logit_bias_scores(self, hidden_states):
+        """Project boundary hidden states to tool-selection logits."""
+        if self.logit_bias_head is None:
+            return None
+        return self.logit_bias_head(hidden_states)
+
+    def _apply_logit_bias_to_logits(self, logits, hidden_states, active_decision_rows):
+        """Add soft tool priors to the active boundary rows of the full-vocab logits."""
+        if self.logit_bias_head is None or not active_decision_rows.any():
+            return logits
+        if hidden_states is None:
+            raise ValueError("Boundary hidden states are required when use_logit_bias is enabled")
+
+        active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
+        tool_logits = self._get_logit_bias_scores(hidden_states[active_indices])
+        tool_log_probs = torch.log_softmax(tool_logits.float(), dim=-1)
+        uniform_tool_log_prob = math.log(max(1, len(self.tool_reserved_token_ids)))
+        tool_bias = (tool_log_probs + uniform_tool_log_prob) * self.logit_bias_scale
+        tool_bias = tool_bias.to(dtype=logits.dtype)
+
+        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=logits.device)
+        logits = logits.clone()
+        logits[active_indices[:, None], tool_token_ids[None, :]] += tool_bias
+        return logits
 
     def _get_gate_scores(self, hidden_states):
         """Backward-compatible wrapper for older analysis utilities."""
@@ -575,6 +635,7 @@ class FunctionCallingModel(nn.Module):
         top_p,
         do_sample,
         gate_threshold=None,
+        tool_selection_logits=None,
     ):
         """Use current-token hidden states to decide whether current tokens must come from the tool vocab."""
         threshold = self.gate_threshold if gate_threshold is None else gate_threshold
@@ -600,7 +661,8 @@ class FunctionCallingModel(nn.Module):
         gate_positive_rows[active_indices] = gate_positive
         if gate_positive.any():
             positive_indices = active_indices[gate_positive]
-            masked_logits = self.mask_logits_to_tool_tokens(next_logits[positive_indices])
+            tool_logits_source = next_logits if tool_selection_logits is None else tool_selection_logits
+            masked_logits = self.mask_logits_to_tool_tokens(tool_logits_source[positive_indices])
             next_tokens = next_tokens.clone()
             next_tokens[positive_indices] = self._sample_next_tokens(
                 masked_logits,
@@ -611,13 +673,23 @@ class FunctionCallingModel(nn.Module):
         return next_tokens, gate_positive_rows
 
     
-    def generate_with_tool_prediction(self, user_tokens, user_mask, tokenizer, 
-                                     max_new_tokens=256, temperature=0.6, top_p=0.9, do_sample=False):
+    def generate_with_tool_prediction(
+        self,
+        user_tokens,
+        user_mask,
+        tokenizer,
+        max_new_tokens=256,
+        temperature=0.6,
+        top_p=0.9,
+        do_sample=False,
+        use_logit_bias=None,
+    ):
         """Generate complete sequence: predict tool, then generate function call"""
         self.eval()
+        resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         with torch.no_grad():
-            if not (self.use_gate or self.use_js_trunc):
+            if not (self.use_gate or self.use_js_trunc or resolved_use_logit_bias):
                 # Use native generation - our overrides make the custom embeddings/logits transparent
                 generated = self.model.generate(
                     input_ids=user_tokens,
@@ -645,18 +717,18 @@ class FunctionCallingModel(nn.Module):
                     outputs = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        output_hidden_states=self.use_js_trunc,
+                        output_hidden_states=self.use_js_trunc or resolved_use_logit_bias,
                         return_dict=True,
                     )
                     next_logits = outputs.logits[:, -1, :]
-                    last_hidden_states = None
+                    last_hidden_states = outputs.hidden_states[-1][:, -1, :] if resolved_use_logit_bias else None
                     hidden_states = outputs.hidden_states if self.use_js_trunc else None
                 else:
                     next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
                         input_ids=step_input_ids,
                         attention_mask=attention_mask,
                         past_key_values=past_key_values,
-                        return_hidden_states=True
+                        return_hidden_states=self.use_gate or self.use_js_trunc or resolved_use_logit_bias
                     )
                 next_logits = next_logits.clone()
 
@@ -667,6 +739,13 @@ class FunctionCallingModel(nn.Module):
                     step=step,
                 )
                 active_decision_rows = decision_context & ~finished
+                selection_logits = next_logits
+                if resolved_use_logit_bias and active_decision_rows.any():
+                    selection_logits = self._apply_logit_bias_to_logits(
+                        logits=next_logits,
+                        hidden_states=last_hidden_states,
+                        active_decision_rows=active_decision_rows,
+                    )
                 if self.use_js_trunc:
                     if active_decision_rows.any():
                         active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
@@ -675,7 +754,7 @@ class FunctionCallingModel(nn.Module):
                         js_positive = js_mean > JS_TRUNCATION_THRESHOLD
                         if js_positive.any():
                             positive_indices = active_indices[js_positive]
-                            next_logits[positive_indices] = self.mask_logits_to_tool_tokens(next_logits[positive_indices])
+                            selection_logits[positive_indices] = self.mask_logits_to_tool_tokens(selection_logits[positive_indices])
                 elif self.use_gate and self.probe_from == "tool":
                     next_tokens, _ = self._sample_with_tool_probe_gate(
                         next_logits=next_logits,
@@ -685,6 +764,7 @@ class FunctionCallingModel(nn.Module):
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample,
+                        tool_selection_logits=selection_logits,
                     )
                 elif self.use_gate and active_decision_rows.any():
                     gate_scores = self._get_routing_probe_scores(last_hidden_states[active_decision_rows])
@@ -692,16 +772,16 @@ class FunctionCallingModel(nn.Module):
                     if gate_positive.any():
                         active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
                         positive_indices = active_indices[gate_positive]
-                        next_logits[positive_indices] = self.mask_logits_to_tool_tokens(next_logits[positive_indices])
+                        selection_logits[positive_indices] = self.mask_logits_to_tool_tokens(selection_logits[positive_indices])
                     next_tokens = self._sample_next_tokens(
-                        next_logits,
+                        selection_logits,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample
                     )
                 else:
                     next_tokens = self._sample_next_tokens(
-                        next_logits,
+                        selection_logits,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample
@@ -734,6 +814,7 @@ class FunctionCallingModel(nn.Module):
         use_js_trunc=None,
         use_eoc=None,
         probe_from=None,
+        use_logit_bias=None,
     ):
         """Generate sequence where predicted tool tokens are replaced with ground truth tool tokens"""
         self.eval()
@@ -743,6 +824,7 @@ class FunctionCallingModel(nn.Module):
         resolved_use_js_trunc = self.use_js_trunc if use_js_trunc is None else use_js_trunc
         resolved_gate_threshold = self.gate_threshold if gate_threshold is None else gate_threshold
         resolved_probe_from = self.probe_from if probe_from is None else probe_from
+        resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         # Convert ground truth tool names to token IDs
         gt_tool_token_ids = []
@@ -755,6 +837,19 @@ class FunctionCallingModel(nn.Module):
                 print(f"Warning: Unknown tool name '{tool_name}', skipping")
         
         with torch.no_grad():
+            if not (resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias):
+                outputs = self.model.generate(
+                    input_ids=user_tokens,
+                    attention_mask=user_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    pad_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                )
+                return self._parse_generated_sequences(outputs, user_tokens, tokenizer)
+
             batch_size = user_tokens.shape[0]
             device = user_tokens.device
             
@@ -772,18 +867,18 @@ class FunctionCallingModel(nn.Module):
                     outputs = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        output_hidden_states=resolved_use_js_trunc,
+                        output_hidden_states=resolved_use_js_trunc or resolved_use_logit_bias,
                         return_dict=True,
                     )
                     logits = outputs.logits[:, -1, :]
-                    last_hidden_states = None
+                    last_hidden_states = outputs.hidden_states[-1][:, -1, :] if resolved_use_logit_bias else None
                     hidden_states = outputs.hidden_states if resolved_use_js_trunc else None
-                elif resolved_use_gate or resolved_use_js_trunc:
+                elif resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
                     logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
                         input_ids=step_input_ids,
                         attention_mask=attention_mask,
                         past_key_values=past_key_values,
-                        return_hidden_states=(resolved_use_gate or resolved_use_js_trunc),
+                        return_hidden_states=(resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias),
                     )
                 else:
                     outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
@@ -802,6 +897,13 @@ class FunctionCallingModel(nn.Module):
 
                 force_ground_truth_rows = torch.zeros(batch_size, dtype=torch.bool, device=device)
                 next_tokens = None
+                selection_logits = logits
+                if resolved_use_logit_bias and (decision_context & ~finished).any():
+                    selection_logits = self._apply_logit_bias_to_logits(
+                        logits=logits,
+                        hidden_states=last_hidden_states,
+                        active_decision_rows=(decision_context & ~finished),
+                    )
                 if resolved_use_js_trunc and (decision_context & ~finished).any():
                     active_indices = (decision_context & ~finished).nonzero(as_tuple=False).squeeze(-1)
                     active_hidden_states = tuple(layer_hidden[active_indices] for layer_hidden in hidden_states)
@@ -818,6 +920,7 @@ class FunctionCallingModel(nn.Module):
                         top_p=top_p,
                         do_sample=do_sample,
                         gate_threshold=resolved_gate_threshold,
+                        tool_selection_logits=selection_logits,
                     )
                 elif resolved_use_gate and (decision_context & ~finished).any():
                     active_indices = (decision_context & ~finished).nonzero(as_tuple=False).squeeze(-1)
@@ -828,7 +931,7 @@ class FunctionCallingModel(nn.Module):
                 # Sample/select next tokens
                 if next_tokens is None:
                     next_tokens = self._sample_next_tokens(
-                        logits,
+                        selection_logits,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample,
@@ -862,7 +965,7 @@ class FunctionCallingModel(nn.Module):
                 # Append new tokens to input_ids and update attention_mask
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device)], dim=-1)
-                if not use_tool_probe and (resolved_use_gate or resolved_use_js_trunc):
+                if not use_tool_probe and (resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias):
                     step_input_ids = next_tokens.unsqueeze(-1)
             
             # Parse the generated sequences
@@ -1020,6 +1123,8 @@ class FunctionCallingModel(nn.Module):
 
         if self.routing_probe is not None:
             embedding_params.extend(list(self.routing_probe.parameters()))
+        if self.logit_bias_head is not None:
+            embedding_params.extend(list(self.logit_bias_head.parameters()))
         
         # Get LoRA parameters if using LoRA
         lora_params = []
@@ -1037,7 +1142,7 @@ class FunctionCallingModel(nn.Module):
         """Load checkpoints with backward compatibility for legacy probe keys."""
         remapped_state_dict = state_dict
         legacy_prefixes = ("toolmix_head.", "gate_mlp.")
-        if any(key.startswith(prefix) for prefix in legacy_prefixes):
+        if any(key.startswith(prefix) for key in state_dict for prefix in legacy_prefixes):
             remapped_state_dict = dict(state_dict)
             for key in list(remapped_state_dict.keys()):
                 for legacy_prefix in legacy_prefixes:

@@ -1,7 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="tokmem_eoc_gate_llama_1b_50tools_${RUN_ID}"
+RUN_NAME="tokmem_eoc_logit_bias_llama_1b_50tools_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"
@@ -10,7 +13,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=7
 
 cd "$ROOT_DIR/compositional"
 
@@ -40,11 +43,12 @@ python -u main_sequential.py \
     --max_length 1024 \
     --seed 42 \
     --tensorboard \
+    --renorm_active_tools \
     --use_eoc \
-    --use_gate \
-    --gate_network linear \
-    --gate_loss_weight 0.1 \
-    --gate_threshold 0.5 \
+    --use_logit_bias \
+    --logit_bias_network linear \
+    --logit_bias_loss_weight 0.1 \
+    --logit_bias_scale 1.0 \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
-    --run_tag "llama_1b_eoc_gate"
+    --run_tag "llama_1b_eoc_logit_bias"

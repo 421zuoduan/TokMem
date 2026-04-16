@@ -11,6 +11,83 @@
 
 ---
 
+## 2026-04-17 补充：`logit bias` 外部 tool selector
+
+当前 `compositional/main_sequential.py` 新增一条与 `gate` / `toolmix` 兼容的方法开关：
+
+- `--use_logit_bias`
+
+相关参数：
+
+- `--logit_bias_network {linear,mlp}`
+- `--logit_bias_loss_weight`
+- `--logit_bias_scale`
+
+### 核心定义
+
+这条方法继续保留显式 `<|eoc_id|>` 边界，并在以下候选边界位提取 boundary hidden state：
+
+1. assistant-start 边界，也就是训练时第一个有效监督 token 之前的位置
+2. 每个 gold `eoc` 位置
+
+推理阶段对应的边界位定义保持一致：
+
+1. 首个生成 token 之前，使用整段 prompt 的最后一个 hidden state
+2. 每个已生成 `eoc` 之后的下一个 token 决策位，使用该 `eoc` 位置 hidden state
+
+这里取的始终是边界 state 本身，语义上与 `probe_from=eoc` 一致；这条分支不读取当前 token 自己的位置 hidden state。
+
+### 训练语义
+
+训练仍是标准 teacher forcing。
+
+在每个候选边界位上：
+
+- 如果下一个 gold token 是普通 token，这个位置只留给 `gate` 的二分类监督
+- 如果下一个 gold token 是 tool token，则：
+  - 取该边界 hidden state
+  - 先做 `detach`
+  - 再送入独立的 `logit_bias_head`
+  - `logit_bias_head` 输出所有 tool token 上的 logits
+  - 用 gold tool id 计算辅助 CE loss
+
+因此，这个辅助 loss 只更新外部 prior head 自己，不穿回 backbone、TokMem memory embeddings 或主生成 CE 路径。
+
+### 推理解码语义
+
+推理时在每个边界位按下面顺序运行：
+
+1. 主模型先给出当前步的全词表 logits
+2. `logit_bias_head` 用当前边界 hidden state 输出 tool-only logits
+3. 在 tool 维度上做 `log_softmax`
+4. 再减去一个均匀 tool prior 的基线项
+5. 乘上 `logit_bias_scale`
+6. 只把这些值加回对应的 tool token logits
+
+因此这条方法实现的是 soft reweighting：
+
+- tool token 之间的相对概率会被外部 selector 显式纠偏
+- 被显式偏好的 tool token 可以相对非 tool 词表被抬高
+- 非 tool token logits 保持原值
+- 整个词表不会被这条分支直接 hard mask
+
+### 与 `gate` / `toolmix` 的关系
+
+- `gate` 继续负责“当前边界后是否应该进入 tool mode”的二分类监督和可选 hard mask
+- `logit bias` 负责“进入 tool token 子空间后，各个 tool token 之间该怎样重加权”
+- `toolmix` 继续在边界位用 shared `routing_probe` 的概率去混合主 CE 和 tool-only CE
+
+三者可以同时开启。当前实现中的解码顺序是：
+
+1. 先算主模型全词表 logits
+2. 如果是 `gate + probe_from=tool`，先用原始 logits 采样临时 token 来做 gate 路由判断
+3. 再加 `logit bias`
+4. 然后运行 `gate` 或 `JS truncation` 的约束分支
+
+这样 `gate` 的路由判定保持独立，`logit bias` 仍然会在 standalone 模式、`JS truncation` 模式，以及 gate 判正后的 tool 子集内部起作用。
+
+---
+
 ## 2026-04-16 补充：`JS truncation` 推理分支
 
 当前 `compositional/main_sequential.py` 额外支持一个 decode-only 开关：

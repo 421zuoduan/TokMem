@@ -556,12 +556,14 @@ def load_checkpoint_bundle(
         key.startswith(("routing_probe.", "gate_mlp.", "toolmix_head."))
         for key in state_dict
     )
+    has_logit_bias_head = any(key.startswith("logit_bias_head.") for key in state_dict)
     use_eoc = bool(run_args.get("use_eoc", False))
     use_gate = bool(run_args.get("use_gate", False))
     use_toolmix = bool(run_args.get("use_toolmix", False))
+    use_logit_bias = bool(run_args.get("use_logit_bias", False))
     probe_from = run_args.get("probe_from", "eoc")
     enable_routing_probe = has_routing_probe or use_gate or use_toolmix
-    if not use_eoc and enable_routing_probe:
+    if not use_eoc and (enable_routing_probe or has_logit_bias_head or use_logit_bias):
         use_eoc = True
     if not use_gate and not use_toolmix and has_routing_probe:
         if any(key.startswith("toolmix_head.") for key in state_dict):
@@ -579,6 +581,14 @@ def load_checkpoint_bundle(
             gate_network = "linear"
     if gate_network is None:
         gate_network = "linear"
+    logit_bias_network = run_args.get("logit_bias_network")
+    if logit_bias_network is None and has_logit_bias_head:
+        if any(key.startswith("logit_bias_head.0.") for key in state_dict):
+            logit_bias_network = "mlp"
+        else:
+            logit_bias_network = "linear"
+    if logit_bias_network is None:
+        logit_bias_network = "linear"
 
     model = FunctionCallingModel(
         model_name=model_name,
@@ -596,6 +606,9 @@ def load_checkpoint_bundle(
         gate_network=gate_network,
         gate_threshold=float(run_args.get("gate_threshold", 0.5)),
         probe_from=probe_from,
+        use_logit_bias=(use_logit_bias or has_logit_bias_head),
+        logit_bias_network=logit_bias_network,
+        logit_bias_scale=float(run_args.get("logit_bias_scale", 1.0)),
     )
     model.load_state_dict(state_dict, strict=True)
     model.to(device)

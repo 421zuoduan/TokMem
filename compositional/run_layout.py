@@ -119,6 +119,11 @@ def build_training_summary_payload(run_name, all_results, experiment_type="tokme
                     "avg_toolmix_aux_loss",
                     metrics.get("use_toolmix", False),
                 ),
+                "avg_logit_bias_loss": _summary_loss_value(
+                    metrics,
+                    "avg_logit_bias_loss",
+                    metrics.get("use_logit_bias", False),
+                ),
                 "avg_toolmix_prob": (
                     metrics.get("avg_toolmix_prob")
                     if metrics.get("use_toolmix", False)
