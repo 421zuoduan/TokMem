@@ -13,7 +13,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=3
 
 cd "$ROOT_DIR/compositional"
 

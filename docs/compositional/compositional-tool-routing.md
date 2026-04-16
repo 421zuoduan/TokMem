@@ -1,4 +1,4 @@
-# Compositional EOC Gate
+# Compositional Tool Routing
 
 ## 说明
 
@@ -154,7 +154,7 @@
 
 默认值：
 
-- `eoc`
+- `tool`
 
 ### `probe_from=eoc`
 
@@ -174,6 +174,8 @@
 - 初始决策位对应首个生成 token 的位置
 - `eoc` 后的决策位对应 `eoc` 后第一个 token 的位置
 - probe 预测目标是“当前 token 是否属于 tool token 词表”
+- 当前 token 可以是 tool token、普通文本 token，或 `<|eot_id|>`
+- 监督标签里只有 tool token 记为 `1`，普通文本 token 和 `<|eot_id|>` 都记为 `0`
 
 训练阶段在 teacher forcing 下使用 gold 序列，因此当前 token 位置的 hidden state 来自 gold token 所在位置。
 
@@ -183,6 +185,8 @@
 - 若 gold 序列片段是 `... <eoc> hello ...`，则 probe 输入取 `hello` 位置 hidden state，target 为 `0`
 
 对 `toolmix` 来说，`probe_from=tool` 只改变 shared probe 读取哪一个 hidden state。混合 loss 仍然作用在当前 token 的 CE 位置。
+
+当前代码里，`gate` 和 `toolmix` 共用的 `routing_probe` 会在进入 probe 前对 hidden state 做 `detach`。这条 routing BCE 监督更新 shared probe 本身；backbone、TokMem memory embeddings 和主自回归路径继续由其他 loss 项塑形。
 
 ### 推理解码语义
 
@@ -458,9 +462,9 @@ loss 使用：
 
 实现约定：
 
-- 默认不 `detach`
-- 即 gate loss 会更新 gate 头
-- 也会通过 hidden state 反传到主模型
+- 当前代码会先对 shared `routing_probe` 的输入 hidden state 做 `detach`
+- gate loss 会更新 gate 头
+- backbone hidden states 与 TokMem memory embeddings 通过主自回归路径、`eoc` loss、tool loss 等其他 active loss 接收梯度
 
 ### 四个 Loss
 

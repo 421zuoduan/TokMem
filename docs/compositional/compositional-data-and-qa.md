@@ -879,6 +879,14 @@ TokMem 训练本身并不是逐条样本把整份 `tools` 列表喂进模型。
 
 它们共同点是：`都不真正执行工具`，主要比较 tool 和 arguments。
 
+`Parse Error Rate` 在当前代码里定义为：
+
+- `parse_errors / total_examples`
+- 其中 `parse_errors` 累加的是 output calls 的解析失败次数
+- 这个值表示每个样本平均会产生多少次 parse error
+- 数值可以大于 `1`
+- 这个统计口径与论文保持一致
+
 ### Q30. adaptation 在 TokMem 的训练过程中有什么作用？
 
 `adaptation` 的作用是一个 compositional warm-up。
@@ -892,4 +900,3 @@ TokMem 训练本身并不是逐条样本把整份 `tools` 列表喂进模型。
 - 再教模型“正式那批 tools 的具体记忆”
 
 在当前 repo 的 TokMem launcher 里，它大致对应第一轮 `1-50:1`；后面 `51-100:3` 更接近正式训练阶段。
-

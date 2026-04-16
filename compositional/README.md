@@ -11,7 +11,7 @@ The sequential TokMem path now separates enabling EOC tokens from adding the EOC
 | Baseline | off | off | off | off | off | Original TokMem decoding and training |
 | EOC token only | on | off | off | off | off | Inserts explicit `eoc` tokens, but does not add EOC loss |
 | EOC loss | on | on | off | off | off | Inserts explicit `eoc` tokens and adds EOC loss |
-| EOC + gate | on | on/off | on | off | off | Uses the shared `routing_probe` for gating; `--probe_from eoc` keeps the original boundary-state behavior and `--probe_from tool` probes the current token state |
+| EOC + gate | on | on/off | on | off | off | Uses the shared `routing_probe` for gating; code default `--probe_from tool` probes the current token state, while `--probe_from eoc` uses the boundary state |
 | EOC + toolmix | on | on/off | on/off | on | off | Uses the shared `routing_probe` on BOS and gold `eoc` decision sites to mix tool-token CE with tool-selection loss; `--probe_from` changes which hidden state feeds that shared probe |
 | EOC + logit bias | on | on/off | on/off | on/off | on | Trains a detached external tool prior on assistant-start and gold-`eoc` boundary states, then adds its tool-only log-probabilities back to the main logits as a soft decode-time bias |
 
@@ -36,7 +36,7 @@ Useful flags:
 - `--logit_bias_loss_weight` default `0.1`
 - `--gate_threshold` default `0.5`
 - `--gate_network` default `linear`, choices: `mlp`, `linear`
-- `--probe_from` default `eoc`, choices: `eoc`, `tool`
+- `--probe_from` default `tool`, choices: `eoc`, `tool`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
 - `--max_length` default `1024`
@@ -44,7 +44,7 @@ Useful flags:
 `--probe_from` applies to the shared `routing_probe` used by both `--use_gate` and `--use_toolmix`:
 
 - `eoc`: keep the current implementation, where the probe reads the boundary token hidden state and predicts whether the next token should be a tool token
-- `tool`: move the probe input to the current token hidden state while keeping the same current-token routing target
+- `tool`: move the probe input to the current token hidden state and predict whether that current token belongs to the tool-token subset; ordinary text tokens and `<|eot_id|>` both map to target `0`
 
 When `--use_toolmix` is enabled, training keeps the existing `eoc` target format and standard teacher forcing, then:
 
@@ -56,6 +56,8 @@ When `--use_toolmix` is enabled, training keeps the existing `eoc` target format
 - computes `toolmix_alpha` automatically as `log(|V|) / log(|T|)` and prints it at training start
 
 When `--use_gate` and `--use_toolmix` are enabled together, they still share one `routing_probe`. Training adds the shared routing BCE once through `--toolmix_loss_weight`. `--gate_loss_weight` applies to the pure gate path.
+
+Training detaches the hidden states before feeding them into the shared `routing_probe`, so the routing BCE updates the probe itself while backbone states, TokMem embeddings, and the main autoregressive path keep their gradients from the other active losses.
 
 Batch logs and `training_summary.json` now compute `GateProb` / `avg_gate_prob` and `ToolmixProb` / `avg_toolmix_prob` after excluding boundary sites whose next gold token is `<|eot_id|>`. The BCE losses still use the full boundary set.
 
@@ -155,7 +157,7 @@ Maintained runs keep the following artifacts:
 - optional `loss_step.png`
 - optional `lr_step.png`
 
-Top-level metrics in `evaluation_results.json`, including `tool_accuracy`, `tool_selection_accuracy`, `arguments_accuracy`, and `full_correctness`, are overall values over the full evaluation set. Per-call-count breakdowns are printed in `evaluation.log`.
+Top-level metrics in `evaluation_results.json`, including `tool_accuracy`, `tool_selection_accuracy`, `arguments_accuracy`, and `full_correctness`, are overall values over the full evaluation set. Per-call-count breakdowns are printed in `evaluation.log`. `parse_error_rate` follows the code path in `training.py` and `lora_sequential.py`: it is `parse_errors / total_examples`, where `parse_errors` counts output-call parse failures, so the value is the average number of parse errors per example and can exceed `1.0`.
 
 Maintained runs do not keep:
 
