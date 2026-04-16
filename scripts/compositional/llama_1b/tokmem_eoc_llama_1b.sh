@@ -40,7 +40,6 @@ python -u main_sequential.py \
     --max_length 1024 \
     --seed 42 \
     --tensorboard \
-    --renorm_active_tools \
     --use_eoc \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
