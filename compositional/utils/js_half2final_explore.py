@@ -559,6 +559,7 @@ def load_checkpoint_bundle(
     use_eoc = bool(run_args.get("use_eoc", False))
     use_gate = bool(run_args.get("use_gate", False))
     use_toolmix = bool(run_args.get("use_toolmix", False))
+    probe_from = run_args.get("probe_from", "eoc")
     enable_routing_probe = has_routing_probe or use_gate or use_toolmix
     if not use_eoc and enable_routing_probe:
         use_eoc = True
@@ -594,6 +595,7 @@ def load_checkpoint_bundle(
         use_gate=use_gate,
         gate_network=gate_network,
         gate_threshold=float(run_args.get("gate_threshold", 0.5)),
+        probe_from=probe_from,
     )
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
@@ -770,22 +772,38 @@ def run_online_generation_capture(
 
         while step < max_new_tokens and not finished:
             logits_to_decode = next_logits.clone()
+            gate_context = previous_generated_token_id == model.eoc_token_id if step > 0 else True
 
-            if model.use_gate:
-                gate_context = previous_generated_token_id == model.eoc_token_id if step > 0 else True
-                if gate_context and previous_generated_token_id != tokenizer.eos_token_id:
+            if model.use_gate and gate_context and previous_generated_token_id != tokenizer.eos_token_id:
+                if getattr(model, "probe_from", "eoc") == "tool":
+                    sampled_token, _ = model._sample_with_tool_probe_gate(
+                        next_logits=next_logits,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        active_decision_rows=torch.ones(1, dtype=torch.bool, device=device),
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                else:
                     last_hidden_states = outputs.hidden_states[-1][:, -1, :]
                     gate_scores = model._get_gate_scores(last_hidden_states)
                     gate_positive = torch.sigmoid(gate_scores) >= model.gate_threshold
                     if gate_positive.item():
                         logits_to_decode = model.mask_logits_to_tool_tokens(logits_to_decode)
-
-            sampled_token = sample_next_tokens(
-                logits=logits_to_decode,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-            )
+                    sampled_token = sample_next_tokens(
+                        logits=logits_to_decode,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+            else:
+                sampled_token = sample_next_tokens(
+                    logits=logits_to_decode,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                )
             sampled_token_id = int(sampled_token.item())
 
             if sampled_token_id == tokenizer.eos_token_id:
@@ -794,6 +812,7 @@ def run_online_generation_capture(
                 break
 
             generated_token_ids.append(sampled_token_id)
+            input_ids = torch.cat([input_ids, sampled_token.unsqueeze(0)], dim=-1)
 
             token_is_format = False
             if sampled_token_id in format_token_ids:

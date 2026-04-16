@@ -283,6 +283,8 @@ def build_parser():
                         help="Threshold for positive gate decisions during decoding")
     parser.add_argument("--gate_network", type=str, default="linear", choices=["mlp", "linear"],
                         help="Routing probe architecture used when --use_gate or --use_toolmix is enabled")
+    parser.add_argument("--probe_from", type=str, default="eoc", choices=["eoc", "tool"],
+                        help="Hidden-state source used by the shared routing probe for gate/toolmix")
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use")
@@ -501,6 +503,7 @@ def main():
     print(f"Toolmix: {'Enabled' if args.use_toolmix else 'Disabled'}")
     if args.use_gate or args.use_toolmix:
         print(f"Routing probe network: {args.gate_network}")
+        print(f"Routing probe source: {args.probe_from}")
     if args.use_toolmix:
         print(f"Toolmix loss weight: {args.toolmix_loss_weight}")
     print(f"Max length: {args.max_length}")
@@ -640,6 +643,7 @@ def main():
                 gate_threshold=args.gate_threshold,
                 gate_network=args.gate_network,
                 use_toolmix=args.use_toolmix,
+                probe_from=args.probe_from,
             )
             model = FunctionCallingModel(**model_kwargs)
             print_model_info(model, f"Model with {total_tools} tool slots")

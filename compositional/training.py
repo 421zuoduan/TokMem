@@ -371,9 +371,10 @@ def build_shift_supervision_masks(shift_labels, model, use_eoc=False, use_gate=F
     }
 
 
-def gather_routing_probe_examples(hidden_states, labels, model, return_indices=False):
+def gather_routing_probe_examples(hidden_states, labels, model, return_indices=False, probe_from=None):
     """Collect boundary hidden states and labels for the next-token tool decision."""
     eoc_token_id = getattr(model, "eoc_token_id", None)
+    resolved_probe_from = getattr(model, "probe_from", "eoc") if probe_from is None else probe_from
     if eoc_token_id is None:
         empty_hidden = hidden_states.new_zeros((0, hidden_states.size(-1)))
         empty_targets = hidden_states.new_zeros((0,), dtype=torch.float32)
@@ -382,7 +383,6 @@ def gather_routing_probe_examples(hidden_states, labels, model, return_indices=F
             return empty_hidden, empty_targets, empty_indices, empty_indices, 0, 0
         return empty_hidden, empty_targets, 0, 0
 
-    shift_hidden_states = hidden_states[:, :-1, :]
     shift_labels = labels[:, 1:]
     valid_mask = shift_labels != -100
 
@@ -402,16 +402,18 @@ def gather_routing_probe_examples(hidden_states, labels, model, return_indices=F
         initial_pos = first_valid_pos
         if (
             initial_pos >= 0
-            and initial_pos < shift_hidden_states.size(1)
+            and initial_pos < shift_labels.size(1)
             and labels[batch_idx, initial_pos].item() == -100
         ):
             next_token_id = int(shift_labels[batch_idx, initial_pos].item())
             if next_token_id != -100:
-                toolmix_hidden_states.append(shift_hidden_states[batch_idx, initial_pos])
-                toolmix_targets.append(1.0 if _is_tool_token_id(next_token_id, model) else 0.0)
-                batch_indices.append(batch_idx)
-                time_indices.append(initial_pos)
-                initial_sites += 1
+                source_pos = initial_pos if resolved_probe_from == "eoc" else initial_pos + 1
+                if source_pos < hidden_states.size(1):
+                    toolmix_hidden_states.append(hidden_states[batch_idx, source_pos])
+                    toolmix_targets.append(1.0 if _is_tool_token_id(next_token_id, model) else 0.0)
+                    batch_indices.append(batch_idx)
+                    time_indices.append(initial_pos)
+                    initial_sites += 1
 
         eoc_positions = torch.nonzero(
             (labels[batch_idx, :-1] == eoc_token_id) & valid_mask[batch_idx],
@@ -421,7 +423,10 @@ def gather_routing_probe_examples(hidden_states, labels, model, return_indices=F
             next_token_id = int(shift_labels[batch_idx, position].item())
             if next_token_id == -100:
                 continue
-            toolmix_hidden_states.append(shift_hidden_states[batch_idx, position])
+            source_pos = position if resolved_probe_from == "eoc" else position + 1
+            if source_pos >= hidden_states.size(1):
+                continue
+            toolmix_hidden_states.append(hidden_states[batch_idx, source_pos])
             toolmix_targets.append(1.0 if _is_tool_token_id(next_token_id, model) else 0.0)
             batch_indices.append(batch_idx)
             time_indices.append(position)

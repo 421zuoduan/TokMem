@@ -64,6 +64,78 @@
 
 ---
 
+## 2026-04-17 补充：`probe_from`
+
+当前 shared `routing_probe` 同时服务于：
+
+- `--use_gate`
+- `--use_toolmix`
+
+新增参数：
+
+- `--probe_from {eoc,tool}`
+
+默认值：
+
+- `eoc`
+
+### `probe_from=eoc`
+
+这条路径保持原有语义：
+
+- probe 输入是边界位置的 hidden state
+- 初始决策位使用首个生成 token 之前的边界 hidden state
+- 后续决策位使用每个 `eoc` 位置的 hidden state
+- probe 预测目标是“下一个 token 是否应该是 tool token”
+
+训练和推理都围绕边界位置展开。
+
+### `probe_from=tool`
+
+这条路径把 probe 输入后移到“当前 token 自己的位置”：
+
+- 初始决策位对应首个生成 token 的位置
+- `eoc` 后的决策位对应 `eoc` 后第一个 token 的位置
+- probe 预测目标是“当前 token 是否属于 tool token 词表”
+
+训练阶段在 teacher forcing 下使用 gold 序列，因此当前 token 位置的 hidden state 来自 gold token 所在位置。
+
+例子：
+
+- 若 gold 序列片段是 `... <eoc> <tool_A> ...`，则 probe 输入取 `<tool_A>` 位置 hidden state，target 为 `1`
+- 若 gold 序列片段是 `... <eoc> hello ...`，则 probe 输入取 `hello` 位置 hidden state，target 为 `0`
+
+对 `toolmix` 来说，`probe_from=tool` 只改变 shared probe 读取哪一个 hidden state。混合 loss 仍然作用在当前 token 的 CE 位置。
+
+### 推理解码语义
+
+`probe_from=tool` 下，模型在自回归解码时按下面的顺序运行：
+
+1. 先从当前步的全词表 logits 得到一个 provisional token
+2. 用这个 provisional token 所在位置的 hidden state 运行 shared probe
+3. 若 probe 判为 tool，则当前 token 改为从 tool token 词表采样
+4. 若 probe 判为普通 token，则当前 token 保持全词表结果
+
+因此，`probe_from=tool` 的核心判断语义是：
+
+- 用当前 token 位置 hidden state
+- 判断当前 token 是否应该进入 tool token 词表
+
+### 训练与推理的关系
+
+`probe_from=tool` 在训练和推理中共享同一个目标定义：
+
+- 当前 token 是否是 tool token
+
+两边的差异在于当前 token 的来源：
+
+- 训练时当前 token 来自 teacher forcing 下的 gold token
+- 推理时当前 token 来自模型当前步的 provisional sample
+
+这个差异来自 decoder-only 自回归生成本身：当前 token 的 hidden state 只能在该 token 已经进入序列后才能得到。
+
+---
+
 ## 原文：2026-04-11-compositional-eoc-gate-design.md
 
 ## Compositional `eoc + gate` 方案设计

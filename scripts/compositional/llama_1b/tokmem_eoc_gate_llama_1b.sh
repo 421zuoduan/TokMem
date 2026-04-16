@@ -47,6 +47,7 @@ python -u main_sequential.py \
     --use_eoc \
     --use_gate \
     --gate_network linear \
+    --probe_from tool\
     --gate_loss_weight 0.1 \
     --gate_threshold 0.5 \
     --run_root_dir "$ROOT_DIR/compositional/runs" \

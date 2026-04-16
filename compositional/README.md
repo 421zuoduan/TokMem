@@ -11,8 +11,8 @@ The sequential TokMem path now separates enabling EOC tokens from adding the EOC
 | Baseline | off | off | off | off | Original TokMem decoding and training |
 | EOC token only | on | off | off | off | Inserts explicit `eoc` tokens, but does not add EOC loss |
 | EOC loss | on | on | off | off | Inserts explicit `eoc` tokens and adds EOC loss |
-| EOC + gate | on | on/off | on | off | Uses `eoc` tokens for gating; EOC loss is only added when `--use_eoc_loss` is on |
-| EOC + toolmix | on | on/off | on/off | on | Uses the shared `routing_probe` on BOS and gold `eoc` states to mix tool-token CE with tool-selection loss while keeping teacher forcing unchanged |
+| EOC + gate | on | on/off | on | off | Uses the shared `routing_probe` for gating; `--probe_from eoc` keeps the original boundary-state behavior and `--probe_from tool` probes the current token state |
+| EOC + toolmix | on | on/off | on/off | on | Uses the shared `routing_probe` on BOS and gold `eoc` decision sites to mix tool-token CE with tool-selection loss; `--probe_from` changes which hidden state feeds that shared probe |
 
 `--use_gate` requires `--use_eoc`.
 `--use_eoc_loss` requires `--use_eoc`.
@@ -32,11 +32,17 @@ Useful flags:
 - `--toolmix_loss_weight` default `0.1`
 - `--gate_threshold` default `0.5`
 - `--gate_network` default `linear`, choices: `mlp`, `linear`
+- `--probe_from` default `eoc`, choices: `eoc`, `tool`
 - `--max_length` default `1024`
+
+`--probe_from` applies to the shared `routing_probe` used by both `--use_gate` and `--use_toolmix`:
+
+- `eoc`: keep the current implementation, where the probe reads the boundary token hidden state and predicts whether the next token should be a tool token
+- `tool`: move the probe input to the current token hidden state while keeping the same current-token routing target
 
 When `--use_toolmix` is enabled, training keeps the existing `eoc` target format and standard teacher forcing, then:
 
-- collects candidate boundary states from BOS and every gold `eoc`
+- collects candidate routing sites from BOS and every gold `eoc`
 - predicts whether the next gold token is a tool token with the shared `routing_probe`
 - adds an auxiliary BCE loss weighted by `--toolmix_loss_weight`
 - replaces the old additive `CE + tool_loss_weight * tool_loss` behavior on gold tool-token positions with
