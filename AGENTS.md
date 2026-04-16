@@ -18,20 +18,20 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 
 - prioritize `compositional/` work, scripts, experiments, and code changes by default
 - start from `compositional/` entrypoints and datasets unless the task is clearly about another track
-- for `compositional/`, treat the primary research direction as end-to-end modeling of whether the next token step should enter tool generation
-- explicitly separate the "should generate a tool now" decision from the "which tool token(s) may be generated" problem when proposing methods, losses, decoding rules, or analysis
-- prefer approaches that constrain tool token generation and selection with explicit structure rather than leaving tool invocation to unconstrained free-form generation
+- for `compositional/`, treat the primary research direction as end-to-end modeling that jointly decides tool-mode entry and constrained tool generation at the current step
+- frame tool use as a current-step joint decision that couples whether to enter tool mode with which tool token(s) remain admissible under explicit structural constraints
+- prefer approaches that apply explicit structure to tool token generation and selection within that current-step joint decision
 - keep `atomic/` workflows and documentation available; they still apply when the user explicitly asks for `atomic/` work
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
 
 More specifically, when working on `compositional/` by default:
 
-- favor end-to-end formulations that learn a gating or routing signal for tool invocation within the main model rather than relying on a separate pipeline stage unless the user explicitly asks for a staged baseline
+- favor end-to-end formulations that learn a joint routing-and-constraint signal for tool invocation and constrained tool-token generation within the main model unless the user explicitly asks for a staged baseline
 - when referring to the `baseline` in `compositional/`, interpret it as the TokMem setting without the adaptation stage; do not treat `baseline` as a non-TokMem method unless the user explicitly says so
-- discuss and evaluate tool use as two coupled but distinct subproblems:
-  1. deciding whether the next generation step should emit a tool call at all
-  2. constraining the admissible tool token generation and tool selection once tool mode is active
-- when adding experiments, analyses, or documentation, make the decoupling between invocation decision and constrained tool-token generation explicit
+- discuss and evaluate tool use as a current-step joint prediction problem with two coupled outputs:
+  1. deciding whether the current generation step enters tool mode
+  2. constraining admissible tool token generation and tool selection within that same step
+- when adding experiments, analyses, or documentation, make the current-step coupling between tool-mode entry and constrained tool-token generation explicit
 
 ## Result Analysis Workflow
 

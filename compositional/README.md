@@ -68,7 +68,23 @@ When `--use_logit_bias` is enabled, training and decoding use a separate externa
 - training detaches each boundary hidden state before sending it into `logit_bias_head`
 - the auxiliary CE runs only on boundary sites whose next gold token is a tool token
 - the auxiliary loss updates only `logit_bias_head`, while backbone, TokMem embeddings, and the main autoregressive path keep their own gradients
-- decoding takes the prior head's tool logits, applies `log_softmax` within the tool subset, subtracts the uniform-tool baseline, scales by `--logit_bias_scale`, and adds the result only to tool-token columns in the full vocabulary logits
+- decoding first turns the prior head output into a probability distribution over tool tokens only: `tool_log_probs = log_softmax(tool_logits)`
+- decoding then recenters that tool-only log-probability against a uniform-tool baseline: `tool_bias = (tool_log_probs + log(K)) * logit_bias_scale`, where `K` is the number of tool tokens
+- decoding finally adds that bias back only to the tool-token columns in the full-vocabulary logits
+
+For a single tool token, the decode-time update is:
+
+`l'_tool = l_tool + alpha * log(K * p_prior(tool | h))`
+
+where `alpha = --logit_bias_scale`.
+
+This means:
+
+- if the external prior assigns a tool higher probability than the uniform-tool baseline `1 / K`, its bias is positive and that tool logit is raised
+- if the external prior assigns a tool lower probability than the uniform-tool baseline `1 / K`, its bias is negative and that tool logit is lowered
+- if the external prior is uniform over tools, the bias is exactly zero, so the main LM logits stay unchanged
+
+This makes the branch a centered soft reweighting over tool tokens. An uninformative prior contributes zero bias, while an informative prior only changes the relative preference among tool tokens and leaves non-tool logits untouched.
 
 `--use_logit_bias` is compatible with `--use_gate` and `--use_toolmix`. The decode order is:
 
@@ -119,6 +135,13 @@ Single-round maintained launchers for direct comparisons on tools `51-100` live 
 - `scripts/compositional/llama_1b/tokmem_eoc_gate_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_toolmix_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
+
+README 汇总复现实验的 maintained launcher:
+
+- `scripts/compositional/llama_1b/run_readme_myself_7settings_llama_1b.sh`
+- `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh`
+
+`run_readme_myself_allmethods_llama_1b.sh` 会在共享数据集上顺序运行 12 个单轮方法，每个方法重复 5 次且统一使用 `seed=42`，运行命令里不传 `--renorm_active_tools`，然后把均值结果写到 `README_MYSELF.md` 的独立新表中。
 
 ### 2. LoRA Baseline
 `scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`

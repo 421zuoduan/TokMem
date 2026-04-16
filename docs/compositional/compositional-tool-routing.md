@@ -59,17 +59,51 @@
 
 1. 主模型先给出当前步的全词表 logits
 2. `logit_bias_head` 用当前边界 hidden state 输出 tool-only logits
-3. 在 tool 维度上做 `log_softmax`
-4. 再减去一个均匀 tool prior 的基线项
-5. 乘上 `logit_bias_scale`
-6. 只把这些值加回对应的 tool token logits
+3. 先在 tool 集合内部做 `log_softmax`，得到外部 prior 对每个 tool 的对数概率
+4. 再用均匀 tool 分布 `1 / K` 做居中，代码等价于 `tool_bias = (tool_log_probs + log(K)) * logit_bias_scale`
+5. 最后只把这些 bias 加回对应的 tool token logits
 
-因此这条方法实现的是 soft reweighting：
+这条分支可以拆成三步理解：
 
-- tool token 之间的相对概率会被外部 selector 显式纠偏
-- 被显式偏好的 tool token 可以相对非 tool 词表被抬高
-- 非 tool token logits 保持原值
-- 整个词表不会被这条分支直接 hard mask
+1. 先把 prior head 的输出变成 tool 上的概率分布
+
+   `tool_log_probs = log_softmax(tool_logits)`
+
+   这里的归一化只发生在 tool 集合内部。它表示在当前边界 hidden state `h` 下，外部 prior 认为各个 tool 的相对概率。
+
+2. 再减去一个“工具均匀随机选”的基线
+
+   均匀分布下每个 tool 的概率是 `1 / K`，所以：
+
+   `log(1 / K) = -log(K)`
+
+   代码里的
+
+   `tool_log_probs + log(K)`
+
+   等价于
+
+   `log(K * p_prior(tool | h))`
+
+   这表示当前这个 tool 的 prior 概率，相比“均匀随机选一个工具”高了多少或低了多少。
+
+3. 再把这个居中的 bias 乘上 `logit_bias_scale`，加回主模型的 tool logits
+
+   对单个 tool token，可以写成：
+
+   `l'_tool = l_tool + alpha * log(K * p_prior(tool | h))`
+
+   其中 `alpha = logit_bias_scale`。
+
+直觉上，这条方法做的是 centered soft reweighting：
+
+- 如果 prior 觉得某个 tool 比平均 tool 更像正确答案，这个 tool 的 bias 为正，对应 logit 被抬高
+- 如果 prior 觉得某个 tool 比平均 tool 更不可能，这个 tool 的 bias 为负，对应 logit 被压低
+- 如果 prior 完全没有信息量，只给均匀分布 `1 / K`，那么 bias 恰好等于 `0`
+
+这个性质很重要：一个没有判断力的 prior 不会扰动主模型。它只在 prior 真正提供了“哪个 tool 更像正确答案”的信息时，才会对 tool token 子空间做重加权。
+
+非 tool token 的 logits 全程保持原值，这条分支也不会直接对全词表做 hard mask。
 
 ### 与 `gate` / `toolmix` 的关系
 

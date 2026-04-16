@@ -32,6 +32,14 @@
 <!-- README_MYSELF_AVG_TABLE_END -->
 
 
+<!-- README_MYSELF_ALLMETHODS_AVG_TABLE_BEGIN -->
+### 全方法 5 次重复运行均值
+
+待运行 `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh` 后自动写入。
+
+<!-- README_MYSELF_ALLMETHODS_AVG_TABLE_END -->
+
+
 脚注：
  
 - `use_eoc` 是添加 eoc token, `use_eoc_loss` 是添加 eoc loss, `use_gate` 是添加 gate 方法（这批均值实验使用 linear gate）, `use_task_loss` 是添加 task loss，`use_toolmix` 是在 loss 上使用 toolmix；其中 task loss 是 tool token 的位置拿词表中的所有 tool token 重新做 softmax，与真实结果做的 ce loss
