@@ -13,19 +13,26 @@ import torch.nn.functional as F
 LOSS_METRIC_ORDER = ("total_loss", "ar_loss", "eoc_loss", "tool_loss", "gate_loss", "toolmix_aux_loss")
 
 
-def _resolve_mode_flags(model, use_eoc=None, use_gate=None, use_eoc_loss=None):
+def _resolve_mode_flags(model, use_eoc=None, use_gate=None, use_eoc_loss=None, use_js_trunc=None):
     resolved_use_eoc = bool(getattr(model, "use_eoc", False) if use_eoc is None else use_eoc)
     resolved_use_gate = bool(getattr(model, "use_gate", False) if use_gate is None else use_gate)
     resolved_use_eoc_loss = bool(
         getattr(model, "use_eoc_loss", False) if use_eoc_loss is None else use_eoc_loss
     )
+    resolved_use_js_trunc = bool(
+        getattr(model, "use_js_trunc", False) if use_js_trunc is None else use_js_trunc
+    )
 
     if resolved_use_gate and not resolved_use_eoc:
         raise ValueError("use_gate=True requires use_eoc=True")
+    if resolved_use_js_trunc and not resolved_use_eoc:
+        raise ValueError("use_js_trunc=True requires use_eoc=True")
+    if resolved_use_gate and resolved_use_js_trunc:
+        raise ValueError("use_gate=True and use_js_trunc=True are mutually exclusive")
     if resolved_use_eoc_loss and not resolved_use_eoc:
         raise ValueError("use_eoc_loss=True requires use_eoc=True")
 
-    return resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss
+    return resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss, resolved_use_js_trunc
 
 
 def _call_method_with_supported_kwargs(method, **kwargs):
@@ -62,6 +69,12 @@ def _metric_value_to_float(value):
     if isinstance(value, torch.Tensor):
         return float(value.detach().item())
     return float(value)
+
+
+def _average_probability(probabilities, default=0.0):
+    if probabilities is None or probabilities.numel() == 0:
+        return float(default)
+    return float(probabilities.detach().mean().item())
 
 
 def _build_loss_metrics(total_loss, ar_loss, extra_loss_metrics=None):
@@ -467,6 +480,7 @@ def _generate_results(
     user_tokens,
     user_mask,
     use_gate=False,
+    use_js_trunc=False,
     use_eoc=False,
     gate_threshold=0.5,
     use_ground_truth_tools=False,
@@ -510,6 +524,7 @@ def _generate_results(
         "do_sample": do_sample,
         "gate_threshold": gate_threshold,
         "use_gate": use_gate,
+        "use_js_trunc": use_js_trunc,
         "use_eoc": use_eoc,
     }
     if ground_truth_tools is not None:
@@ -522,7 +537,7 @@ def _generate_results(
 
     raise AttributeError(
         f"Model {type(model).__name__} does not expose a compatible generation method "
-        f"for use_gate={use_gate}, use_ground_truth_tools={use_ground_truth_tools}."
+        f"for use_gate={use_gate}, use_js_trunc={use_js_trunc}, use_ground_truth_tools={use_ground_truth_tools}."
     )
 
 
@@ -547,6 +562,7 @@ def _generate_results_with_example_fallback(
     raw_examples,
     batch_idx,
     use_gate,
+    use_js_trunc,
     use_eoc,
     gate_threshold,
     use_ground_truth_tools,
@@ -568,6 +584,7 @@ def _generate_results_with_example_fallback(
                     single_input,
                     single_mask,
                     use_gate=use_gate,
+                    use_js_trunc=use_js_trunc,
                     use_eoc=use_eoc,
                     gate_threshold=gate_threshold,
                     use_ground_truth_tools=True,
@@ -590,6 +607,7 @@ def _generate_results_with_example_fallback(
             input_ids,
             attention_mask,
             use_gate=use_gate,
+            use_js_trunc=use_js_trunc,
             use_eoc=use_eoc,
             gate_threshold=gate_threshold,
             use_ground_truth_tools=False,
@@ -612,6 +630,7 @@ def _generate_results_with_example_fallback(
                     single_input,
                     single_mask,
                     use_gate=use_gate,
+                    use_js_trunc=use_js_trunc,
                     use_eoc=use_eoc,
                     gate_threshold=gate_threshold,
                     use_ground_truth_tools=False,
@@ -653,6 +672,7 @@ def train_native_function_calling_model(
     renorm_active_rows=False,
     use_eoc=None,
     use_gate=None,
+    use_js_trunc=None,
     use_eoc_loss=False,
     use_tool_loss=False,
     use_toolmix=False,
@@ -670,11 +690,12 @@ def train_native_function_calling_model(
     from transformers import get_linear_schedule_with_warmup
 
     model.train()
-    resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss = _resolve_mode_flags(
+    resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss, resolved_use_js_trunc = _resolve_mode_flags(
         model,
         use_eoc,
         use_gate,
         use_eoc_loss,
+        use_js_trunc,
     )
     resolved_use_toolmix = bool(
         getattr(model, "use_toolmix", False)
@@ -739,7 +760,8 @@ def train_native_function_calling_model(
     print(
         "Mode: "
         f"use_eoc={resolved_use_eoc}, use_eoc_loss={resolved_use_eoc_loss}, "
-        f"use_gate={resolved_use_gate}, use_tool_loss={use_tool_loss}, use_toolmix={resolved_use_toolmix}, "
+        f"use_gate={resolved_use_gate}, use_js_trunc={resolved_use_js_trunc}, "
+        f"use_tool_loss={use_tool_loss}, use_toolmix={resolved_use_toolmix}, "
         f"eoc_loss_weight={eoc_loss_weight}, tool_loss_weight={tool_loss_weight}, "
         f"gate_loss_weight={gate_loss_weight}, toolmix_loss_weight={toolmix_loss_weight}, "
         f"gate_threshold={gate_threshold}"
@@ -780,6 +802,7 @@ def train_native_function_calling_model(
     total_gate_positions = 0
     total_gate_initial_positions = 0
     total_gate_eoc_positions = 0
+    total_gate_prob_sum = 0.0
     total_toolmix_positions = 0
     total_toolmix_initial_positions = 0
     total_toolmix_eoc_positions = 0
@@ -797,6 +820,7 @@ def train_native_function_calling_model(
     window_eoc_positions = 0
     window_tool_positions = 0
     window_gate_positions = 0
+    window_gate_prob_sum = 0.0
     window_toolmix_positions = 0
     window_toolmix_prob_sum = 0.0
     window_toolmix_mixed_loss_sum = 0.0
@@ -1075,6 +1099,11 @@ def train_native_function_calling_model(
             total_gate_positions += int(gate_targets.numel()) if (resolved_use_gate and gate_targets is not None) else 0
             total_gate_initial_positions += gate_initial_count if resolved_use_gate else 0
             total_gate_eoc_positions += gate_eoc_count if resolved_use_gate else 0
+            if resolved_use_gate and gate_prob is not None:
+                gate_prob_count = int(gate_prob.numel())
+                gate_prob_sum = _average_probability(gate_prob) * gate_prob_count
+                total_gate_prob_sum += gate_prob_sum
+                window_gate_prob_sum += gate_prob_sum
             total_toolmix_positions += toolmix_count
             total_toolmix_initial_positions += toolmix_initial_count
             total_toolmix_eoc_positions += toolmix_eoc_count
@@ -1110,6 +1139,11 @@ def train_native_function_calling_model(
 
                 window_denom = max(1, window_batches)
                 window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
+                window_avg_gate_prob = (
+                    window_gate_prob_sum / window_gate_positions
+                    if window_gate_positions > 0
+                    else 0.0
+                )
                 tool_loss_fragment = ""
                 if "tool_loss" in window_avg_metrics:
                     tool_loss_fragment = f"Tool: {window_avg_metrics['tool_loss']:.4f}, "
@@ -1151,6 +1185,7 @@ def train_native_function_calling_model(
                     f"{tool_loss_fragment}"
                     f"{toolmix_fragment}"
                     f"Gate: {window_avg_metrics.get('gate_loss', 0.0):.4f}, "
+                    f"GateProb: {window_avg_gate_prob:.4f}, "
                     f"Sites(valid/eoc/tool/gate/toolmix): {window_valid_positions}/{window_eoc_positions}/"
                     f"{window_tool_positions}/{window_gate_positions}/{window_toolmix_positions}, "
                     f"{lr_info}"
@@ -1162,6 +1197,7 @@ def train_native_function_calling_model(
                 window_eoc_positions = 0
                 window_tool_positions = 0
                 window_gate_positions = 0
+                window_gate_prob_sum = 0.0
                 window_toolmix_positions = 0
                 window_toolmix_prob_sum = 0.0
                 window_toolmix_mixed_loss_sum = 0.0
@@ -1177,6 +1213,11 @@ def train_native_function_calling_model(
     avg_eoc_loss = avg_loss_metrics.get("eoc_loss", default_inactive_avg)
     avg_tool_loss = avg_loss_metrics.get("tool_loss", default_inactive_avg)
     avg_gate_loss = avg_loss_metrics.get("gate_loss", default_inactive_avg)
+    avg_gate_prob = (
+        total_gate_prob_sum / total_gate_positions
+        if total_gate_positions > 0
+        else default_inactive_avg
+    )
     avg_toolmix_aux_loss = avg_loss_metrics.get("toolmix_aux_loss", default_inactive_avg)
     avg_toolmix_prob = (
         total_toolmix_prob_sum / total_toolmix_positions
@@ -1208,6 +1249,7 @@ def train_native_function_calling_model(
         print(f"Average Tool loss:  {avg_tool_loss:.4f}")
     if resolved_use_gate:
         print(f"Average Gate loss:   {avg_gate_loss:.4f}")
+        print(f"Average Gate prob:   {avg_gate_prob:.4f}")
     if resolved_use_toolmix:
         print(f"Average Toolmix aux loss: {avg_toolmix_aux_loss:.4f}")
         print(f"Toolmix alpha: {toolmix_alpha:.6f}")
@@ -1235,6 +1277,7 @@ def train_native_function_calling_model(
         "avg_eoc_loss": avg_eoc_loss,
         "avg_tool_loss": avg_tool_loss,
         "avg_gate_loss": avg_gate_loss,
+        "avg_gate_prob": avg_gate_prob,
         "avg_toolmix_aux_loss": avg_toolmix_aux_loss,
         "avg_toolmix_prob": avg_toolmix_prob,
         "avg_mixed_tool_loss": avg_mixed_tool_loss,
@@ -1253,6 +1296,7 @@ def train_native_function_calling_model(
         "use_eoc": resolved_use_eoc,
         "use_eoc_loss": resolved_use_eoc_loss,
         "use_gate": resolved_use_gate,
+        "use_js_trunc": resolved_use_js_trunc,
         "use_tool_loss": use_tool_loss,
         "use_toolmix": resolved_use_toolmix,
         "avg_loss_metrics": avg_loss_metrics,
@@ -1269,17 +1313,25 @@ def demo_native_function_calling(
     use_ground_truth_tools=False,
     use_eoc=None,
     use_gate=None,
+    use_js_trunc=None,
     gate_threshold=0.5,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
-    resolved_use_eoc, resolved_use_gate, _ = _resolve_mode_flags(model, use_eoc, use_gate)
+    resolved_use_eoc, resolved_use_gate, _, resolved_use_js_trunc = _resolve_mode_flags(
+        model,
+        use_eoc,
+        use_gate,
+        use_js_trunc=use_js_trunc,
+    )
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     ground_truth_gate_active = use_ground_truth_tools and resolved_use_gate and _ground_truth_gate_supported(model)
     if resolved_use_gate and (not use_ground_truth_tools or ground_truth_gate_active):
         mode_desc += " + gate"
     elif use_ground_truth_tools and resolved_use_gate:
         mode_desc += " (gate bypassed by ground-truth tool forcing)"
+    if resolved_use_js_trunc:
+        mode_desc += " + JS trunc"
 
     print(f"\n=== Native Function Calling Demo ({mode_desc}) ===")
     print(f"Testing on {len(test_examples)} held-out examples")
@@ -1309,6 +1361,7 @@ def demo_native_function_calling(
             user_tokens["input_ids"],
             user_tokens["attention_mask"],
             use_gate=resolved_use_gate,
+            use_js_trunc=resolved_use_js_trunc,
             use_eoc=resolved_use_eoc,
             gate_threshold=gate_threshold,
             use_ground_truth_tools=use_ground_truth_tools,
@@ -1323,6 +1376,8 @@ def demo_native_function_calling(
             mode_line += " + gate"
         elif use_ground_truth_tools and resolved_use_gate:
             mode_line += " (gate bypassed by ground-truth tool forcing)"
+        if resolved_use_js_trunc:
+            mode_line += " + JS trunc"
         print(f"Mode: {mode_line}")
 
         result = results[0]
@@ -1357,6 +1412,7 @@ def eval_native_function_calling(
     use_ground_truth_tools=False,
     use_eoc=None,
     use_gate=None,
+    use_js_trunc=None,
     gate_threshold=0.5,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
@@ -1364,7 +1420,12 @@ def eval_native_function_calling(
     import time
 
     model.eval()
-    resolved_use_eoc, resolved_use_gate, _ = _resolve_mode_flags(model, use_eoc, use_gate)
+    resolved_use_eoc, resolved_use_gate, _, resolved_use_js_trunc = _resolve_mode_flags(
+        model,
+        use_eoc,
+        use_gate,
+        use_js_trunc=use_js_trunc,
+    )
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
@@ -1373,6 +1434,8 @@ def eval_native_function_calling(
         mode_desc += " + gate"
     elif use_ground_truth_tools and resolved_use_gate:
         mode_desc += " (gate bypassed by ground-truth tool forcing)"
+    if resolved_use_js_trunc:
+        mode_desc += " + JS trunc"
 
     print(f"\n=== Native Function Calling Evaluation ({mode_desc}) ===")
     print(f"Evaluating on {total_examples} test examples")
@@ -1428,6 +1491,7 @@ def eval_native_function_calling(
             raw_examples=batch["raw_data"],
             batch_idx=batch_idx,
             use_gate=resolved_use_gate,
+            use_js_trunc=resolved_use_js_trunc,
             use_eoc=resolved_use_eoc,
             gate_threshold=gate_threshold,
             use_ground_truth_tools=use_ground_truth_tools,

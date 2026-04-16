@@ -253,9 +253,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
         
         # Split training data for validation
         if validation_split > 0:
-            # Set random seed for reproducible splits
             random.seed(random_seed)
-            
+
             # Shuffle data indices
             full_data = full_train_dataset.data.copy()
             random.shuffle(full_data)

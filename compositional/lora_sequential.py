@@ -27,6 +27,18 @@ from run_layout import (
 )
 
 
+def set_random_seed(seed):
+    """Seed Python, NumPy, and Torch RNGs for reproducible LoRA runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def collate_fn(batch):
     """Custom collate function to handle variable length sequences with left padding"""
     # Extract components
@@ -127,7 +139,14 @@ class FunctionCallingDataset(Dataset):
         }
 
 
-def create_lora_dataloader(train_data_path, test_data_path, tokenizer, batch_size=4, max_length=512, eval_batch_size=32):
+def create_lora_dataloader(
+    train_data_path,
+    test_data_path,
+    tokenizer,
+    batch_size=4,
+    max_length=512,
+    eval_batch_size=32,
+):
     """Create dataloaders for LoRA training"""
     
     # Create datasets
@@ -135,13 +154,23 @@ def create_lora_dataloader(train_data_path, test_data_path, tokenizer, batch_siz
     test_dataset = FunctionCallingDataset(test_data_path, tokenizer, max_length, "eval")
     
     # Create dataloaders with collate_fn
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+    )
     test_dataloader = DataLoader(test_dataset, batch_size=eval_batch_size, shuffle=False, collate_fn=collate_fn)
     
     return train_dataloader, test_dataloader
 
 
-def create_mixed_dataloader_with_replay(train_dataset, replay_buffer, batch_size, replay_ratio):
+def create_mixed_dataloader_with_replay(
+    train_dataset,
+    replay_buffer,
+    batch_size,
+    replay_ratio,
+):
     """
     Create a dataloader that mixes new training samples with replay samples.
     
@@ -177,7 +206,12 @@ def create_mixed_dataloader_with_replay(train_dataset, replay_buffer, batch_size
     
     if not replay_samples or replay_ratio == 0.0:
         # No replay samples, return regular dataloader
-        return DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        return DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
     
     # Create mixed dataset
     mixed_dataset = MixedDataset(train_dataset, replay_samples, replay_ratio)
@@ -205,7 +239,12 @@ def create_mixed_dataloader_with_replay(train_dataset, replay_buffer, batch_size
         # Use original collate function
         return collate_fn(combined_batch)
     
-    return DataLoader(mixed_dataset, batch_size=batch_size, shuffle=True, collate_fn=mixed_collate_fn)
+    return DataLoader(
+        mixed_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=mixed_collate_fn,
+    )
 
 
 def train_lora_model(model, train_dataloader, num_epochs=3, lr=5e-4, device="cuda"):
@@ -680,6 +719,8 @@ def main():
                         help="Optional tag appended to the generated run name")
     
     args = parser.parse_args()
+
+    set_random_seed(args.seed)
     
     # Setup simple logging
     import sys
@@ -768,16 +809,6 @@ def main():
         "test_max_function_calls_per_round"
     )
 
-    # Set random seeds
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
     # Set dtype
     if args.dtype == "float16":
         dtype = torch.float16
@@ -922,7 +953,10 @@ def main():
             # Get the train dataset from the dataloader
             train_dataset = train_dataloader.dataset
             train_dataloader = create_mixed_dataloader_with_replay(
-                train_dataset, replay_buffer, args.batch_size, args.replay_ratio
+                train_dataset,
+                replay_buffer,
+                args.batch_size,
+                args.replay_ratio,
             )
         
         # Store test dataloader for cumulative evaluation

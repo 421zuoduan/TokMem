@@ -109,6 +109,11 @@ def build_training_summary_payload(run_name, all_results, experiment_type="tokme
                     "avg_gate_loss",
                     metrics.get("use_gate", False),
                 ),
+                "avg_gate_prob": (
+                    metrics.get("avg_gate_prob")
+                    if metrics.get("use_gate", False)
+                    else None
+                ),
                 "avg_toolmix_aux_loss": _summary_loss_value(
                     metrics,
                     "avg_toolmix_aux_loss",

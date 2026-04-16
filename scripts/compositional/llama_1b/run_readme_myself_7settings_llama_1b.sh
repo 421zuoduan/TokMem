@@ -37,7 +37,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=4
 export HF_HOME="$HF_CACHE_DIR"
 export HF_DATASETS_CACHE="$HF_CACHE_DIR/datasets"
 export HUGGINGFACE_HUB_CACHE="$HF_CACHE_DIR/hub"

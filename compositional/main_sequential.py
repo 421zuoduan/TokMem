@@ -7,11 +7,11 @@ Supports multiple rounds of training with different tool sets.
 import argparse
 import inspect
 import random
+import os
 import numpy as np
 import torch
 from transformers import AutoTokenizer
 import json
-import os
 import logging
 
 from model import FunctionCallingModel, print_model_info
@@ -265,6 +265,8 @@ def build_parser():
                         help="Add eoc loss on top of the eoc-enabled training targets")
     parser.add_argument("--use_gate", action="store_true",
                         help="Enable gate supervision and gate-controlled decoding")
+    parser.add_argument("--use_js_trunc", action="store_true",
+                        help="Enable JS truncation decode-only routing at decision positions")
     parser.add_argument("--use_tool_loss", action="store_true",
                         help="Enable the tool-only selection loss inside the training objective")
     parser.add_argument("--use_toolmix", dest="use_toolmix", action="store_true",
@@ -344,6 +346,10 @@ def build_parser():
 def validate_args(args, parser):
     if args.use_gate and not args.use_eoc:
         parser.error("--use_gate requires --use_eoc")
+    if args.use_js_trunc and not args.use_eoc:
+        parser.error("--use_js_trunc requires --use_eoc")
+    if args.use_gate and args.use_js_trunc:
+        parser.error("--use_gate and --use_js_trunc are mutually exclusive")
     if args.use_eoc_loss and not args.use_eoc:
         parser.error("--use_eoc_loss requires --use_eoc")
     if args.use_tool_loss and not args.use_eoc:
@@ -365,6 +371,17 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     validate_args(args, parser)
+
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # Setup simple logging
     import sys
@@ -465,16 +482,6 @@ def main():
         "test_max_function_calls_per_round"
     )
     
-    # Set random seeds
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
     # Set dtype
     if args.dtype == "float16":
         dtype = torch.float16
@@ -490,6 +497,7 @@ def main():
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
     print(f"EOC loss: {'Enabled' if args.use_eoc and args.use_eoc_loss else 'Disabled'}")
     print(f"Gate: {'Enabled' if args.use_gate else 'Disabled'}")
+    print(f"JS truncation: {'Enabled' if args.use_js_trunc else 'Disabled'}")
     print(f"Toolmix: {'Enabled' if args.use_toolmix else 'Disabled'}")
     if args.use_gate or args.use_toolmix:
         print(f"Routing probe network: {args.gate_network}")
@@ -628,6 +636,7 @@ def main():
                 lora_config=lora_config,
                 use_eoc=args.use_eoc,
                 use_gate=args.use_gate,
+                use_js_trunc=args.use_js_trunc,
                 gate_threshold=args.gate_threshold,
                 gate_network=args.gate_network,
                 use_toolmix=args.use_toolmix,
@@ -697,6 +706,7 @@ def main():
             use_eoc=args.use_eoc,
             use_eoc_loss=args.use_eoc_loss,
             use_gate=args.use_gate,
+            use_js_trunc=args.use_js_trunc,
             use_tool_loss=args.use_tool_loss,
             use_toolmix=args.use_toolmix,
             gate_threshold=args.gate_threshold,
@@ -753,6 +763,7 @@ def main():
                         use_ground_truth_tools=args.use_ground_truth_tools,
                         use_eoc=args.use_eoc,
                         use_gate=args.use_gate,
+                        use_js_trunc=args.use_js_trunc,
                         gate_threshold=args.gate_threshold,
                     )
                 )
@@ -795,6 +806,7 @@ def main():
                                 use_ground_truth_tools=args.use_ground_truth_tools,
                                 use_eoc=args.use_eoc,
                                 use_gate=args.use_gate,
+                                use_js_trunc=args.use_js_trunc,
                                 gate_threshold=args.gate_threshold,
                             )
                         )
@@ -855,6 +867,7 @@ def main():
                 use_ground_truth_tools=args.use_ground_truth_tools,
                 use_eoc=args.use_eoc,
                 use_gate=args.use_gate,
+                use_js_trunc=args.use_js_trunc,
                 gate_threshold=args.gate_threshold,
             )
         )

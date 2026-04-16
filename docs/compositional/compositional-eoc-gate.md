@@ -11,6 +11,59 @@
 
 ---
 
+## 2026-04-16 补充：`JS truncation` 推理分支
+
+当前 `compositional/main_sequential.py` 额外支持一个 decode-only 开关：
+
+- `--use_js_trunc`
+
+这个开关表示在推理阶段用 layer-to-final JS divergence 做 tool 决策位截断，训练 loss 与 teacher forcing 路径保持不变。
+
+### 适用前提
+
+- `use_eoc=true`
+- `use_js_trunc=true`
+- `use_gate=false`
+
+`use_gate` 和 `use_js_trunc` 表示两条互斥的推理分支：
+
+- `gate` 分支用 routing probe 的概率做决策
+- `JS truncation` 分支用当前步各层到最终层的 JS 散度均值做决策
+
+### 决策位定义
+
+`JS truncation` 只在以下位置触发：
+
+1. 第一个生成 token 之前的初始决策位
+2. 每个 `eoc` token 之后的下一个 token 决策位
+
+其余位置继续正常全词表生成，不做 tool-only 截断。
+
+### JS 判定规则
+
+在某个决策位上：
+
+1. 取该位置所有层的 hidden states
+2. 用模型自己的 `lm_head` / output embeddings 做 logit lens 投影
+3. 计算每一层分布相对最终层分布的 JS divergence
+4. 对整条 layer-wise JS curve 取均值
+
+若这个均值 `> 0.6`，则当前步进入 tool mode：
+
+- 当前 token 的 logits 只保留 tool token 词表
+- 当前 token 只能从 tool token 集合中选出
+
+若均值 `<= 0.6`，则当前步保持普通全词表解码。
+
+### 与原始 `eoc + gate` 方案的关系
+
+- 两个方案共享同一组决策位定义
+- `gate` 分支学习一个显式 routing probe
+- `JS truncation` 分支直接利用模型内部层间分布收敛程度做 tool 决策
+- 两者都把“是否进入 tool mode”和“进入后只在 tool token 集合内选择”分开处理
+
+---
+
 ## 原文：2026-04-11-compositional-eoc-gate-design.md
 
 ## Compositional `eoc + gate` 方案设计
@@ -23,51 +76,66 @@
 
 - 在每个 memory-controlled span 结束时显式生成一个 `eoc` token
 - 使用一个 gate 头预测“当前位置之后的下一个 token 是否应该是 tool token”
+- 使用一个 decode-only 的 JS truncation 分支，在决策位置把候选分布截断到 tool token 子集
 - 训练阶段严格保持标准 teacher forcing
-- 推理阶段仅在 gate 为正类时启用 tool-only decoding
+- 推理阶段将 gate 和 JS truncation 作为两条互斥的 tool-only decode branch
 - 保留原始 TokMem 训练与推理路径，便于做对比实验
 
 本次设计只围绕以下机制展开：
 
 - `eoc`
 - gate
+- JS truncation
 - gate 正类时的 tool-only decoding
 
 不引入 adaptation、routing/steering split、tool content encoder 等其他方法。
 
-### 三组实验设置
+### 四组实验设置
 
 通过两个布尔开关控制：
 
 - `--use_eoc`
 - `--use_gate`
+- `--use_js_trunc`
 
 默认都为 `false`。
 
-支持三组实验：
+支持四组实验：
 
 1. 原始 TokMem baseline
    - `use_eoc=false`
    - `use_gate=false`
+   - `use_js_trunc=false`
    - 训练与推理都回到原始全词表自回归生成
 
 2. `eoc` only
    - `use_eoc=true`
    - `use_gate=false`
+   - `use_js_trunc=false`
    - 训练引入显式 `eoc` 边界与辅助 loss
    - 推理仍是原始全词表自回归生成
 
 3. 完整 `eoc + gate`
    - `use_eoc=true`
    - `use_gate=true`
+   - `use_js_trunc=false`
    - 训练加入 gate 辅助监督
    - 推理时 gate 控制是否启用 tool-only decoding
+
+4. `eoc + JS truncation`
+   - `use_eoc=true`
+   - `use_gate=false`
+   - `use_js_trunc=true`
+   - 训练保持当前 teacher forcing loss
+   - 推理时在决策位置使用 JS truncation 截断候选分布
 
 非法组合：
 
 - `use_eoc=false, use_gate=true`
+- `use_eoc=false, use_js_trunc=true`
+- `use_gate=true, use_js_trunc=true`
 
-该组合直接报错，因为 gate 的后续触发点定义依赖 `eoc`。
+这些组合直接报错，因为 gate 与 JS truncation 的决策位置定义都依赖 `eoc`，且两者各自代表一条互斥 decode branch。
 
 ### 当前实现基线
 
@@ -394,6 +462,21 @@ L_total = L_ar + 0.1 * L_eoc + 0.1 * L_tool + 0.1 * L_gate
 - gate 正类时触发 tool-only decoding
 - gate 负类时只是“不加约束”
 
+#### `use_js_trunc=true`
+
+`use_js_trunc` 也是一条 decode-only branch。它和 gate 共享同一组决策位置：
+
+1. 开始生成第一个 token 之前
+2. 模型已经生成出 `eoc` 之后
+
+当前实现先从 hidden states 序列计算 JS score，再在决策位置上判断是否进入 tool-only truncation：
+
+- JS score 高于阈值时，只保留 tool token 集合中的 logits
+- JS score 低于阈值时，保持原始全词表生成
+
+当前代码里的正类阈值是 `0.6`。  
+这个分支只改变解码方式，不引入训练时路径控制。
+
 #### Tool-only decoding 的采样细节
 
 正类 gate 时：
@@ -489,7 +572,8 @@ L_total = L_ar + 0.1 * L_eoc + 0.1 * L_tool + 0.1 * L_gate
 因此：
 
 - 验证 / 测试不会改变模型实际训练结果
-- 但在 `use_gate=true` 时，评测生成路径会使用 gate 控制，以匹配真实推理设置
+- 在 `use_gate=true` 时，评测生成路径会使用 gate 控制，以匹配真实推理设置
+- 在 `use_js_trunc=true` 时，评测生成路径会使用 JS truncation 控制，以匹配真实推理设置
 
 ### CLI 设计
 
@@ -497,6 +581,7 @@ L_total = L_ar + 0.1 * L_eoc + 0.1 * L_tool + 0.1 * L_gate
 
 - `--use_eoc`
 - `--use_gate`
+- `--use_js_trunc`
 - `--eoc_loss_weight`，默认 `0.1`
 - `--tool_loss_weight`，默认 `0.1`
 - `--gate_loss_weight`，默认 `0.1`
@@ -510,6 +595,7 @@ L_total = L_ar + 0.1 * L_eoc + 0.1 * L_tool + 0.1 * L_gate
 
 - 不显式传 `--use_eoc` 时，不使用 `eoc`
 - 不显式传 `--use_gate` 时，不使用 gate
+- 不显式传 `--use_js_trunc` 时，不使用 JS truncation
 
 ### 代码落点
 
@@ -1129,4 +1215,3 @@ In the final summary, explicitly state:
 - smoke checks run
 - whether a full training run was performed
 - whether GPU-backed end-to-end training remains unverified
-
