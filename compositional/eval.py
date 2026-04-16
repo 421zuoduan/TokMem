@@ -1,6 +1,7 @@
 import ast
 import json
 import re
+from collections import Counter
 from typing import List, Union, Dict, Any, Tuple
 from dataclasses import dataclass
 
@@ -236,6 +237,51 @@ def extract_tool_names(calls: List[Union[str, Dict]]) -> List[str]:
     
     return tool_names
 
+
+def extract_tool_argument_pairs(calls: List[Union[str, Dict]]) -> List[Tuple[str, str]]:
+    """Extract comparable (tool_name, normalized_args) pairs from function calls."""
+    pairs = []
+
+    for call in calls:
+        parsed_call = parse_function_call(call)
+        if _is_parse_error_payload(parsed_call):
+            continue
+        if not isinstance(parsed_call, dict) or len(parsed_call) != 1:
+            continue
+
+        func_name, params = next(iter(parsed_call.items()))
+        try:
+            normalized_args = json.dumps(params, sort_keys=True, separators=(',', ':'))
+        except (TypeError, ValueError):
+            normalized_args = str(params)
+        pairs.append((func_name, normalized_args))
+
+    return pairs
+
+
+def calculate_argument_accuracy(output_calls: List[Union[str, Dict]],
+                                target_calls: List[Union[str, Dict]]) -> Dict[str, float]:
+    """Calculate how often gold tool calls also get the full argument payload correct."""
+    output_counter = Counter(extract_tool_argument_pairs(output_calls))
+    target_counter = Counter(extract_tool_argument_pairs(target_calls))
+
+    matched_arguments = 0
+    for pair, target_count in target_counter.items():
+        matched_arguments += min(target_count, output_counter.get(pair, 0))
+
+    total_target_arguments = sum(target_counter.values())
+    arguments_accuracy = (
+        matched_arguments / total_target_arguments
+        if total_target_arguments > 0
+        else 1.0
+    )
+
+    return {
+        "arguments_accuracy": arguments_accuracy,
+        "matched_arguments": matched_arguments,
+        "total_target_arguments": total_target_arguments,
+    }
+
 def calculate_tool_selection_accuracy(output_calls: List[Union[str, Dict]], 
                                     target_calls: List[Union[str, Dict]]) -> Dict[str, float]:
     """Calculate nuanced tool selection accuracy metrics"""
@@ -282,4 +328,3 @@ def calculate_tool_selection_accuracy(output_calls: List[Union[str, Dict]],
         'missing_tools': list(target_tool_set - output_tool_set),
         'extra_tools': list(output_tool_set - target_tool_set)
     }
-

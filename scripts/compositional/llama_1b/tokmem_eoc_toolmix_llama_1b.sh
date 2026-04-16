@@ -1,10 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="tokmem_wo_adapt_llama_1b_50tools_${RUN_ID}"
+RUN_NAME="tokmem_eoc_toolmix_llama_1b_50tools_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"
@@ -13,7 +10,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES=5
 
 cd "$ROOT_DIR/compositional"
 
@@ -44,6 +41,10 @@ python -u main_sequential.py \
     --seed 42 \
     --tensorboard \
     --renorm_active_tools \
+    --use_eoc \
+    --use_toolmix \
+    --toolmix_loss_weight 0.1 \
+    --gate_network linear \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
-    --run_tag "llama_1b"
+    --run_tag "llama_1b_eoc_toolmix"

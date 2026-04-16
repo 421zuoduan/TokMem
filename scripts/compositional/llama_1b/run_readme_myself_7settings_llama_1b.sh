@@ -37,7 +37,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES=6
 export HF_HOME="$HF_CACHE_DIR"
 export HF_DATASETS_CACHE="$HF_CACHE_DIR/datasets"
 export HUGGINGFACE_HUB_CACHE="$HF_CACHE_DIR/hub"
@@ -124,7 +124,7 @@ for setting_entry in "${SETTINGS[@]}"; do
             cmd+=(--use_tool_loss --tool_loss_weight "$tool_loss_weight")
         fi
         if [[ "$use_gate" == "1" ]]; then
-            cmd+=(--use_gate --gate_network linear --gate_loss_weight "$gate_loss_weight" --gate_threshold 0.5)
+            cmd+=(--use_gate --gate_loss_weight "$gate_loss_weight" --gate_threshold 0.5)
         fi
 
         echo "Running setting $setting_id ($mode) trial $trial_index with seed $seed"

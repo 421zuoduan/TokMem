@@ -5,8 +5,8 @@ from peft import LoraConfig, get_peft_model, TaskType
 import json
 
 
-def build_gate_head(hidden_size, gate_network):
-    """Build the configurable gate head used for gated decoding."""
+def build_routing_probe(hidden_size, gate_network):
+    """Build the configurable routing probe used for boundary decisions."""
     if gate_network == "linear":
         return nn.Linear(hidden_size, 1)
     if gate_network == "mlp":
@@ -57,15 +57,27 @@ class FunctionCallingModel(nn.Module):
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
                  decouple_embeddings=False, lora_config=None, use_eoc=False, use_gate=False,
-                 gate_threshold=0.5, gate_network="mlp"):
+                 gate_threshold=0.5, gate_network="mlp", use_toolmix=False,
+                 enable_routing_probe=None):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         self.use_eoc = use_eoc
         self.use_gate = use_gate
+        self.use_toolmix = use_toolmix
+        self.enable_routing_probe = (
+            bool(enable_routing_probe)
+            if enable_routing_probe is not None
+            else (self.use_gate or self.use_toolmix)
+        )
         self.gate_threshold = gate_threshold
         self.gate_network = gate_network
+        self.toolmix_alpha = None
         if self.use_gate and not self.use_eoc:
             raise ValueError("--use_gate requires --use_eoc")
+        if self.use_toolmix and not self.use_eoc:
+            raise ValueError("--use_toolmix requires --use_eoc")
+        if self.enable_routing_probe and not self.use_eoc:
+            raise ValueError("--enable_routing_probe requires --use_eoc")
 
         self.max_reserved_tokens = 248  # Native Llama reserved_special_token_* count
         self.num_tools = min(num_tools, self.max_reserved_tokens - (1 if self.use_eoc else 0))
@@ -175,13 +187,13 @@ class FunctionCallingModel(nn.Module):
             self.trainable_tool_input_embeddings = self.trainable_tool_embeddings
             self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
 
-        if self.use_gate:
-            self.gate_mlp = build_gate_head(self.config.hidden_size, self.gate_network).to(
+        if self.enable_routing_probe:
+            self.routing_probe = build_routing_probe(self.config.hidden_size, self.gate_network).to(
                 device=device,
                 dtype=original_embeddings.dtype,
             )
         else:
-            self.gate_mlp = None
+            self.routing_probe = None
         
         # Tool name mapping
         provided_tool_names = tool_names or [f"tool_{i}" for i in range(self.num_tools)]
@@ -318,20 +330,26 @@ class FunctionCallingModel(nn.Module):
             token_params = self.trainable_tool_embeddings.numel()
             print(f"Tokenized memory parameters: {token_params:,} (shared)")
 
-        gate_params = 0
-        if self.gate_mlp is not None:
-            gate_params = sum(p.numel() for p in self.gate_mlp.parameters())
-            print(f"Gate parameters: {gate_params:,}")
-        
+        routing_probe_params = 0
+        if self.routing_probe is not None:
+            routing_probe_params = sum(p.numel() for p in self.routing_probe.parameters())
+            print(f"Routing probe parameters: {routing_probe_params:,}")
+
         # Count LoRA parameters if using LoRA
         if self.lora_config:
             lora_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             total_params = sum(p.numel() for p in self.model.parameters())
             print(f"LoRA parameters: {lora_params:,}")
-            print(f"Total trainable: {token_params + gate_params + lora_params:,} ({(token_params + gate_params + lora_params)/total_params*100:.4f}%)")
+            print(
+                f"Total trainable: {token_params + routing_probe_params + lora_params:,} "
+                f"({(token_params + routing_probe_params + lora_params)/total_params*100:.4f}%)"
+            )
         else:
             total_params = sum(p.numel() for p in self.model.parameters())
-            print(f"Total trainable: {token_params + gate_params:,} ({(token_params + gate_params)/total_params*100:.4f}%)")
+            print(
+                f"Total trainable: {token_params + routing_probe_params:,} "
+                f"({(token_params + routing_probe_params)/total_params*100:.4f}%)"
+            )
     
     def forward(self, input_ids, attention_mask, return_hidden_states=False):
         """
@@ -367,11 +385,15 @@ class FunctionCallingModel(nn.Module):
         masked_logits[..., tool_token_ids] = logits[..., tool_token_ids]
         return masked_logits
 
-    def _get_gate_scores(self, hidden_states):
-        """Project hidden states to scalar gate logits."""
-        if self.gate_mlp is None:
+    def _get_routing_probe_scores(self, hidden_states):
+        """Project hidden states to scalar routing-probe logits."""
+        if self.routing_probe is None:
             return None
-        return self.gate_mlp(hidden_states).squeeze(-1)
+        return self.routing_probe(hidden_states).squeeze(-1)
+
+    def _get_gate_scores(self, hidden_states):
+        """Backward-compatible wrapper for older analysis utilities."""
+        return self._get_routing_probe_scores(hidden_states)
 
     def _sample_next_tokens(self, logits, temperature=0.6, top_p=0.9, do_sample=False):
         """Sample or decode greedily from a batch of logits."""
@@ -466,7 +488,7 @@ class FunctionCallingModel(nn.Module):
 
                 active_gate_rows = gate_context & ~finished
                 if active_gate_rows.any():
-                    gate_scores = self._get_gate_scores(last_hidden_states[active_gate_rows])
+                    gate_scores = self._get_routing_probe_scores(last_hidden_states[active_gate_rows])
                     gate_positive = torch.sigmoid(gate_scores) >= self.gate_threshold
                     if gate_positive.any():
                         active_indices = active_gate_rows.nonzero(as_tuple=False).squeeze(-1)
@@ -713,8 +735,8 @@ class FunctionCallingModel(nn.Module):
         else:
             embedding_params.append(self.trainable_tool_embeddings)
 
-        if self.gate_mlp is not None:
-            embedding_params.extend(list(self.gate_mlp.parameters()))
+        if self.routing_probe is not None:
+            embedding_params.extend(list(self.routing_probe.parameters()))
         
         # Get LoRA parameters if using LoRA
         lora_params = []
@@ -727,5 +749,21 @@ class FunctionCallingModel(nn.Module):
             # Return all parameters combined (backward compatibility)
             all_params = embedding_params + lora_params
             return all_params
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load checkpoints with backward compatibility for legacy probe keys."""
+        remapped_state_dict = state_dict
+        legacy_prefixes = ("toolmix_head.", "gate_mlp.")
+        if any(key.startswith(prefix) for prefix in legacy_prefixes):
+            remapped_state_dict = dict(state_dict)
+            for key in list(remapped_state_dict.keys()):
+                for legacy_prefix in legacy_prefixes:
+                    if not key.startswith(legacy_prefix):
+                        continue
+                    mapped_key = f"routing_probe.{key[len(legacy_prefix):]}"
+                    remapped_state_dict.setdefault(mapped_key, remapped_state_dict[key])
+                    del remapped_state_dict[key]
+                    break
+        return super().load_state_dict(remapped_state_dict, strict=strict)
     
  

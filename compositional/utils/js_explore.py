@@ -479,6 +479,34 @@ def load_checkpoint_bundle(
 
     from compositional.model import FunctionCallingModel
 
+    state_dict = checkpoint_payload["model_state_dict"]
+    has_routing_probe = any(
+        key.startswith(("routing_probe.", "gate_mlp.", "toolmix_head."))
+        for key in state_dict
+    )
+    use_eoc = bool(run_args.get("use_eoc", False))
+    use_gate = bool(run_args.get("use_gate", False))
+    use_toolmix = bool(run_args.get("use_toolmix", False))
+    enable_routing_probe = has_routing_probe or use_gate or use_toolmix
+    if not use_eoc and enable_routing_probe:
+        use_eoc = True
+    if not use_gate and not use_toolmix and has_routing_probe:
+        if any(key.startswith("toolmix_head.") for key in state_dict):
+            use_toolmix = True
+        elif any(key.startswith("gate_mlp.") for key in state_dict):
+            use_gate = True
+    gate_network = run_args.get("gate_network")
+    if gate_network is None and has_routing_probe:
+        if any(
+            key.startswith(("routing_probe.0.", "gate_mlp.0.", "toolmix_head.0."))
+            for key in state_dict
+        ):
+            gate_network = "mlp"
+        else:
+            gate_network = "linear"
+    if gate_network is None:
+        gate_network = "linear"
+
     model = FunctionCallingModel(
         model_name=model_name,
         num_tools=len(tool_names),
@@ -488,11 +516,14 @@ def load_checkpoint_bundle(
         dtype=dtype,
         decouple_embeddings=bool(run_args.get("decouple_embeddings", False)),
         lora_config=resolve_lora_config(run_args),
-        use_eoc=bool(run_args.get("use_eoc", False)),
-        use_gate=bool(run_args.get("use_gate", False)),
+        enable_routing_probe=enable_routing_probe,
+        use_toolmix=use_toolmix,
+        use_eoc=use_eoc,
+        use_gate=use_gate,
+        gate_network=gate_network,
         gate_threshold=float(run_args.get("gate_threshold", 0.5)),
     )
-    model.load_state_dict(checkpoint_payload["model_state_dict"], strict=True)
+    model.load_state_dict(state_dict, strict=True)
     model.to(device)
     model.eval()
 

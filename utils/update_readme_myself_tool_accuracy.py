@@ -6,7 +6,9 @@ from pathlib import Path
 
 
 TRIAL_DIR_PATTERN = re.compile(r"setting(?P<setting>\d+)_trial(?P<trial>\d+)")
-TOOL_ACCURACY_PATTERN = re.compile(r"Tool Prediction Accuracy:\s*(?P<value>\d+(?:\.\d+)?)")
+TOOL_ACCURACY_PATTERN = re.compile(
+    r"Tool (?:Prediction|Selection) Accuracy:\s*(?P<value>\d+(?:\.\d+)?)"
+)
 AVG_TABLE_PATTERN = re.compile(
     r"(?P<prefix><!-- README_MYSELF_AVG_TABLE_BEGIN -->.*?\n)"
     r"(?P<body>.*?)"

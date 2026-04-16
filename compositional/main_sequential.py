@@ -267,17 +267,20 @@ def build_parser():
                         help="Enable gate supervision and gate-controlled decoding")
     parser.add_argument("--use_tool_loss", action="store_true",
                         help="Enable the tool-only selection loss inside the training objective")
+    parser.add_argument("--use_toolmix", dest="use_toolmix", action="store_true",
+                        help="Enable toolmix loss mixing on BOS/EOC boundary states")
     parser.add_argument("--eoc_loss_weight", type=float, default=0.1,
                         help="Weight for the eoc boundary loss")
     parser.add_argument("--tool_loss_weight", type=float, default=0.1,
                         help="Weight for the tool-only selection loss")
     parser.add_argument("--gate_loss_weight", type=float, default=0.1,
                         help="Weight for the gate BCE loss")
+    parser.add_argument("--toolmix_loss_weight", type=float, default=0.1,
+                        help="Weight for the auxiliary toolmix BCE loss")
     parser.add_argument("--gate_threshold", type=float, default=0.5,
                         help="Threshold for positive gate decisions during decoding")
-    parser.add_argument("--gate_network", type=str, default="mlp", choices=["mlp", "linear"],
-                        help="Gate head architecture used when --use_gate is enabled")
-    
+    parser.add_argument("--gate_network", type=str, default="linear", choices=["mlp", "linear"],
+                        help="Routing probe architecture used when --use_gate or --use_toolmix is enabled")
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use")
@@ -345,13 +348,15 @@ def validate_args(args, parser):
         parser.error("--use_eoc_loss requires --use_eoc")
     if args.use_tool_loss and not args.use_eoc:
         parser.error("--use_tool_loss requires --use_eoc")
+    if args.use_toolmix and not args.use_eoc:
+        parser.error("--use_toolmix requires --use_eoc")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
     if args.epochs is not None and args.epochs <= 0:
         parser.error("--epochs must be positive")
     if not 0.0 <= args.gate_threshold <= 1.0:
         parser.error("--gate_threshold must be in the range [0, 1]")
-    for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight"):
+    for weight_name in ("eoc_loss_weight", "tool_loss_weight", "gate_loss_weight", "toolmix_loss_weight"):
         if getattr(args, weight_name) < 0:
             parser.error(f"--{weight_name} must be non-negative")
 
@@ -485,8 +490,11 @@ def main():
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
     print(f"EOC loss: {'Enabled' if args.use_eoc and args.use_eoc_loss else 'Disabled'}")
     print(f"Gate: {'Enabled' if args.use_gate else 'Disabled'}")
-    if args.use_gate:
-        print(f"Gate network: {args.gate_network}")
+    print(f"Toolmix: {'Enabled' if args.use_toolmix else 'Disabled'}")
+    if args.use_gate or args.use_toolmix:
+        print(f"Routing probe network: {args.gate_network}")
+    if args.use_toolmix:
+        print(f"Toolmix loss weight: {args.toolmix_loss_weight}")
     print(f"Max length: {args.max_length}")
     print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
@@ -622,6 +630,7 @@ def main():
                 use_gate=args.use_gate,
                 gate_threshold=args.gate_threshold,
                 gate_network=args.gate_network,
+                use_toolmix=args.use_toolmix,
             )
             model = FunctionCallingModel(**model_kwargs)
             print_model_info(model, f"Model with {total_tools} tool slots")
@@ -689,10 +698,12 @@ def main():
             use_eoc_loss=args.use_eoc_loss,
             use_gate=args.use_gate,
             use_tool_loss=args.use_tool_loss,
+            use_toolmix=args.use_toolmix,
             gate_threshold=args.gate_threshold,
             eoc_loss_weight=args.eoc_loss_weight,
             tool_loss_weight=args.tool_loss_weight,
             gate_loss_weight=args.gate_loss_weight,
+            toolmix_loss_weight=args.toolmix_loss_weight,
             plot_history=plot_history,
             plot_step_offset=plot_step_offset,
             plot_round=round_num,
