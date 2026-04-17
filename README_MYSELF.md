@@ -40,6 +40,20 @@
 <!-- README_MYSELF_ALLMETHODS_AVG_TABLE_END -->
 
 
+<!-- README_MYSELF_LOGIT_BIAS_METHODS_AVG_TABLE_BEGIN -->
+### Logit Bias 方法 5 次重复运行均值
+
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.730 | 0.909 | 0.760 | 0.512 | 0.468 |
+| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.724 | 0.907 | 0.757 | 0.504 | 0.388 |
+
+- 自动生成自 `compositional/runs/readme_myself_logit_bias_methods_llama_1b_20260417_032945`。
+- 5 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 5 次的均值。
+- 默认 `gate_network=linear`、`probe_from=tool`，辅助 loss weight 统一使用默认值 `0.1`。
+<!-- README_MYSELF_LOGIT_BIAS_METHODS_AVG_TABLE_END -->
+
+
 脚注：
  
 - `use_eoc` 是添加 eoc token, `use_eoc_loss` 是添加 eoc loss, `use_gate` 是添加 gate 方法（这批均值实验使用 linear gate）, `use_task_loss` 是添加 task loss，`use_toolmix` 是在 loss 上使用 toolmix；其中 task loss 是 tool token 的位置拿词表中的所有 tool token 重新做 softmax，与真实结果做的 ce loss

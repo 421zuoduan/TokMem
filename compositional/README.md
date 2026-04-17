@@ -44,7 +44,7 @@ Useful flags:
 `--probe_from` applies to the shared `routing_probe` used by both `--use_gate` and `--use_toolmix`:
 
 - `eoc`: keep the current implementation, where the probe reads the boundary token hidden state and predicts whether the next token should be a tool token
-- `tool`: move the probe input to the current token hidden state and predict whether that current token belongs to the tool-token subset; ordinary text tokens and `<|eot_id|>` both map to target `0`
+- `tool`: move the probe input to the current token hidden state and predict whether that current token belongs to the tool-token subset; ordinary text tokens and `<|eot_id|>` both map to target `0`. During decoding this current-token state now comes from a cached single-token forward off the boundary cache, so `probe_from=tool` no longer reruns the whole prefix just to read that hidden state
 
 When `--use_toolmix` is enabled, training keeps the existing `eoc` target format and standard teacher forcing, then:
 
@@ -89,7 +89,7 @@ This makes the branch a centered soft reweighting over tool tokens. An uninforma
 `--use_logit_bias` is compatible with `--use_gate` and `--use_toolmix`. The decode order is:
 
 1. compute full-vocab logits
-2. if `--use_gate --probe_from tool` is active, sample the provisional routing token from the raw logits first
+2. if `--use_gate --probe_from tool` is active, sample the provisional routing token from the raw logits first, then run one cached single-token forward to read that token's hidden state for the shared probe
 3. add the soft tool-only bias on boundary rows for standalone sampling, JS truncation, and any post-gate tool-only resampling
 4. run any existing gate or JS truncation masking logic
 
@@ -140,8 +140,20 @@ README 汇总复现实验的 maintained launcher:
 
 - `scripts/compositional/llama_1b/run_readme_myself_7settings_llama_1b.sh`
 - `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh`
+- `scripts/compositional/llama_1b/run_readme_myself_logit_bias_methods_llama_1b.sh`
 
 `run_readme_myself_allmethods_llama_1b.sh` 会在共享数据集上顺序运行 12 个单轮方法，每个方法重复 5 次且统一使用 `seed=42`，运行命令里不传 `--renorm_active_tools`，然后把均值结果写到 `README_MYSELF.md` 的独立新表中。
+
+`run_readme_myself_logit_bias_methods_llama_1b.sh` 会在同一份共享数据集上顺序运行 `11|eoc+logit_bias|1|0|0|0|0|0|1` 和 `12|eoc+gate+logit_bias|1|1|0|0|0|0|1` 这两个单轮方法，每个方法重复 5 次且统一使用 `seed=42`，运行命令里不传 `--renorm_active_tools`，然后把均值结果写到 `README_MYSELF.md` 的独立新表中；表头与 allmethods 表一致，方便直接复制到全方法表里。
+
+如果 `run_readme_myself_allmethods_llama_1b.sh` 或 `run_readme_myself_logit_bias_methods_llama_1b.sh` 仍在运行，但你想先汇总已经完成的 trial，可以单独运行：
+
+```bash
+python compositional/utils/summarize_readme_myself_runs.py \
+  --run-dir compositional/runs/readme_myself_allmethods_llama_1b_<timestamp>
+```
+
+默认会在对应 run 目录下写出 `comparison_summary.partial.md`。这个文件直接使用和 `README_MYSELF.md` 目标区块一致的表头，只统计已经写出 `evaluation_results.json` 的 trial，适合手动复制回 `README_MYSELF.md`。
 
 ### 2. LoRA Baseline
 `scripts/compositional/llama_1b/run_compositional_lora_llama_1b.sh`

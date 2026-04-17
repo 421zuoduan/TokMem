@@ -1,3 +1,4 @@
+import copy
 import math
 import torch
 import torch.nn as nn
@@ -593,19 +594,39 @@ class FunctionCallingModel(nn.Module):
             decision_context = input_ids[:, -1] == self.eoc_token_id
         return decision_context
 
-    def _get_current_token_hidden_states(self, input_ids, attention_mask, current_tokens, active_indices):
-        """Obtain hidden states for accepted current tokens via a full-sequence forward pass."""
+    def _select_past_key_values(self, past_key_values, active_indices):
+        """Clone and batch-select cache rows for probe-only forwards."""
+        if past_key_values is None:
+            return None
+
+        selected_cache = copy.deepcopy(past_key_values)
+        if hasattr(selected_cache, "batch_select_indices"):
+            selected_cache.batch_select_indices(active_indices)
+            return selected_cache
+
+        if isinstance(selected_cache, tuple):
+            selected_layers = []
+            for layer_cache in selected_cache:
+                selected_entries = []
+                for cache_tensor in layer_cache:
+                    if torch.is_tensor(cache_tensor):
+                        selected_entries.append(cache_tensor.index_select(0, active_indices))
+                    else:
+                        selected_entries.append(cache_tensor)
+                selected_layers.append(tuple(selected_entries))
+            return tuple(selected_layers)
+
+        raise TypeError(f"Unsupported past_key_values type: {type(past_key_values)}")
+
+    def _get_current_token_hidden_states(self, attention_mask, current_tokens, active_indices, past_key_values):
+        """Obtain hidden states for accepted current tokens via a cached single-token forward."""
         if active_indices.numel() == 0:
             return torch.zeros(
                 (0, self.config.hidden_size),
-                device=input_ids.device,
+                device=current_tokens.device,
                 dtype=self.trainable_tool_input_embeddings.dtype,
             )
 
-        probe_input_ids = torch.cat(
-            [input_ids[active_indices], current_tokens[active_indices].unsqueeze(-1)],
-            dim=-1,
-        )
         probe_attention_mask = torch.cat(
             [
                 attention_mask[active_indices],
@@ -617,9 +638,12 @@ class FunctionCallingModel(nn.Module):
             ],
             dim=-1,
         )
+        probe_past_key_values = self._select_past_key_values(past_key_values, active_indices)
         probe_outputs = self.model(
-            input_ids=probe_input_ids,
+            input_ids=current_tokens[active_indices].unsqueeze(-1),
             attention_mask=probe_attention_mask,
+            past_key_values=probe_past_key_values,
+            use_cache=True,
             output_hidden_states=True,
             return_dict=True,
         )
@@ -628,9 +652,9 @@ class FunctionCallingModel(nn.Module):
     def _sample_with_tool_probe_gate(
         self,
         next_logits,
-        input_ids,
         attention_mask,
         active_decision_rows,
+        past_key_values,
         temperature,
         top_p,
         do_sample,
@@ -651,10 +675,10 @@ class FunctionCallingModel(nn.Module):
             return next_tokens, gate_positive_rows
 
         probe_hidden_states = self._get_current_token_hidden_states(
-            input_ids=input_ids,
             attention_mask=attention_mask,
             current_tokens=next_tokens,
             active_indices=active_indices,
+            past_key_values=past_key_values,
         )
         gate_scores = self._get_routing_probe_scores(probe_hidden_states)
         gate_positive = torch.sigmoid(gate_scores) >= threshold
@@ -712,24 +736,12 @@ class FunctionCallingModel(nn.Module):
             past_key_values = None
 
             for step in range(max_new_tokens):
-                use_tool_probe = self.use_gate and self.probe_from == "tool"
-                if use_tool_probe:
-                    outputs = self.model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=self.use_js_trunc or resolved_use_logit_bias,
-                        return_dict=True,
-                    )
-                    next_logits = outputs.logits[:, -1, :]
-                    last_hidden_states = outputs.hidden_states[-1][:, -1, :] if resolved_use_logit_bias else None
-                    hidden_states = outputs.hidden_states if self.use_js_trunc else None
-                else:
-                    next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
-                        input_ids=step_input_ids,
-                        attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        return_hidden_states=self.use_gate or self.use_js_trunc or resolved_use_logit_bias
-                    )
+                next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
+                    input_ids=step_input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    return_hidden_states=self.use_gate or self.use_js_trunc or resolved_use_logit_bias
+                )
                 next_logits = next_logits.clone()
 
                 decision_context = self._build_decision_context(
@@ -758,9 +770,9 @@ class FunctionCallingModel(nn.Module):
                 elif self.use_gate and self.probe_from == "tool":
                     next_tokens, _ = self._sample_with_tool_probe_gate(
                         next_logits=next_logits,
-                        input_ids=input_ids,
                         attention_mask=attention_mask,
                         active_decision_rows=active_decision_rows,
+                        past_key_values=past_key_values,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample,
@@ -793,8 +805,7 @@ class FunctionCallingModel(nn.Module):
                 finished = finished | (next_tokens == tokenizer.eos_token_id)
                 if finished.all():
                     break
-                if not use_tool_probe:
-                    step_input_ids = next_tokens.unsqueeze(-1)
+                step_input_ids = next_tokens.unsqueeze(-1)
             
             # Parse the generated sequences
             return self._parse_generated_sequences(input_ids, user_tokens, tokenizer)
@@ -862,18 +873,7 @@ class FunctionCallingModel(nn.Module):
             tool_replacement_count = [0] * batch_size  # Track how many tools replaced per example
             
             for step in range(max_new_tokens):
-                use_tool_probe = resolved_use_gate and resolved_probe_from == "tool"
-                if use_tool_probe:
-                    outputs = self.model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=resolved_use_js_trunc or resolved_use_logit_bias,
-                        return_dict=True,
-                    )
-                    logits = outputs.logits[:, -1, :]
-                    last_hidden_states = outputs.hidden_states[-1][:, -1, :] if resolved_use_logit_bias else None
-                    hidden_states = outputs.hidden_states if resolved_use_js_trunc else None
-                elif resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
+                if resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
                     logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
                         input_ids=step_input_ids,
                         attention_mask=attention_mask,
@@ -913,9 +913,9 @@ class FunctionCallingModel(nn.Module):
                 elif resolved_use_gate and resolved_probe_from == "tool":
                     next_tokens, force_ground_truth_rows = self._sample_with_tool_probe_gate(
                         next_logits=logits,
-                        input_ids=input_ids,
                         attention_mask=attention_mask,
                         active_decision_rows=(decision_context & ~finished),
+                        past_key_values=past_key_values,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample,
@@ -965,7 +965,7 @@ class FunctionCallingModel(nn.Module):
                 # Append new tokens to input_ids and update attention_mask
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device)], dim=-1)
-                if not use_tool_probe and (resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias):
+                if resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
                     step_input_ids = next_tokens.unsqueeze(-1)
             
             # Parse the generated sequences
