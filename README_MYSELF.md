@@ -35,8 +35,24 @@
 <!-- README_MYSELF_ALLMETHODS_AVG_TABLE_BEGIN -->
 ### 全方法 5 次重复运行均值
 
-待运行 `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh` 后自动写入。
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | × | × | × | × | 0.597 | 0.842 | 0.676 | 0.412 | 0.988 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | × | × | × | × | 0.646 | 0.872 | 0.713 | 0.463 | 1.887 |
+| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × | × | × | × | 0.599 | 0.856 | 0.678 | 0.419 | 2.718 |
+| `4` | eoc-only+eoc_loss | 3 | 0.005 | √ | × | √ | × | × | × | × | 0.641 | 0.862 | 0.709 | 0.445 | 0.440 |
+| `5` | eoc+gate+eoc_loss | 3 | 0.005 | √ | √ | √ | × | × | × | × | 0.613 | 0.855 | 0.692 | 0.432 | 0.741 |
+| `6` | eoc-only+eoc_loss+tool_loss | 3 | 0.005 | √ | × | √ | √ | × | × | × | 0.660 | 0.885 | 0.688 | 0.433 | 2.194 |
+| `7` | eoc+gate+eoc_loss+tool_loss | 3 | 0.005 | √ | √ | √ | √ | × | × | × | 0.652 | 0.875 | 0.676 | 0.405 | 2.266 |
+| `8` | eoc+toolmix | 3 | 0.005 | √ | × | × | × | √ | × | × | 0.547 | 0.838 | 0.618 | 0.360 | 3.152 |
+| `9` | eoc+gate+toolmix | 3 | 0.005 | √ | √ | × | × | √ | × | × | 0.618 | 0.860 | 0.659 | 0.392 | 2.152 |
+| `10` | eoc+js_trunc | 3 | 0.005 | √ | × | × | × | × | √ | × | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.744 | 0.910 | 0.772 | 0.523 | 0.256 |
+| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.721 | 0.907 | 0.755 | 0.501 | 0.395 |
 
+- 自动生成自 `compositional/runs/readme_myself_allmethods_llama_1b_20260416_195011`。
+- 5 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 5 次的均值。
+- 默认 `gate_network=linear`、`probe_from=tool`，辅助 loss weight 统一使用默认值 `0.1`。
 <!-- README_MYSELF_ALLMETHODS_AVG_TABLE_END -->
 
 
