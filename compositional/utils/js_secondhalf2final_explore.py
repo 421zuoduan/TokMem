@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from compositional.dataset import discover_available_tools
 from compositional.eval import compare_function_calls_advanced, parse_function_call
+from compositional.model import JS_TRUNCATION_THRESHOLD
 
 
 CATEGORY_ORDER = ["last_input", "tool", "eoc", "args"]
@@ -552,33 +553,20 @@ def load_checkpoint_bundle(
     from compositional.model import FunctionCallingModel
 
     state_dict = checkpoint_payload["model_state_dict"]
-    has_routing_probe = any(
-        key.startswith(("routing_probe.", "gate_mlp.", "toolmix_head."))
-        for key in state_dict
-    )
+    has_logit_bias_head = any(key.startswith("logit_bias_head.") for key in state_dict)
     use_eoc = bool(run_args.get("use_eoc", False))
-    use_gate = bool(run_args.get("use_gate", False))
-    use_toolmix = bool(run_args.get("use_toolmix", False))
-    probe_from = run_args.get("probe_from", "eoc")
-    enable_routing_probe = has_routing_probe or use_gate or use_toolmix
-    if not use_eoc and enable_routing_probe:
+    use_js_trunc = bool(run_args.get("use_js_trunc", False))
+    use_logit_bias = bool(run_args.get("use_logit_bias", False)) or has_logit_bias_head
+    if not use_eoc and (use_js_trunc or use_logit_bias):
         use_eoc = True
-    if not use_gate and not use_toolmix and has_routing_probe:
-        if any(key.startswith("toolmix_head.") for key in state_dict):
-            use_toolmix = True
-        elif any(key.startswith("gate_mlp.") for key in state_dict):
-            use_gate = True
-    gate_network = run_args.get("gate_network")
-    if gate_network is None and has_routing_probe:
-        if any(
-            key.startswith(("routing_probe.0.", "gate_mlp.0.", "toolmix_head.0."))
-            for key in state_dict
-        ):
-            gate_network = "mlp"
+    logit_bias_network = run_args.get("logit_bias_network")
+    if logit_bias_network is None and has_logit_bias_head:
+        if any(key.startswith("logit_bias_head.0.") for key in state_dict):
+            logit_bias_network = "mlp"
         else:
-            gate_network = "linear"
-    if gate_network is None:
-        gate_network = "linear"
+            logit_bias_network = "linear"
+    if logit_bias_network is None:
+        logit_bias_network = "linear"
 
     model = FunctionCallingModel(
         model_name=model_name,
@@ -589,13 +577,11 @@ def load_checkpoint_bundle(
         dtype=dtype,
         decouple_embeddings=bool(run_args.get("decouple_embeddings", False)),
         lora_config=resolve_lora_config(run_args),
-        enable_routing_probe=enable_routing_probe,
-        use_toolmix=use_toolmix,
         use_eoc=use_eoc,
-        use_gate=use_gate,
-        gate_network=gate_network,
-        gate_threshold=float(run_args.get("gate_threshold", 0.5)),
-        probe_from=probe_from,
+        use_js_trunc=use_js_trunc,
+        use_logit_bias=use_logit_bias,
+        logit_bias_network=logit_bias_network,
+        logit_bias_scale=float(run_args.get("logit_bias_scale", 1.0)),
     )
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
@@ -767,43 +753,33 @@ def run_online_generation_capture(
 
         finished = False
         step = 0
-        previous_generated_token_id: Optional[int] = None
         inside_header_span = False
 
         while step < max_new_tokens and not finished:
             logits_to_decode = next_logits.clone()
-            gate_context = previous_generated_token_id == model.eoc_token_id if step > 0 else True
-
-            if model.use_gate and gate_context and previous_generated_token_id != tokenizer.eos_token_id:
-                if getattr(model, "probe_from", "eoc") == "tool":
-                    sampled_token, _ = model._sample_with_tool_probe_gate(
-                        next_logits=next_logits,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        active_decision_rows=torch.ones(1, dtype=torch.bool, device=device),
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                    )
-                else:
-                    last_hidden_states = outputs.hidden_states[-1][:, -1, :]
-                    gate_scores = model._get_gate_scores(last_hidden_states)
-                    gate_positive = torch.sigmoid(gate_scores) >= model.gate_threshold
-                    if gate_positive.item():
-                        logits_to_decode = model.mask_logits_to_tool_tokens(logits_to_decode)
-                    sampled_token = sample_next_tokens(
-                        logits=logits_to_decode,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                    )
-            else:
-                sampled_token = sample_next_tokens(
+            decision_context = model._build_decision_context(
+                input_ids=input_ids,
+                batch_size=1,
+                device=device,
+                step=step,
+            )
+            if model.use_logit_bias and decision_context.any():
+                last_hidden_states = outputs.hidden_states[-1][:, -1, :]
+                logits_to_decode = model._apply_logit_bias_to_logits(
                     logits=logits_to_decode,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
+                    hidden_states=last_hidden_states,
+                    active_decision_rows=decision_context,
                 )
+            if model.use_js_trunc and decision_context.any():
+                js_mean = model._compute_js_mean_from_hidden_states(outputs.hidden_states)
+                if bool((js_mean > JS_TRUNCATION_THRESHOLD).item()):
+                    logits_to_decode = model.mask_logits_to_tool_tokens(logits_to_decode)
+            sampled_token = sample_next_tokens(
+                logits=logits_to_decode,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
             sampled_token_id = int(sampled_token.item())
 
             if sampled_token_id == tokenizer.eos_token_id:
@@ -868,7 +844,6 @@ def run_online_generation_capture(
 
             if sampled_token_id in end_header_ids:
                 inside_header_span = False
-            previous_generated_token_id = sampled_token_id
             step += 1
 
     full_sequence = torch.tensor(

@@ -8,17 +8,16 @@ from pathlib import Path
 
 
 TABLE_HEADER = (
-    "| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | "
-    "toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | "
-    "Arguments F1 | Exact Match Acc | Parse Error Rate |"
+    "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | "
+    "Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
 )
 TABLE_RULE = (
-    "| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | "
-    "---: | ---: | ---: | ---: | ---: |"
+    "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
 )
 
 METRIC_FIELDS = (
-    ("tool_accuracy", "Tool Prediction Acc"),
+    ("tool_accuracy", "Tool Acc"),
+    ("tool_exact_match_acc", "Tool Exact Match Acc"),
     ("avg_tool_f1_score", "Tool F1"),
     ("avg_f1_score", "Arguments F1"),
     ("exact_accuracy", "Exact Match Acc"),
@@ -63,6 +62,17 @@ def load_eval_metrics(evaluation_path):
     return payload["rounds"][-1]["eval_results"]
 
 
+def get_metric_value(eval_results, field):
+    has_split_tool_metrics = "tool_exact_match_acc" in eval_results
+    if field == "tool_accuracy" and not has_split_tool_metrics:
+        return None
+    if field == "tool_exact_match_acc":
+        if has_split_tool_metrics:
+            return eval_results.get(field)
+        return eval_results.get("tool_selection_accuracy", eval_results.get("tool_accuracy"))
+    return eval_results.get(field)
+
+
 def load_hparams(row):
     run_config_path = Path(row["run_dir"]) / "run_config.json"
     epochs = None
@@ -105,7 +115,6 @@ def infer_planned_counts(run_dir, rows):
         return default_settings, default_trials, default_trials_per_setting
 
     text = launcher_path.read_text(encoding="utf-8")
-
     settings_match = re.search(r"SETTINGS=\((.*?)\)\n", text, re.DOTALL)
     seeds_match = re.search(r"TRIAL_SEEDS=\((.*?)\)", text, re.DOTALL)
     if settings_match is None or seeds_match is None:
@@ -113,7 +122,6 @@ def infer_planned_counts(run_dir, rows):
 
     setting_entries = re.findall(r'"([^"]+)"', settings_match.group(1))
     seed_entries = [token for token in seeds_match.group(1).split() if token.strip()]
-
     if not setting_entries or not seed_entries:
         return default_settings, default_trials, default_trials_per_setting
 
@@ -122,11 +130,7 @@ def infer_planned_counts(run_dir, rows):
         setting_id = entry.split("|", 1)[0]
         planned_trials_per_setting[setting_id] = len(seed_entries)
 
-    return (
-        len(setting_entries),
-        len(setting_entries) * len(seed_entries),
-        planned_trials_per_setting,
-    )
+    return len(setting_entries), len(setting_entries) * len(seed_entries), planned_trials_per_setting
 
 
 def summarize_rows(rows):
@@ -151,15 +155,15 @@ def summarize_rows(rows):
         for row in setting_rows:
             eval_results = load_eval_metrics(Path(row["evaluation_results"]))
             for field, _ in METRIC_FIELDS:
-                metrics[field].append(float(eval_results[field]))
-
+                metric_value = get_metric_value(eval_results, field)
+                if metric_value is not None:
+                    metrics[field].append(float(metric_value))
             epochs, lr = load_hparams(row)
             if epochs and epochs not in epochs_values:
                 epochs_values.append(epochs)
             if lr and lr not in lr_values:
                 lr_values.append(lr)
 
-        averaged = {field: mean_or_none(values) for field, values in metrics.items()}
         settings.append(
             {
                 "setting_id": int(setting_id),
@@ -169,14 +173,10 @@ def summarize_rows(rows):
                 "trial_count": len(setting_rows),
                 "flags": {
                     "use_eoc": first_row["use_eoc"],
-                    "use_gate": first_row["use_gate"],
-                    "use_eoc_loss": first_row["use_eoc_loss"],
-                    "use_tool_loss": first_row["use_tool_loss"],
-                    "use_toolmix": first_row["use_toolmix"],
                     "use_js_trunc": first_row["use_js_trunc"],
                     "use_logit_bias": first_row["use_logit_bias"],
                 },
-                "metrics": averaged,
+                "metrics": {field: mean_or_none(values) for field, values in metrics.items()},
             }
         )
 
@@ -185,9 +185,9 @@ def summarize_rows(rows):
 
 def infer_title(run_name):
     if "readme_myself_allmethods" in run_name:
-        return "README_MYSELF 全方法部分结果"
+        return "README_MYSELF 当前维护方法部分结果"
     if "readme_myself_logit_bias_methods" in run_name:
-        return "README_MYSELF Logit Bias 方法部分结果"
+        return "README_MYSELF Logit Bias 子集部分结果"
     return f"README_MYSELF 部分结果 `{run_name}`"
 
 
@@ -209,31 +209,25 @@ def render_summary(run_dir, rows, settings, completed_trials):
 
     for setting in settings:
         lines.append(
-            f"| `{setting['setting_id']}` | {setting['mode']} | {setting['epochs']} | {setting['lr']} | "
-            f"{as_bool_text(setting['flags']['use_eoc'])} | "
-            f"{as_bool_text(setting['flags']['use_gate'])} | "
-            f"{as_bool_text(setting['flags']['use_eoc_loss'])} | "
-            f"{as_bool_text(setting['flags']['use_tool_loss'])} | "
-            f"{as_bool_text(setting['flags']['use_toolmix'])} | "
-            f"{as_bool_text(setting['flags']['use_js_trunc'])} | "
-            f"{as_bool_text(setting['flags']['use_logit_bias'])} | "
-            f"{format_metric(setting['metrics']['tool_accuracy'])} | "
-            f"{format_metric(setting['metrics']['avg_tool_f1_score'])} | "
-            f"{format_metric(setting['metrics']['avg_f1_score'])} | "
-            f"{format_metric(setting['metrics']['exact_accuracy'])} | "
+        f"| `{setting['setting_id']}` | {setting['mode']} | {setting['epochs']} | {setting['lr']} | "
+        f"{as_bool_text(setting['flags']['use_eoc'])} | "
+        f"{as_bool_text(setting['flags']['use_js_trunc'])} | "
+        f"{as_bool_text(setting['flags']['use_logit_bias'])} | "
+        f"{format_metric(setting['metrics']['tool_accuracy'])} | "
+        f"{format_metric(setting['metrics']['tool_exact_match_acc'])} | "
+        f"{format_metric(setting['metrics']['avg_tool_f1_score'])} | "
+        f"{format_metric(setting['metrics']['avg_f1_score'])} | "
+        f"{format_metric(setting['metrics']['exact_accuracy'])} | "
             f"{format_metric(setting['metrics']['parse_error_rate'])} |"
         )
 
     if not settings:
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |")
 
     lines.extend(["", "## 完成情况", ""])
     if settings:
         for setting in settings:
-            planned_trials = planned_trials_by_setting.get(
-                str(setting["setting_id"]),
-                setting["trial_count"],
-            )
+            planned_trials = planned_trials_by_setting.get(str(setting["setting_id"]), setting["trial_count"])
             lines.append(
                 f"- 设置 `{setting['setting_id']}` `{setting['mode']}`："
                 f"{setting['trial_count']}/{planned_trials} 个 trial 已完成。"
@@ -248,17 +242,13 @@ def render_summary(run_dir, rows, settings, completed_trials):
 def main():
     args = parse_args()
     run_dir = Path(args.run_dir).resolve()
-    output_path = (
-        Path(args.output).resolve()
-        if args.output
-        else run_dir / "comparison_summary.partial.md"
-    )
+    output_path = Path(args.output).resolve() if args.output else run_dir / "comparison_summary.partial.md"
 
     rows = load_manifest(run_dir)
     settings, completed_trials = summarize_rows(rows)
     summary_text = render_summary(run_dir, rows, settings, completed_trials)
     output_path.write_text(summary_text, encoding="utf-8")
-    print(output_path)
+    print(f"Wrote partial summary to {output_path}")
 
 
 if __name__ == "__main__":

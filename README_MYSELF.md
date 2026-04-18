@@ -4,28 +4,28 @@
 
 ### 汇总表
 
-| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
-| --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.610 | 0.842 | 0.683 | 0.420 | 0.804 |
-| `2` | eoc-only | 3 | 0.005 | √ | × | × | × |  |  |  | 0.622 | 0.868 | 0.692 | 0.420 | 1.382 |
-| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 |
-| `4` | eoc-only | 3 | 0.005 | √ | × | √ | × | 0.1 |  |  | 0.586 | 0.849 | 0.694 | 0.404 | 0.272 |
-| `5` | eoc+gate | 3 | 0.005 | √ | √ | √ | × | 0.1 |  | 0.1 | 0.652 | 0.868 | 0.720 | 0.458 | 0.296 |
-| `6` | eoc-only | 3 | 0.005 | √ | × | √ | √ | 0.1 | 0.1 |  | 0.608 | 0.868 | 0.642 | 0.396 | 6.538 |
-| `7` | eoc+gate | 3 | 0.005 | √ | √ | √ | √ | 0.1 | 0.1 | 0.1 | 0.678 | 0.888 | 0.687 | 0.416 | 0.404 |
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.610 | 0.610 | 0.842 | 0.683 | 0.420 | 0.804 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | × |  |  |  | 0.622 | 0.622 | 0.868 | 0.692 | 0.420 | 1.382 |
+| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 |
+| `4` | eoc-only | 3 | 0.005 | √ | × | √ | × | 0.1 |  |  | 0.586 | 0.586 | 0.849 | 0.694 | 0.404 | 0.272 |
+| `5` | eoc+gate | 3 | 0.005 | √ | √ | √ | × | 0.1 |  | 0.1 | 0.652 | 0.652 | 0.868 | 0.720 | 0.458 | 0.296 |
+| `6` | eoc-only | 3 | 0.005 | √ | × | √ | √ | 0.1 | 0.1 |  | 0.608 | 0.608 | 0.868 | 0.642 | 0.396 | 6.538 |
+| `7` | eoc+gate | 3 | 0.005 | √ | √ | √ | √ | 0.1 | 0.1 | 0.1 | 0.678 | 0.678 | 0.888 | 0.687 | 0.416 | 0.404 |
 
 <!-- README_MYSELF_AVG_TABLE_BEGIN -->
 ### 5 次重复运行均值
 
-| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
-| --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.583 | 0.836 | 0.663 | 0.392 | 0.693 |
-| `2` | eoc-only | 3 | 0.005 | √ | × | × | × |  |  |  | 0.630 | 0.867 | 0.707 | 0.442 | 0.719 |
-| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.638 | 0.874 | 0.713 | 0.452 | 1.265 |
-| `4` | eoc-only | 3 | 0.005 | √ | × | √ | × | 0.1 |  |  | 0.606 | 0.849 | 0.684 | 0.422 | 1.254 |
-| `5` | eoc+gate | 3 | 0.005 | √ | √ | √ | × | 0.1 |  | 0.1 | 0.610 | 0.857 | 0.699 | 0.430 | 0.959 |
-| `6` | eoc-only | 3 | 0.005 | √ | × | √ | √ | 0.1 | 0.1 |  | 0.642 | 0.879 | 0.672 | 0.420 | 2.154 |
-| `7` | eoc+gate | 3 | 0.005 | √ | √ | √ | √ | 0.1 | 0.1 | 0.1 | 0.646 | 0.883 | 0.682 | 0.412 | 2.311 |
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | × |  |  |  | 0.583 | 0.583 | 0.836 | 0.663 | 0.392 | 0.693 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | × |  |  |  | 0.630 | 0.630 | 0.867 | 0.707 | 0.442 | 0.719 |
+| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.638 | 0.638 | 0.874 | 0.713 | 0.452 | 1.265 |
+| `4` | eoc-only | 3 | 0.005 | √ | × | √ | × | 0.1 |  |  | 0.606 | 0.606 | 0.849 | 0.684 | 0.422 | 1.254 |
+| `5` | eoc+gate | 3 | 0.005 | √ | √ | √ | × | 0.1 |  | 0.1 | 0.610 | 0.610 | 0.857 | 0.699 | 0.430 | 0.959 |
+| `6` | eoc-only | 3 | 0.005 | √ | × | √ | √ | 0.1 | 0.1 |  | 0.642 | 0.642 | 0.879 | 0.672 | 0.420 | 2.154 |
+| `7` | eoc+gate | 3 | 0.005 | √ | √ | √ | √ | 0.1 | 0.1 | 0.1 | 0.646 | 0.646 | 0.883 | 0.682 | 0.412 | 2.311 |
 
 - 自动生成自 `compositional/runs/readme_myself_7settings_llama_1b_20260416_032936`。
 - 5 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 5 次的均值。
@@ -35,20 +35,20 @@
 <!-- README_MYSELF_ALLMETHODS_AVG_TABLE_BEGIN -->
 ### 全方法 5 次重复运行均值
 
-| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
-| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `1` | baseline | 3 | 0.005 | × | × | × | × | × | × | × | 0.597 | 0.842 | 0.676 | 0.412 | 0.988 |
-| `2` | eoc-only | 3 | 0.005 | √ | × | × | × | × | × | × | 0.646 | 0.872 | 0.713 | 0.463 | 1.887 |
-| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × | × | × | × | 0.599 | 0.856 | 0.678 | 0.419 | 2.718 |
-| `4` | eoc-only+eoc_loss | 3 | 0.005 | √ | × | √ | × | × | × | × | 0.641 | 0.862 | 0.709 | 0.445 | 0.440 |
-| `5` | eoc+gate+eoc_loss | 3 | 0.005 | √ | √ | √ | × | × | × | × | 0.613 | 0.855 | 0.692 | 0.432 | 0.741 |
-| `6` | eoc-only+eoc_loss+tool_loss | 3 | 0.005 | √ | × | √ | √ | × | × | × | 0.660 | 0.885 | 0.688 | 0.433 | 2.194 |
-| `7` | eoc+gate+eoc_loss+tool_loss | 3 | 0.005 | √ | √ | √ | √ | × | × | × | 0.652 | 0.875 | 0.676 | 0.405 | 2.266 |
-| `8` | eoc+toolmix | 3 | 0.005 | √ | × | × | × | √ | × | × | 0.547 | 0.838 | 0.618 | 0.360 | 3.152 |
-| `9` | eoc+gate+toolmix | 3 | 0.005 | √ | √ | × | × | √ | × | × | 0.618 | 0.860 | 0.659 | 0.392 | 2.152 |
-| `10` | eoc+js_trunc | 3 | 0.005 | √ | × | × | × | × | √ | × | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
-| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.744 | 0.910 | 0.772 | 0.523 | 0.256 |
-| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.721 | 0.907 | 0.755 | 0.501 | 0.395 |
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | × | × | × | × | 0.597 | 0.597 | 0.842 | 0.676 | 0.412 | 0.988 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | × | × | × | × | 0.646 | 0.646 | 0.872 | 0.713 | 0.463 | 1.887 |
+| `3` | eoc+gate | 3 | 0.005 | √ | √ | × | × | × | × | × | 0.599 | 0.599 | 0.856 | 0.678 | 0.419 | 2.718 |
+| `4` | eoc-only+eoc_loss | 3 | 0.005 | √ | × | √ | × | × | × | × | 0.641 | 0.641 | 0.862 | 0.709 | 0.445 | 0.440 |
+| `5` | eoc+gate+eoc_loss | 3 | 0.005 | √ | √ | √ | × | × | × | × | 0.613 | 0.613 | 0.855 | 0.692 | 0.432 | 0.741 |
+| `6` | eoc-only+eoc_loss+tool_loss | 3 | 0.005 | √ | × | √ | √ | × | × | × | 0.660 | 0.660 | 0.885 | 0.688 | 0.433 | 2.194 |
+| `7` | eoc+gate+eoc_loss+tool_loss | 3 | 0.005 | √ | √ | √ | √ | × | × | × | 0.652 | 0.652 | 0.875 | 0.676 | 0.405 | 2.266 |
+| `8` | eoc+toolmix | 3 | 0.005 | √ | × | × | × | √ | × | × | 0.547 | 0.547 | 0.838 | 0.618 | 0.360 | 3.152 |
+| `9` | eoc+gate+toolmix | 3 | 0.005 | √ | √ | × | × | √ | × | × | 0.618 | 0.618 | 0.860 | 0.659 | 0.392 | 2.152 |
+| `10` | eoc+js_trunc | 3 | 0.005 | √ | × | × | × | × | √ | × | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.744 | 0.744 | 0.910 | 0.772 | 0.523 | 0.256 |
+| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.721 | 0.721 | 0.907 | 0.755 | 0.501 | 0.395 |
 
 - 自动生成自 `compositional/runs/readme_myself_allmethods_llama_1b_20260416_195011`。
 - 5 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 5 次的均值。
@@ -59,10 +59,10 @@
 <!-- README_MYSELF_LOGIT_BIAS_METHODS_AVG_TABLE_BEGIN -->
 ### Logit Bias 方法 5 次重复运行均值
 
-| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
-| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.730 | 0.909 | 0.760 | 0.512 | 0.468 |
-| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.724 | 0.907 | 0.757 | 0.504 | 0.388 |
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `11` | eoc+logit_bias | 3 | 0.005 | √ | × | × | × | × | × | √ | 0.730 | 0.730 | 0.909 | 0.760 | 0.512 | 0.468 |
+| `12` | eoc+gate+logit_bias | 3 | 0.005 | √ | √ | × | × | × | × | √ | 0.724 | 0.724 | 0.907 | 0.757 | 0.504 | 0.388 |
 
 - 自动生成自 `compositional/runs/readme_myself_logit_bias_methods_llama_1b_20260417_032945`。
 - 5 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 5 次的均值。
@@ -74,8 +74,9 @@
  
 - `use_eoc` 是添加 eoc token, `use_eoc_loss` 是添加 eoc loss, `use_gate` 是添加 gate 方法（这批均值实验使用 linear gate）, `use_task_loss` 是添加 task loss，`use_toolmix` 是在 loss 上使用 toolmix；其中 task loss 是 tool token 的位置拿词表中的所有 tool token 重新做 softmax，与真实结果做的 ce loss
 - `Tool F1` 和 `Args F1` 对标论文给的评价指标，Tool 表示 tool token 的选择，Args 表示 args token 的选择。args token 指的是选定 tool token 后，tool token 后面继续生成的 tokens，用于表示执行工具完成任务所需的具体参数。
-- 本文里的 `Tool Prediction Acc` 都按整体评测集上的值记录；读取 2026-04-15 之前的部分 archived run 时，以 `evaluation.log` 里的 `Tool Prediction Accuracy` 为准。
-- `Exact Match Acc` 更接近端到端函数调用是否“完全正确”，通常比单独的 `Tool Prediction Acc` 更适合作为综合效果判断。
+- `Tool Acc` 是按每个样本 x 每个候选工具计算的 binary accuracy，`Tool Exact Match Acc` 是整组工具完全预测一致的样本占比。
+- 2026-04-19 之前的 archived run 没有保存新的工具级 `Tool Acc`。读取这批旧结果时，`Tool Exact Match Acc` 可以从旧字段恢复，新的 `Tool Acc` 需要按新定义重新评测后才会出现。
+- `Exact Match Acc` 更接近端到端函数调用是否“完全正确”，通常比单独的 `Tool Acc` 更适合作为综合效果判断。
 - `Parse Error Rate` 是越低越好；它高时表示结构化输出本身已经损坏，即使 `Tool F1` 或 `Arguments F1` 不算太低，最终 `Exact Match Acc` 也可能上不去。
 - 当前 `gate` 在训练时主要作为额外监督项存在，并不会直接改变 teacher-forcing 下的 token 选择；但在推理时会影响 `eoc` 之后；默认使用 linear 结构
 
@@ -85,10 +86,10 @@
 
 100 memory + 1 eoc token
 
-| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate | Gate Params | Trainable Params |
+| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | eoc loss weight | tool loss weight | gate loss weight | Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate | Gate Params | Trainable Params |
 | --- | --- | ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  | eoc+gate_mlp | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.668 | 0.878 | 0.734 | 0.478 | 0.410 | 4,198,401 | 4,302,849 |
-| `3` | eoc+gate_linear | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 | 2,049 | 106,497 |
+|  | eoc+gate_mlp | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.668 | 0.668 | 0.878 | 0.734 | 0.478 | 0.410 | 4,198,401 | 4,302,849 |
+| `3` | eoc+gate_linear | 3 | 0.005 | √ | √ | × | × |  |  | 0.1 | 0.670 | 0.670 | 0.873 | 0.722 | 0.462 | 0.292 | 2,049 | 106,497 |
 
 
 ### 训练 loss（5 次重复运行均值）
@@ -106,6 +107,8 @@
 ### 备注
 
 - `Arguments F1` 对应日志中的 `Average F1 Score`。
+- `Tool Acc` 对应日志中的 `tool_accuracy`。
+- `Tool Exact Match Acc` 对应日志中的 `tool_exact_match_acc`。
 - `Tool F1` 对应日志中的 `Average Tool F1 Score`。
 - 表中的 `use task loss` 对应当前 compositional 脚本里的 `use_tool_loss` 开关。
 - 对 `2`-`3` 而言，`avg EOC loss` 留空是因为该组实验未开启 `use_eoc_loss`，不是因为日志缺失。
@@ -117,4 +120,4 @@
 
 1. 因为现在 gate 的梯度不会传导回 memory embedding 了, 所以需要重跑 gate 的代码
 2. gate 从 mlp 换成 linear 再试一下
-3. 在所有 token 上算 gate, 
+3. 在所有 token 上算 gate,

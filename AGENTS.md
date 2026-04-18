@@ -18,20 +18,18 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 
 - prioritize `compositional/` work, scripts, experiments, and code changes by default
 - start from `compositional/` entrypoints and datasets unless the task is clearly about another track
-- for `compositional/`, treat the primary research direction as end-to-end modeling that jointly decides tool-mode entry and constrained tool generation at the current step
-- frame tool use as a current-step joint decision that couples whether to enter tool mode with which tool token(s) remain admissible under explicit structural constraints
-- prefer approaches that apply explicit structure to tool token generation and selection within that current-step joint decision
+- for `compositional/`, treat the maintained method surface as the `use_eoc`, `use_js_trunc`, and `use_logit_bias` family
+- frame tool use around explicit `eoc` boundary decisions, optional JS-based tool-only truncation, and optional detached logit-bias reweighting over tool tokens
+- prefer experiments, analyses, and docs that stay inside the maintained `eoc/js_trunc/logit_bias` path unless the user explicitly asks for archived method families
 - keep `atomic/` workflows and documentation available; they still apply when the user explicitly asks for `atomic/` work
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
 
 More specifically, when working on `compositional/` by default:
 
-- favor end-to-end formulations that learn a joint routing-and-constraint signal for tool invocation and constrained tool-token generation within the main model unless the user explicitly asks for a staged baseline
+- favor the maintained boundary-time formulation where `eoc` defines the decision sites, `js_trunc` decides tool-only truncation at those sites, and `logit_bias` softly reweights tool-token logits at those same sites
 - when referring to the `baseline` in `compositional/`, interpret it as the TokMem setting without the adaptation stage; do not treat `baseline` as a non-TokMem method unless the user explicitly says so
-- discuss and evaluate tool use as a current-step joint prediction problem with two coupled outputs:
-  1. deciding whether the current generation step enters tool mode
-  2. constraining admissible tool token generation and tool selection within that same step
-- when adding experiments, analyses, or documentation, make the current-step coupling between tool-mode entry and constrained tool-token generation explicit
+- treat gate, `eoc loss`, `tool loss`, and `toolmix` as archived method families that may appear in older runs or git history
+- when adding experiments, analyses, or documentation, make the maintained `eoc/js_trunc/logit_bias` assumptions explicit
 
 ## Result Analysis Workflow
 
@@ -90,9 +88,18 @@ Run the main experiments from each subdirectory:
 
 ```bash
 cd atomic && bash main_tokmem.sh
-cd compositional && bash run_n_rounds_main.sh
+cd compositional && python main_sequential.py --training_rounds 51-100:3 --use_eoc --use_js_trunc
+cd compositional && bash ../scripts/compositional/llama_1b/tokmem_eoc_js_trunc_logit_bias_llama_1b.sh
 cd memorization && bash run_memorization_comparison.sh
 ```
+
+For `compositional/`, treat `main_sequential.py` and the maintained `scripts/compositional/llama_1b/tokmem_*.sh` launchers as the default entrypoints.
+
+Treat these compositional shell entrypoints as legacy:
+
+- `run_n_rounds_main.sh`
+- `run_n_rounds_lora.sh`
+- `icl_baseline.sh`
 
 Run the retriever evaluation script directly:
 

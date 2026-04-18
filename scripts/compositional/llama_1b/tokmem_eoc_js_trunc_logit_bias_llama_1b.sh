@@ -1,7 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="tokmem_eoc_gate_llama_1b_50tools_${RUN_ID}"
+RUN_NAME="tokmem_eoc_js_trunc_logit_bias_llama_1b_50tools_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 
 mkdir -p "$RUN_DIR"
@@ -41,7 +44,8 @@ python -u main_sequential.py \
     --seed 42 \
     --tensorboard \
     --use_eoc \
-    --use_gate \
+    --use_js_trunc \
+    --use_logit_bias \
     --run_root_dir "$ROOT_DIR/compositional/runs" \
     --run_name "$RUN_NAME" \
-    --run_tag "llama_1b_eoc_gate"
+    --run_tag "llama_1b_eoc_js_trunc_logit_bias"

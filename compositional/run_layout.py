@@ -94,45 +94,10 @@ def build_training_summary_payload(run_name, all_results, experiment_type="tokme
                 "epochs": result["epochs"],
                 "avg_total_loss": metrics.get("avg_total_loss", result.get("avg_loss")),
                 "avg_ar_loss": metrics.get("avg_ar_loss"),
-                "avg_eoc_loss": _summary_loss_value(
-                    metrics,
-                    "avg_eoc_loss",
-                    metrics.get("use_eoc_loss", False),
-                ),
-                "avg_tool_loss": _summary_loss_value(
-                    metrics,
-                    "avg_tool_loss",
-                    metrics.get("use_tool_loss", False),
-                ),
-                "avg_gate_loss": _summary_loss_value(
-                    metrics,
-                    "avg_gate_loss",
-                    metrics.get("use_gate", False),
-                ),
-                "avg_gate_prob": (
-                    metrics.get("avg_gate_prob")
-                    if metrics.get("use_gate", False)
-                    else None
-                ),
-                "avg_toolmix_aux_loss": _summary_loss_value(
-                    metrics,
-                    "avg_toolmix_aux_loss",
-                    metrics.get("use_toolmix", False),
-                ),
                 "avg_logit_bias_loss": _summary_loss_value(
                     metrics,
                     "avg_logit_bias_loss",
                     metrics.get("use_logit_bias", False),
-                ),
-                "avg_toolmix_prob": (
-                    metrics.get("avg_toolmix_prob")
-                    if metrics.get("use_toolmix", False)
-                    else None
-                ),
-                "toolmix_alpha": (
-                    metrics.get("toolmix_alpha")
-                    if metrics.get("use_toolmix", False)
-                    else None
                 ),
             }
         )

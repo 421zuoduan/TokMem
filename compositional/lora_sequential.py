@@ -372,7 +372,7 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     """Evaluate LoRA model using function calling metrics"""
     import time
     from collections import defaultdict
-    from eval import compare_function_calls_advanced
+    from eval import compare_function_calls_advanced, calculate_tool_metrics
     
     model.eval()
     
@@ -382,7 +382,11 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     start_time = time.time()
     
     exact_matches = 0
-    tool_correct = 0
+    tool_tp = 0
+    tool_tn = 0
+    tool_fp = 0
+    tool_fn = 0
+    tool_exact_matches = 0
     processed_examples = 0
     parse_errors = 0
     f1_scores = []
@@ -394,7 +398,11 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     call_count_breakdown = defaultdict(lambda: {
         'total': 0, 
         'exact_matches': 0, 
-        'tool_correct': 0, 
+        'tool_tp': 0,
+        'tool_tn': 0,
+        'tool_fp': 0,
+        'tool_fn': 0,
+        'tool_exact_matches': 0,
         'f1_scores': [],
         'precision_scores': [],
         'recall_scores': [],
@@ -403,6 +411,16 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
         'tool_recall_scores': [],
         'parse_errors': 0
     })
+
+    dataset = test_dataloader.dataset
+    candidate_tools = list(getattr(dataset, "tool_mapping", {}).values())
+    if not candidate_tools:
+        candidate_tools = [
+            tool
+            for example in getattr(dataset, "data", [])
+            for tool in example.get("tools", [])
+        ]
+    candidate_tools = list(dict.fromkeys(candidate_tools))
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_dataloader):
@@ -443,26 +461,25 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
                 # Extract function calls and predicted tools
                 predicted_calls, predicted_tools = extract_function_calls_from_text(generated_text)
                 
-                # Tool matching with generic labels - calculate F1 scores
-                from collections import Counter
-                from eval import calculate_f1_score
-                
-                # Calculate tool-level F1 scores
-                tool_f1_result = calculate_f1_score(predicted_tools, expected_generic_tools)
-                tool_f1_scores.append(tool_f1_result['f1_score'])
-                tool_precision_scores.append(tool_f1_result['precision'])
-                tool_recall_scores.append(tool_f1_result['recall'])
-                
-                # Keep binary tool matching for backward compatibility
-                if predicted_tools and expected_generic_tools:
-                    tool_match = Counter(predicted_tools) == Counter(expected_generic_tools)
-                elif not predicted_tools and not expected_generic_tools:
-                    tool_match = True
-                else:
-                    tool_match = False
-                
-                if tool_match:
-                    tool_correct += 1
+                tool_metrics = calculate_tool_metrics(
+                    predicted_tools=predicted_tools,
+                    expected_tools=expected_generic_tools,
+                    candidate_tools=candidate_tools,
+                )
+                tool_f1_scores.append(tool_metrics['tool_f1_score'])
+                tool_precision_scores.append(tool_metrics['tool_precision'])
+                tool_recall_scores.append(tool_metrics['tool_recall'])
+                tool_tp += tool_metrics['tool_tp']
+                tool_tn += tool_metrics['tool_tn']
+                tool_fp += tool_metrics['tool_fp']
+                tool_fn += tool_metrics['tool_fn']
+                if tool_metrics['tool_exact_match_acc'] >= 1.0:
+                    tool_exact_matches += 1
+                    call_count_breakdown[expected_call_count]['tool_exact_matches'] += 1
+                call_count_breakdown[expected_call_count]['tool_tp'] += tool_metrics['tool_tp']
+                call_count_breakdown[expected_call_count]['tool_tn'] += tool_metrics['tool_tn']
+                call_count_breakdown[expected_call_count]['tool_fp'] += tool_metrics['tool_fp']
+                call_count_breakdown[expected_call_count]['tool_fn'] += tool_metrics['tool_fn']
                 
                 # Use the same evaluation function as native function calling for fair comparison
                 eval_result = compare_function_calls_advanced(
@@ -489,14 +506,12 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
                 call_count_breakdown[expected_call_count]['total'] += 1
                 if eval_result.exact_match:
                     call_count_breakdown[expected_call_count]['exact_matches'] += 1
-                if tool_match:
-                    call_count_breakdown[expected_call_count]['tool_correct'] += 1
                 call_count_breakdown[expected_call_count]['f1_scores'].append(eval_result.f1_score)
                 call_count_breakdown[expected_call_count]['precision_scores'].append(eval_result.precision)
                 call_count_breakdown[expected_call_count]['recall_scores'].append(eval_result.recall)
-                call_count_breakdown[expected_call_count]['tool_f1_scores'].append(tool_f1_result['f1_score'])
-                call_count_breakdown[expected_call_count]['tool_precision_scores'].append(tool_f1_result['precision'])
-                call_count_breakdown[expected_call_count]['tool_recall_scores'].append(tool_f1_result['recall'])
+                call_count_breakdown[expected_call_count]['tool_f1_scores'].append(tool_metrics['tool_f1_score'])
+                call_count_breakdown[expected_call_count]['tool_precision_scores'].append(tool_metrics['tool_precision'])
+                call_count_breakdown[expected_call_count]['tool_recall_scores'].append(tool_metrics['tool_recall'])
                 call_count_breakdown[expected_call_count]['parse_errors'] += current_parse_errors
     
     end_time = time.time()
@@ -504,7 +519,9 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     
     # Calculate final metrics
     exact_accuracy = exact_matches / total_examples
-    tool_accuracy = tool_correct / total_examples
+    tool_judgments = tool_tp + tool_tn + tool_fp + tool_fn
+    tool_accuracy = (tool_tp + tool_tn) / tool_judgments if tool_judgments > 0 else 1.0
+    tool_exact_match_acc = tool_exact_matches / total_examples if total_examples > 0 else 0.0
     avg_f1_score = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
     avg_precision = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
     avg_recall = sum(recall_scores) / len(recall_scores) if recall_scores else 0.0
@@ -525,7 +542,14 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     
     print("🎯 RESULTS:")
     print(f"   Exact Match Accuracy:     {exact_accuracy:.3f} ({exact_matches}/{total_examples})")
-    print(f"   Tool Prediction Accuracy: {tool_accuracy:.3f} ({tool_correct}/{total_examples})")
+    print(
+        "   Tool Acc (tool_accuracy): "
+        f"{tool_accuracy:.3f} (TP={tool_tp}, TN={tool_tn}, FP={tool_fp}, FN={tool_fn})"
+    )
+    print(
+        "   Tool Exact Match Acc (tool_exact_match_acc): "
+        f"{tool_exact_match_acc:.3f} ({tool_exact_matches}/{total_examples})"
+    )
     print(f"   Average F1 Score:         {avg_f1_score:.3f}")
     print(f"   Average Precision:        {avg_precision:.3f}")
     print(f"   Average Recall:           {avg_recall:.3f}")
@@ -544,12 +568,27 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
         print(f"   {call_count} call(s): {accuracy:.3f} ({stats['exact_matches']}/{stats['total']})")
     print("=" * 50)
     
-    print("\n📊 TOOL PREDICTION ACCURACY:")
+    print("\n📊 TOOL ACCURACY (tool_accuracy):")
     print("-" * 50)
     for call_count in sorted(call_count_breakdown.keys()):
         stats = call_count_breakdown[call_count]
-        per_call_tool_accuracy = stats['tool_correct'] / stats['total'] if stats['total'] > 0 else 0.0
-        print(f"   {call_count} call(s): {per_call_tool_accuracy:.3f} ({stats['tool_correct']}/{stats['total']})")
+        tool_total = stats['tool_tp'] + stats['tool_tn'] + stats['tool_fp'] + stats['tool_fn']
+        per_call_tool_accuracy = (stats['tool_tp'] + stats['tool_tn']) / tool_total if tool_total > 0 else 1.0
+        print(
+            f"   {call_count} call(s): {per_call_tool_accuracy:.3f} "
+            f"(TP={stats['tool_tp']}, TN={stats['tool_tn']}, FP={stats['tool_fp']}, FN={stats['tool_fn']})"
+        )
+    print("=" * 50)
+
+    print("\n📊 TOOL EXACT MATCH ACCURACY (tool_exact_match_acc):")
+    print("-" * 50)
+    for call_count in sorted(call_count_breakdown.keys()):
+        stats = call_count_breakdown[call_count]
+        per_call_tool_exact_match_acc = stats['tool_exact_matches'] / stats['total'] if stats['total'] > 0 else 0.0
+        print(
+            f"   {call_count} call(s): {per_call_tool_exact_match_acc:.3f} "
+            f"({stats['tool_exact_matches']}/{stats['total']})"
+        )
     print("=" * 50)
     
     print("\n📊 AVERAGE F1 SCORE (Function Calls):")
@@ -583,6 +622,7 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     return {
         'exact_accuracy': exact_accuracy,
         'tool_accuracy': tool_accuracy, 
+        'tool_exact_match_acc': tool_exact_match_acc,
         'avg_f1_score': avg_f1_score,
         'avg_precision': avg_precision,
         'avg_recall': avg_recall,

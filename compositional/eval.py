@@ -2,7 +2,7 @@ import ast
 import json
 import re
 from collections import Counter
-from typing import List, Union, Dict, Any, Tuple
+from typing import List, Union, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 
 @dataclass
@@ -280,6 +280,72 @@ def calculate_argument_accuracy(output_calls: List[Union[str, Dict]],
         "arguments_accuracy": arguments_accuracy,
         "matched_arguments": matched_arguments,
         "total_target_arguments": total_target_arguments,
+    }
+
+
+def calculate_tool_metrics(
+    predicted_tools: Optional[List[str]] = None,
+    expected_tools: Optional[List[str]] = None,
+    output_calls: Optional[List[Union[str, Dict]]] = None,
+    target_calls: Optional[List[Union[str, Dict]]] = None,
+    candidate_tools: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Calculate tool-level accuracy, exact match, and F1-style metrics.
+
+    The helper accepts pre-extracted tool lists or raw function-call lists.
+    ``candidate_tools`` should contain the full tool universe for the run when
+    tool_accuracy needs binary TP/TN/FP/FN over every sample-tool pair.
+    """
+
+    if predicted_tools is None:
+        predicted_tools = extract_tool_names(output_calls or [])
+    if expected_tools is None:
+        expected_tools = extract_tool_names(target_calls or [])
+
+    predicted_counter = Counter(predicted_tools)
+    expected_counter = Counter(expected_tools)
+
+    candidate_tool_set = set(candidate_tools or [])
+    candidate_tool_set.update(predicted_counter.keys())
+    candidate_tool_set.update(expected_counter.keys())
+
+    tool_tp = 0
+    tool_tn = 0
+    tool_fp = 0
+    tool_fn = 0
+
+    for tool_name in candidate_tool_set:
+        predicted_present = predicted_counter.get(tool_name, 0) > 0
+        expected_present = expected_counter.get(tool_name, 0) > 0
+
+        if predicted_present and expected_present:
+            tool_tp += 1
+        elif predicted_present and not expected_present:
+            tool_fp += 1
+        elif not predicted_present and expected_present:
+            tool_fn += 1
+        else:
+            tool_tn += 1
+
+    total_judgments = tool_tp + tool_tn + tool_fp + tool_fn
+    tool_accuracy = (tool_tp + tool_tn) / total_judgments if total_judgments > 0 else 1.0
+    tool_exact_match_acc = 1.0 if predicted_counter == expected_counter else 0.0
+    tool_f1_metrics = calculate_f1_score(predicted_tools, expected_tools)
+
+    return {
+        "tool_tp": tool_tp,
+        "tool_tn": tool_tn,
+        "tool_fp": tool_fp,
+        "tool_fn": tool_fn,
+        "tool_total_judgments": total_judgments,
+        "tool_accuracy": tool_accuracy,
+        "tool_exact_match_acc": tool_exact_match_acc,
+        "tool_f1_score": tool_f1_metrics["f1_score"],
+        "tool_precision": tool_f1_metrics["precision"],
+        "tool_recall": tool_f1_metrics["recall"],
+        "predicted_tools": list(predicted_tools),
+        "expected_tools": list(expected_tools),
+        "candidate_tools": sorted(candidate_tool_set),
     }
 
 def calculate_tool_selection_accuracy(output_calls: List[Union[str, Dict]], 

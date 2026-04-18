@@ -1,23 +1,9 @@
-import copy
 import math
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, TaskType
 import json
-
-
-def build_routing_probe(hidden_size, gate_network):
-    """Build the configurable routing probe used for boundary decisions."""
-    if gate_network == "linear":
-        return nn.Linear(hidden_size, 1)
-    if gate_network == "mlp":
-        return nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, 1),
-        )
-    raise ValueError(f"Unsupported gate_network: {gate_network}")
 
 def build_logit_bias_head(hidden_size, num_tools, network_type):
     """Build the external prior head used to bias tool-token logits."""
@@ -88,40 +74,17 @@ class FunctionCallingModel(nn.Module):
     
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, lora_config=None, use_eoc=False, use_gate=False,
-                 gate_threshold=0.5, gate_network="mlp", use_toolmix=False, use_js_trunc=False,
-                 enable_routing_probe=None, probe_from="eoc", use_logit_bias=False,
-                 logit_bias_network="linear", logit_bias_scale=1.0):
+                 decouple_embeddings=False, lora_config=None, use_eoc=False, use_js_trunc=False,
+                 use_logit_bias=False, logit_bias_network="linear", logit_bias_scale=1.0):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         self.use_eoc = use_eoc
-        self.use_gate = use_gate
-        self.use_toolmix = use_toolmix
         self.use_js_trunc = use_js_trunc
         self.use_logit_bias = use_logit_bias
-        self.probe_from = probe_from
-        self.enable_routing_probe = (
-            bool(enable_routing_probe)
-            if enable_routing_probe is not None
-            else (self.use_gate or self.use_toolmix)
-        )
-        self.gate_threshold = gate_threshold
-        self.gate_network = gate_network
         self.logit_bias_network = logit_bias_network
         self.logit_bias_scale = logit_bias_scale
-        self.toolmix_alpha = None
-        if self.probe_from not in {"eoc", "tool"}:
-            raise ValueError(f"Unsupported probe_from: {self.probe_from}")
-        if self.use_gate and not self.use_eoc:
-            raise ValueError("--use_gate requires --use_eoc")
         if self.use_js_trunc and not self.use_eoc:
             raise ValueError("--use_js_trunc requires --use_eoc")
-        if self.use_gate and self.use_js_trunc:
-            raise ValueError("--use_gate and --use_js_trunc are mutually exclusive")
-        if self.use_toolmix and not self.use_eoc:
-            raise ValueError("--use_toolmix requires --use_eoc")
-        if self.enable_routing_probe and not self.use_eoc:
-            raise ValueError("--enable_routing_probe requires --use_eoc")
         if self.use_logit_bias and not self.use_eoc:
             raise ValueError("--use_logit_bias requires --use_eoc")
         if self.logit_bias_network not in {"linear", "mlp"}:
@@ -235,14 +198,6 @@ class FunctionCallingModel(nn.Module):
             self.trainable_tool_input_embeddings = self.trainable_tool_embeddings
             self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
 
-        if self.enable_routing_probe:
-            self.routing_probe = build_routing_probe(self.config.hidden_size, self.gate_network).to(
-                device=device,
-                dtype=original_embeddings.dtype,
-            )
-        else:
-            self.routing_probe = None
-
         if self.use_logit_bias:
             self.logit_bias_head = build_logit_bias_head(
                 self.config.hidden_size,
@@ -285,12 +240,18 @@ class FunctionCallingModel(nn.Module):
         def custom_embed_forward(input_ids):
             # Get standard embeddings
             embeddings = self.original_embed_forward(input_ids)
-            
-            # Replace reserved token embeddings with trainable input embeddings
-            for i, reserved_token_id in enumerate(self.trainable_reserved_token_ids):
-                mask = (input_ids == reserved_token_id)
-                if mask.any():
-                    embeddings[mask] = self.trainable_tool_input_embeddings[i]
+
+            reserved_token_ids = torch.as_tensor(
+                self.trainable_reserved_token_ids,
+                device=input_ids.device,
+            )
+            flattened_input_ids = input_ids.reshape(-1)
+            reserved_matches = (flattened_input_ids[:, None] == reserved_token_ids[None, :]).nonzero(as_tuple=False)
+            if reserved_matches.numel() > 0:
+                flattened_embeddings = embeddings.reshape(-1, embeddings.size(-1))
+                flattened_embeddings[reserved_matches[:, 0]] = self.trainable_tool_input_embeddings[
+                    reserved_matches[:, 1]
+                ]
             
             return embeddings
         
@@ -298,11 +259,16 @@ class FunctionCallingModel(nn.Module):
         def custom_lm_head_forward(hidden_states):
             # Get standard logits
             logits = self.original_lm_head_forward(hidden_states)
-            
-            # Replace reserved token logits with trainable output projections
-            for i, reserved_token_id in enumerate(self.trainable_reserved_token_ids):
-                tool_logits = torch.matmul(hidden_states, self.trainable_tool_output_embeddings[i])
-                logits[..., reserved_token_id] = tool_logits
+
+            reserved_token_ids = torch.as_tensor(
+                self.trainable_reserved_token_ids,
+                device=logits.device,
+            )
+            reserved_token_logits = torch.matmul(
+                hidden_states,
+                self.trainable_tool_output_embeddings.transpose(0, 1),
+            )
+            logits[..., reserved_token_ids] = reserved_token_logits
             
             return logits
         
@@ -387,11 +353,6 @@ class FunctionCallingModel(nn.Module):
             token_params = self.trainable_tool_embeddings.numel()
             print(f"Tokenized memory parameters: {token_params:,} (shared)")
 
-        routing_probe_params = 0
-        if self.routing_probe is not None:
-            routing_probe_params = sum(p.numel() for p in self.routing_probe.parameters())
-            print(f"Routing probe parameters: {routing_probe_params:,}")
-
         logit_bias_params = 0
         if self.logit_bias_head is not None:
             logit_bias_params = sum(p.numel() for p in self.logit_bias_head.parameters())
@@ -403,14 +364,14 @@ class FunctionCallingModel(nn.Module):
             total_params = sum(p.numel() for p in self.model.parameters())
             print(f"LoRA parameters: {lora_params:,}")
             print(
-                f"Total trainable: {token_params + routing_probe_params + logit_bias_params + lora_params:,} "
-                f"({(token_params + routing_probe_params + logit_bias_params + lora_params)/total_params*100:.4f}%)"
+                f"Total trainable: {token_params + logit_bias_params + lora_params:,} "
+                f"({(token_params + logit_bias_params + lora_params)/total_params*100:.4f}%)"
             )
         else:
             total_params = sum(p.numel() for p in self.model.parameters())
             print(
-                f"Total trainable: {token_params + routing_probe_params + logit_bias_params:,} "
-                f"({(token_params + routing_probe_params + logit_bias_params)/total_params*100:.4f}%)"
+                f"Total trainable: {token_params + logit_bias_params:,} "
+                f"({(token_params + logit_bias_params)/total_params*100:.4f}%)"
             )
     
     def forward(self, input_ids, attention_mask, return_hidden_states=False):
@@ -447,12 +408,6 @@ class FunctionCallingModel(nn.Module):
         masked_logits[..., tool_token_ids] = logits[..., tool_token_ids]
         return masked_logits
 
-    def _get_routing_probe_scores(self, hidden_states):
-        """Project hidden states to scalar routing-probe logits."""
-        if self.routing_probe is None:
-            return None
-        return self.routing_probe(hidden_states).squeeze(-1)
-
     def _get_logit_bias_scores(self, hidden_states):
         """Project boundary hidden states to tool-selection logits."""
         if self.logit_bias_head is None:
@@ -477,10 +432,6 @@ class FunctionCallingModel(nn.Module):
         logits = logits.clone()
         logits[active_indices[:, None], tool_token_ids[None, :]] += tool_bias
         return logits
-
-    def _get_gate_scores(self, hidden_states):
-        """Backward-compatible wrapper for older analysis utilities."""
-        return self._get_routing_probe_scores(hidden_states)
 
     def _get_js_core_model(self):
         """Return the underlying causal LM used for JS-style logit lens scoring."""
@@ -559,29 +510,83 @@ class FunctionCallingModel(nn.Module):
 
         return torch.argmax(logits, dim=-1)
 
+    def _forward_with_captured_final_hidden_states(
+        self,
+        input_ids,
+        attention_mask,
+        past_key_values=None,
+        use_cache=False,
+        capture_all_hidden_states=False,
+    ):
+        """Run the LM and capture final-layer hidden states without returning every layer unless requested."""
+        if capture_all_hidden_states:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            final_hidden_states = outputs.hidden_states[-1]
+            return outputs, final_hidden_states, outputs.hidden_states
+
+        lm_head_module = self._get_lm_head_module()
+        captured = {}
+
+        def _capture_hidden_states(module, args):
+            if args:
+                captured["final_hidden_states"] = args[0]
+
+        handle = lm_head_module.register_forward_pre_hook(_capture_hidden_states)
+        try:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+        finally:
+            handle.remove()
+
+        final_hidden_states = captured.get("final_hidden_states")
+        return outputs, final_hidden_states, None
+
+    def forward_with_final_hidden_states(self, input_ids, attention_mask):
+        """Return logits plus final-layer hidden states without materializing all transformer layers."""
+        outputs, final_hidden_states, _ = self._forward_with_captured_final_hidden_states(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+            capture_all_hidden_states=False,
+        )
+        return outputs.logits, final_hidden_states
+
     def _generation_forward_step(
         self,
         input_ids,
         attention_mask,
         past_key_values=None,
-        return_hidden_states=False,
+        return_last_hidden_state=False,
+        return_all_hidden_states=False,
     ):
         """Run one cached generation step and return only the newest position outputs."""
-        outputs = self.model(
+        outputs, final_hidden_states, hidden_states = self._forward_with_captured_final_hidden_states(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=True,
-            output_hidden_states=return_hidden_states,
-            return_dict=True,
+            capture_all_hidden_states=return_all_hidden_states,
         )
 
         next_logits = outputs.logits[:, -1, :]
         last_hidden_states = None
-        hidden_states = None
-        if return_hidden_states:
-            last_hidden_states = outputs.hidden_states[-1][:, -1, :]
-            hidden_states = outputs.hidden_states
+        if return_all_hidden_states or return_last_hidden_state:
+            if final_hidden_states is None:
+                raise ValueError("Final hidden states were requested but not captured")
+            last_hidden_states = final_hidden_states[:, -1, :]
 
         return next_logits, last_hidden_states, outputs.past_key_values, hidden_states
 
@@ -594,109 +599,6 @@ class FunctionCallingModel(nn.Module):
             decision_context = input_ids[:, -1] == self.eoc_token_id
         return decision_context
 
-    def _select_past_key_values(self, past_key_values, active_indices):
-        """Clone and batch-select cache rows for probe-only forwards."""
-        if past_key_values is None:
-            return None
-
-        selected_cache = copy.deepcopy(past_key_values)
-        if hasattr(selected_cache, "batch_select_indices"):
-            selected_cache.batch_select_indices(active_indices)
-            return selected_cache
-
-        if isinstance(selected_cache, tuple):
-            selected_layers = []
-            for layer_cache in selected_cache:
-                selected_entries = []
-                for cache_tensor in layer_cache:
-                    if torch.is_tensor(cache_tensor):
-                        selected_entries.append(cache_tensor.index_select(0, active_indices))
-                    else:
-                        selected_entries.append(cache_tensor)
-                selected_layers.append(tuple(selected_entries))
-            return tuple(selected_layers)
-
-        raise TypeError(f"Unsupported past_key_values type: {type(past_key_values)}")
-
-    def _get_current_token_hidden_states(self, attention_mask, current_tokens, active_indices, past_key_values):
-        """Obtain hidden states for accepted current tokens via a cached single-token forward."""
-        if active_indices.numel() == 0:
-            return torch.zeros(
-                (0, self.config.hidden_size),
-                device=current_tokens.device,
-                dtype=self.trainable_tool_input_embeddings.dtype,
-            )
-
-        probe_attention_mask = torch.cat(
-            [
-                attention_mask[active_indices],
-                torch.ones(
-                    (active_indices.numel(), 1),
-                    device=attention_mask.device,
-                    dtype=attention_mask.dtype,
-                ),
-            ],
-            dim=-1,
-        )
-        probe_past_key_values = self._select_past_key_values(past_key_values, active_indices)
-        probe_outputs = self.model(
-            input_ids=current_tokens[active_indices].unsqueeze(-1),
-            attention_mask=probe_attention_mask,
-            past_key_values=probe_past_key_values,
-            use_cache=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        return probe_outputs.hidden_states[-1][:, -1, :]
-
-    def _sample_with_tool_probe_gate(
-        self,
-        next_logits,
-        attention_mask,
-        active_decision_rows,
-        past_key_values,
-        temperature,
-        top_p,
-        do_sample,
-        gate_threshold=None,
-        tool_selection_logits=None,
-    ):
-        """Use current-token hidden states to decide whether current tokens must come from the tool vocab."""
-        threshold = self.gate_threshold if gate_threshold is None else gate_threshold
-        next_tokens = self._sample_next_tokens(
-            next_logits,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=do_sample,
-        )
-        gate_positive_rows = torch.zeros(next_logits.size(0), dtype=torch.bool, device=next_logits.device)
-        active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
-        if active_indices.numel() == 0:
-            return next_tokens, gate_positive_rows
-
-        probe_hidden_states = self._get_current_token_hidden_states(
-            attention_mask=attention_mask,
-            current_tokens=next_tokens,
-            active_indices=active_indices,
-            past_key_values=past_key_values,
-        )
-        gate_scores = self._get_routing_probe_scores(probe_hidden_states)
-        gate_positive = torch.sigmoid(gate_scores) >= threshold
-        gate_positive_rows[active_indices] = gate_positive
-        if gate_positive.any():
-            positive_indices = active_indices[gate_positive]
-            tool_logits_source = next_logits if tool_selection_logits is None else tool_selection_logits
-            masked_logits = self.mask_logits_to_tool_tokens(tool_logits_source[positive_indices])
-            next_tokens = next_tokens.clone()
-            next_tokens[positive_indices] = self._sample_next_tokens(
-                masked_logits,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-            )
-        return next_tokens, gate_positive_rows
-
-    
     def generate_with_tool_prediction(
         self,
         user_tokens,
@@ -713,7 +615,7 @@ class FunctionCallingModel(nn.Module):
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         with torch.no_grad():
-            if not (self.use_gate or self.use_js_trunc or resolved_use_logit_bias):
+            if not (self.use_js_trunc or resolved_use_logit_bias):
                 # Use native generation - our overrides make the custom embeddings/logits transparent
                 generated = self.model.generate(
                     input_ids=user_tokens,
@@ -736,14 +638,6 @@ class FunctionCallingModel(nn.Module):
             past_key_values = None
 
             for step in range(max_new_tokens):
-                next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
-                    input_ids=step_input_ids,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    return_hidden_states=self.use_gate or self.use_js_trunc or resolved_use_logit_bias
-                )
-                next_logits = next_logits.clone()
-
                 decision_context = self._build_decision_context(
                     input_ids=input_ids,
                     batch_size=batch_size,
@@ -751,6 +645,19 @@ class FunctionCallingModel(nn.Module):
                     step=step,
                 )
                 active_decision_rows = decision_context & ~finished
+                need_all_hidden_states = bool(self.use_js_trunc and active_decision_rows.any())
+                need_last_hidden_state = bool(
+                    resolved_use_logit_bias and active_decision_rows.any()
+                )
+                next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
+                    input_ids=step_input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    return_last_hidden_state=need_last_hidden_state,
+                    return_all_hidden_states=need_all_hidden_states,
+                )
+                next_logits = next_logits.clone()
+
                 selection_logits = next_logits
                 if resolved_use_logit_bias and active_decision_rows.any():
                     selection_logits = self._apply_logit_bias_to_logits(
@@ -767,37 +674,12 @@ class FunctionCallingModel(nn.Module):
                         if js_positive.any():
                             positive_indices = active_indices[js_positive]
                             selection_logits[positive_indices] = self.mask_logits_to_tool_tokens(selection_logits[positive_indices])
-                elif self.use_gate and self.probe_from == "tool":
-                    next_tokens, _ = self._sample_with_tool_probe_gate(
-                        next_logits=next_logits,
-                        attention_mask=attention_mask,
-                        active_decision_rows=active_decision_rows,
-                        past_key_values=past_key_values,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                        tool_selection_logits=selection_logits,
-                    )
-                elif self.use_gate and active_decision_rows.any():
-                    gate_scores = self._get_routing_probe_scores(last_hidden_states[active_decision_rows])
-                    gate_positive = torch.sigmoid(gate_scores) >= self.gate_threshold
-                    if gate_positive.any():
-                        active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
-                        positive_indices = active_indices[gate_positive]
-                        selection_logits[positive_indices] = self.mask_logits_to_tool_tokens(selection_logits[positive_indices])
-                    next_tokens = self._sample_next_tokens(
-                        selection_logits,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample
-                    )
-                else:
-                    next_tokens = self._sample_next_tokens(
-                        selection_logits,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample
-                    )
+                next_tokens = self._sample_next_tokens(
+                    selection_logits,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample
+                )
                 next_tokens = next_tokens.masked_fill(finished, tokenizer.eos_token_id)
 
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
@@ -820,21 +702,15 @@ class FunctionCallingModel(nn.Module):
         temperature=0.6,
         top_p=0.9,
         do_sample=False,
-        gate_threshold=None,
-        use_gate=None,
         use_js_trunc=None,
         use_eoc=None,
-        probe_from=None,
         use_logit_bias=None,
     ):
         """Generate sequence where predicted tool tokens are replaced with ground truth tool tokens"""
         self.eval()
 
         resolved_use_eoc = self.use_eoc if use_eoc is None else use_eoc
-        resolved_use_gate = self.use_gate if use_gate is None else use_gate
         resolved_use_js_trunc = self.use_js_trunc if use_js_trunc is None else use_js_trunc
-        resolved_gate_threshold = self.gate_threshold if gate_threshold is None else gate_threshold
-        resolved_probe_from = self.probe_from if probe_from is None else probe_from
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         # Convert ground truth tool names to token IDs
@@ -848,19 +724,6 @@ class FunctionCallingModel(nn.Module):
                 print(f"Warning: Unknown tool name '{tool_name}', skipping")
         
         with torch.no_grad():
-            if not (resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias):
-                outputs = self.model.generate(
-                    input_ids=user_tokens,
-                    attention_mask=user_mask,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                    pad_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
-                )
-                return self._parse_generated_sequences(outputs, user_tokens, tokenizer)
-
             batch_size = user_tokens.shape[0]
             device = user_tokens.device
             
@@ -873,20 +736,6 @@ class FunctionCallingModel(nn.Module):
             tool_replacement_count = [0] * batch_size  # Track how many tools replaced per example
             
             for step in range(max_new_tokens):
-                if resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
-                    logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
-                        input_ids=step_input_ids,
-                        attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        return_hidden_states=(resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias),
-                    )
-                else:
-                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                    logits = outputs.logits[:, -1, :]
-                    last_hidden_states = None
-                    hidden_states = None
-                logits = logits.clone()
-
                 decision_context = self._build_decision_context(
                     input_ids=input_ids,
                     batch_size=batch_size,
@@ -894,39 +743,40 @@ class FunctionCallingModel(nn.Module):
                     step=step,
                     use_eoc=resolved_use_eoc,
                 )
-
+                active_decision_rows = decision_context & ~finished
                 force_ground_truth_rows = torch.zeros(batch_size, dtype=torch.bool, device=device)
+                for i in range(batch_size):
+                    if active_decision_rows[i] and tool_replacement_count[i] < len(gt_tool_token_ids):
+                        force_ground_truth_rows[i] = True
+
+                analysis_rows = active_decision_rows & ~force_ground_truth_rows
+                need_all_hidden_states = bool(resolved_use_js_trunc and analysis_rows.any())
+                need_last_hidden_state = bool(
+                    resolved_use_logit_bias and analysis_rows.any()
+                )
+                logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
+                    input_ids=step_input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    return_last_hidden_state=need_last_hidden_state,
+                    return_all_hidden_states=need_all_hidden_states,
+                )
+                logits = logits.clone()
+
                 next_tokens = None
                 selection_logits = logits
-                if resolved_use_logit_bias and (decision_context & ~finished).any():
+                if resolved_use_logit_bias and analysis_rows.any():
                     selection_logits = self._apply_logit_bias_to_logits(
                         logits=logits,
                         hidden_states=last_hidden_states,
-                        active_decision_rows=(decision_context & ~finished),
+                        active_decision_rows=analysis_rows,
                     )
-                if resolved_use_js_trunc and (decision_context & ~finished).any():
-                    active_indices = (decision_context & ~finished).nonzero(as_tuple=False).squeeze(-1)
+                if resolved_use_js_trunc and analysis_rows.any():
+                    active_indices = analysis_rows.nonzero(as_tuple=False).squeeze(-1)
                     active_hidden_states = tuple(layer_hidden[active_indices] for layer_hidden in hidden_states)
                     js_mean = self._compute_js_mean_from_hidden_states(active_hidden_states)
                     js_positive = js_mean > JS_TRUNCATION_THRESHOLD
                     force_ground_truth_rows[active_indices] = js_positive
-                elif resolved_use_gate and resolved_probe_from == "tool":
-                    next_tokens, force_ground_truth_rows = self._sample_with_tool_probe_gate(
-                        next_logits=logits,
-                        attention_mask=attention_mask,
-                        active_decision_rows=(decision_context & ~finished),
-                        past_key_values=past_key_values,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                        gate_threshold=resolved_gate_threshold,
-                        tool_selection_logits=selection_logits,
-                    )
-                elif resolved_use_gate and (decision_context & ~finished).any():
-                    active_indices = (decision_context & ~finished).nonzero(as_tuple=False).squeeze(-1)
-                    gate_scores = self._get_routing_probe_scores(last_hidden_states[active_indices])
-                    gate_positive = torch.sigmoid(gate_scores) >= resolved_gate_threshold
-                    force_ground_truth_rows[active_indices] = gate_positive
                 
                 # Sample/select next tokens
                 if next_tokens is None:
@@ -965,8 +815,7 @@ class FunctionCallingModel(nn.Module):
                 # Append new tokens to input_ids and update attention_mask
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device)], dim=-1)
-                if resolved_use_gate or resolved_use_js_trunc or resolved_use_logit_bias:
-                    step_input_ids = next_tokens.unsqueeze(-1)
+                step_input_ids = next_tokens.unsqueeze(-1)
             
             # Parse the generated sequences
             return self._parse_generated_sequences(input_ids, user_tokens, tokenizer)
@@ -1121,8 +970,6 @@ class FunctionCallingModel(nn.Module):
         else:
             embedding_params.append(self.trainable_tool_embeddings)
 
-        if self.routing_probe is not None:
-            embedding_params.extend(list(self.routing_probe.parameters()))
         if self.logit_bias_head is not None:
             embedding_params.extend(list(self.logit_bias_head.parameters()))
         
@@ -1139,19 +986,12 @@ class FunctionCallingModel(nn.Module):
             return all_params
 
     def load_state_dict(self, state_dict, strict=True):
-        """Load checkpoints with backward compatibility for legacy probe keys."""
-        remapped_state_dict = state_dict
-        legacy_prefixes = ("toolmix_head.", "gate_mlp.")
-        if any(key.startswith(prefix) for key in state_dict for prefix in legacy_prefixes):
-            remapped_state_dict = dict(state_dict)
-            for key in list(remapped_state_dict.keys()):
-                for legacy_prefix in legacy_prefixes:
-                    if not key.startswith(legacy_prefix):
-                        continue
-                    mapped_key = f"routing_probe.{key[len(legacy_prefix):]}"
-                    remapped_state_dict.setdefault(mapped_key, remapped_state_dict[key])
-                    del remapped_state_dict[key]
-                    break
-        return super().load_state_dict(remapped_state_dict, strict=strict)
+        """Load checkpoints while dropping legacy gate/toolmix probe weights."""
+        filtered_state_dict = dict(state_dict)
+        legacy_prefixes = ("routing_probe.", "toolmix_head.", "gate_mlp.")
+        for key in list(filtered_state_dict.keys()):
+            if key.startswith(legacy_prefixes):
+                del filtered_state_dict[key]
+        return super().load_state_dict(filtered_state_dict, strict=strict)
     
  

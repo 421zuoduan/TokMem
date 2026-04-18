@@ -44,20 +44,6 @@ export HUGGINGFACE_HUB_CACHE="$HF_CACHE_DIR/hub"
 
 cd "$ROOT_DIR/compositional"
 
-echo "Run directory: $RUN_DIR"
-echo "Readme target: $README_FILE"
-echo "Model: $MODEL_DIR"
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
-echo "HF_HOME: $HF_HOME"
-echo "Seeds: ${TRIAL_SEEDS[*]}"
-echo "Train/test size: $TRAIN_SIZE/$TEST_SIZE"
-echo "Max samples per tool: $MAX_SAMPLES_PER_TOOL"
-echo "Train/test max calls: $TRAIN_MAX_CALLS/$TEST_MAX_CALLS"
-echo "Training rounds: $TRAINING_ROUNDS"
-echo "Epochs: $EPOCHS"
-echo "Learning rate: $LR"
-echo
-
 python xlam_datasets.py \
     --top_k "$TOP_K" \
     --max_samples_per_tool "$MAX_SAMPLES_PER_TOOL" \
@@ -70,25 +56,18 @@ python xlam_datasets.py \
     --output_dir "$DATA_DIR" \
     2>&1 | tee "$RUN_DIR/dataset.log"
 
-printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_gate\tuse_eoc_loss\tuse_tool_loss\tuse_toolmix\tuse_js_trunc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
+printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_js_trunc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
 
 SETTINGS=(
-    "1|baseline|0|0|0|0|0|0|0"
-    "2|eoc-only|1|0|0|0|0|0|0"
-    "3|eoc+gate|1|1|0|0|0|0|0"
-    "4|eoc-only+eoc_loss|1|0|1|0|0|0|0"
-    "5|eoc+gate+eoc_loss|1|1|1|0|0|0|0"
-    "6|eoc-only+eoc_loss+tool_loss|1|0|1|1|0|0|0"
-    "7|eoc+gate+eoc_loss+tool_loss|1|1|1|1|0|0|0"
-    "8|eoc+toolmix|1|0|0|0|1|0|0"
-    "9|eoc+gate+toolmix|1|1|0|0|1|0|0"
-    "10|eoc+js_trunc|1|0|0|0|0|1|0"
-    "11|eoc+logit_bias|1|0|0|0|0|0|1"
-    "12|eoc+gate+logit_bias|1|1|0|0|0|0|1"
+    "1|baseline|0|0|0"
+    "2|eoc-only|1|0|0"
+    "3|eoc+js_trunc|1|1|0"
+    "4|eoc+logit_bias|1|0|1"
+    "5|eoc+js_trunc+logit_bias|1|1|1"
 )
 
 for setting_entry in "${SETTINGS[@]}"; do
-    IFS='|' read -r setting_id mode use_eoc use_gate use_eoc_loss use_tool_loss use_toolmix use_js_trunc use_logit_bias <<< "$setting_entry"
+    IFS='|' read -r setting_id mode use_eoc use_js_trunc use_logit_bias <<< "$setting_entry"
 
     trial_index=0
     for seed in "${TRIAL_SEEDS[@]}"; do
@@ -121,18 +100,6 @@ for setting_entry in "${SETTINGS[@]}"; do
         if [[ "$use_eoc" == "1" ]]; then
             cmd+=(--use_eoc)
         fi
-        if [[ "$use_eoc_loss" == "1" ]]; then
-            cmd+=(--use_eoc_loss)
-        fi
-        if [[ "$use_tool_loss" == "1" ]]; then
-            cmd+=(--use_tool_loss)
-        fi
-        if [[ "$use_gate" == "1" ]]; then
-            cmd+=(--use_gate)
-        fi
-        if [[ "$use_toolmix" == "1" ]]; then
-            cmd+=(--use_toolmix)
-        fi
         if [[ "$use_js_trunc" == "1" ]]; then
             cmd+=(--use_js_trunc)
         fi
@@ -140,16 +107,15 @@ for setting_entry in "${SETTINGS[@]}"; do
             cmd+=(--use_logit_bias)
         fi
 
-        echo "Running setting $setting_id ($mode) trial $trial_index with seed $seed"
         {
             printf '=== setting %s trial %s ===\n' "$setting_id" "$trial_index"
-            printf 'mode=%s seed=%s use_eoc=%s use_gate=%s use_eoc_loss=%s use_tool_loss=%s use_toolmix=%s use_js_trunc=%s use_logit_bias=%s\n' \
-                "$mode" "$seed" "$use_eoc" "$use_gate" "$use_eoc_loss" "$use_tool_loss" "$use_toolmix" "$use_js_trunc" "$use_logit_bias"
+            printf 'mode=%s seed=%s use_eoc=%s use_js_trunc=%s use_logit_bias=%s\n' \
+                "$mode" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias"
             "${cmd[@]}"
         } 2>&1 | tee "$trial_dir/stdout.log"
 
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_gate" "$use_eoc_loss" "$use_tool_loss" "$use_toolmix" "$use_js_trunc" "$use_logit_bias" \
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias" \
             "$trial_name" "$trial_dir" "$trial_dir/evaluation_results.json" "$trial_dir/training_summary.json" \
             >> "$MANIFEST_FILE"
     done
@@ -181,12 +147,6 @@ metric_fields = (
 loss_fields = (
     ("avg_total_loss", "avg total loss"),
     ("avg_ar_loss", "avg AR loss"),
-    ("avg_eoc_loss", "avg EOC loss"),
-    ("avg_tool_loss", "avg Tool loss"),
-    ("avg_gate_loss", "avg Gate loss"),
-    ("avg_toolmix_aux_loss", "avg Toolmix aux loss"),
-    ("avg_toolmix_prob", "avg Toolmix prob"),
-    ("toolmix_alpha", "toolmix alpha"),
     ("avg_logit_bias_loss", "avg Logit bias loss"),
 )
 
@@ -196,15 +156,11 @@ def as_bool_text(value):
 
 
 def mean_or_none(values):
-    if not values:
-        return None
-    return statistics.mean(values)
+    return statistics.mean(values) if values else None
 
 
 def format_metric(value):
-    if value is None:
-        return ""
-    return f"{value:.3f}"
+    return "" if value is None else f"{value:.3f}"
 
 
 def format_hparam(value):
@@ -227,12 +183,9 @@ def load_run_hparams(row):
     run_config_path = Path(row["run_dir"]) / "run_config.json"
     if not run_config_path.exists():
         return launcher_epochs, launcher_lr
-
     run_config = json.loads(run_config_path.read_text(encoding="utf-8"))
     args = run_config.get("args", {})
-    epochs = args.get("epochs", launcher_epochs)
-    lr = args.get("lr", launcher_lr)
-    return format_hparam(epochs), format_hparam(lr)
+    return format_hparam(args.get("epochs", launcher_epochs)), format_hparam(args.get("lr", launcher_lr))
 
 
 def replace_or_insert_block(text, begin_marker, end_marker, replacement, anchor_text):
@@ -240,7 +193,6 @@ def replace_or_insert_block(text, begin_marker, end_marker, replacement, anchor_
         start = text.index(begin_marker)
         end = text.index(end_marker) + len(end_marker)
         return text[:start] + replacement + text[end:]
-
     insertion = replacement + "\n\n"
     if anchor_text in text:
         anchor_index = text.index(anchor_text)
@@ -256,178 +208,107 @@ for row in rows:
     grouped.setdefault(row["setting_id"], []).append(row)
 
 trial_count = len({row["trial"] for row in rows if row["setting_id"] == "1"})
-repeat_title = f"{trial_count} 次重复运行均值"
-
 artifacts = {
     "run_name": run_name,
     "manifest": rows,
     "defaults": {
         "seed": 42,
-        "gate_network": "linear",
-        "probe_from": "tool",
-        "eoc_loss_weight": 0.1,
-        "tool_loss_weight": 0.1,
-        "gate_loss_weight": 0.1,
-        "toolmix_loss_weight": 0.1,
-        "logit_bias_loss_weight": 0.1,
         "logit_bias_network": "linear",
+        "logit_bias_loss_weight": 0.1,
         "logit_bias_scale": 1.0,
     },
     "settings": [],
 }
 
-table_header = "| 实验编号 | 模式 | epochs | lr | eoc | gate | eoc loss | task loss | toolmix | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
-table_rule = "| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
-
+header = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
+separator = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
 summary_lines = [
-    f"# README_MYSELF 全方法设置{repeat_title}",
+    f"# README_MYSELF 全方法对比（{trial_count} 次重复均值）",
     "",
     f"- run: `{run_name}`",
     f"- trials per setting: `{trial_count}`",
-    "- defaults: `gate_network=linear`, `probe_from=tool`, auxiliary loss weights keep their default `0.1`",
+    "- methods: `baseline`, `eoc-only`, `eoc+js_trunc`, `eoc+logit_bias`, `eoc+js_trunc+logit_bias`",
+    "- defaults: `logit_bias_network=linear`, `logit_bias_loss_weight=0.1`, `logit_bias_scale=1.0`",
     "",
-    "## 平均结果表",
-    "",
-    table_header,
-    table_rule,
+    header,
+    separator,
 ]
-
-readme_table_lines = [
-    table_header,
-    table_rule,
-]
+readme_table_lines = [header, separator]
 
 for setting_id in sorted(grouped, key=lambda value: int(value)):
     setting_rows = sorted(grouped[setting_id], key=lambda row: int(row["trial"]))
     first_row = setting_rows[0]
-
-    eval_metrics = {field: [] for field, _ in metric_fields}
-    train_metrics = {field: [] for field, _ in loss_fields}
-    trials = []
-    epochs_values = []
-    lr_values = []
+    epochs, lr = load_run_hparams(first_row)
+    metric_values = {key: [] for key, _ in metric_fields}
+    loss_values = {key: [] for key, _ in loss_fields}
 
     for row in setting_rows:
-        evaluation_payload = json.loads(Path(row["evaluation_results"]).read_text(encoding="utf-8"))
-        eval_results = evaluation_payload["rounds"][-1]["eval_results"]
-        training_path = Path(row["training_summary"])
-        train_results = None
-        if training_path.exists():
-            training_payload = json.loads(training_path.read_text(encoding="utf-8"))
-            train_results = last_training_round(training_payload)
-
-        for field, _ in metric_fields:
-            eval_metrics[field].append(float(eval_results[field]))
-        if train_results is not None:
-            for field, _ in loss_fields:
-                value = train_results.get(field)
+        eval_path = Path(row["evaluation_results"])
+        if eval_path.exists():
+            payload = json.loads(eval_path.read_text(encoding="utf-8"))
+            for key, _ in metric_fields:
+                value = payload.get(key)
                 if value is not None:
-                    train_metrics[field].append(float(value))
+                    metric_values[key].append(value)
+        train_path = Path(row["training_summary"])
+        if train_path.exists():
+            payload = json.loads(train_path.read_text(encoding="utf-8"))
+            round_payload = last_training_round(payload)
+            for key, _ in loss_fields:
+                value = round_payload.get(key)
+                if value is not None:
+                    loss_values[key].append(value)
 
-        trial_epochs, trial_lr = load_run_hparams(row)
-        if trial_epochs not in epochs_values:
-            epochs_values.append(trial_epochs)
-        if trial_lr not in lr_values:
-            lr_values.append(trial_lr)
-
-        trials.append(
-            {
-                "trial": int(row["trial"]),
-                "seed": int(row["seed"]),
-                "run_name": row["run_name"],
-                "epochs": trial_epochs,
-                "lr": trial_lr,
-                "eval_results": eval_results,
-                "training_summary": train_results,
-            }
-        )
-
-    averaged_eval = {field: mean_or_none(values) for field, values in eval_metrics.items()}
-    averaged_train = {field: mean_or_none(values) for field, values in train_metrics.items()}
-    setting_epochs = ", ".join(epochs_values)
-    setting_lr = ", ".join(lr_values)
-
-    line = (
-        f"| `{setting_id}` | {first_row['mode']} | {setting_epochs} | {setting_lr} | "
-        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_gate'])} | "
-        f"{as_bool_text(first_row['use_eoc_loss'])} | {as_bool_text(first_row['use_tool_loss'])} | "
-        f"{as_bool_text(first_row['use_toolmix'])} | {as_bool_text(first_row['use_js_trunc'])} | "
-        f"{as_bool_text(first_row['use_logit_bias'])} | "
-        f"{format_metric(averaged_eval['tool_accuracy'])} | "
-        f"{format_metric(averaged_eval['avg_tool_f1_score'])} | "
-        f"{format_metric(averaged_eval['avg_f1_score'])} | "
-        f"{format_metric(averaged_eval['exact_accuracy'])} | "
-        f"{format_metric(averaged_eval['parse_error_rate'])} |"
+    row_text = (
+        f"| `{setting_id}` | {first_row['mode']} | {epochs} | {lr} | "
+        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_js_trunc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
+        + " | ".join(format_metric(mean_or_none(metric_values[key])) for key, _ in metric_fields)
+        + " |"
     )
-    summary_lines.append(line)
-    readme_table_lines.append(line)
+    summary_lines.append(row_text)
+    readme_table_lines.append(row_text)
 
     artifacts["settings"].append(
         {
             "setting_id": int(setting_id),
             "mode": first_row["mode"],
-            "epochs": setting_epochs,
-            "lr": setting_lr,
+            "epochs": epochs,
+            "lr": lr,
             "flags": {
                 "use_eoc": first_row["use_eoc"] == "1",
-                "use_gate": first_row["use_gate"] == "1",
-                "use_eoc_loss": first_row["use_eoc_loss"] == "1",
-                "use_tool_loss": first_row["use_tool_loss"] == "1",
-                "use_toolmix": first_row["use_toolmix"] == "1",
                 "use_js_trunc": first_row["use_js_trunc"] == "1",
                 "use_logit_bias": first_row["use_logit_bias"] == "1",
             },
-            "trial_count": len(setting_rows),
-            "averaged_eval": averaged_eval,
-            "averaged_train": averaged_train,
-            "trials": trials,
+            "metrics": {key: mean_or_none(metric_values[key]) for key, _ in metric_fields},
+            "losses": {key: mean_or_none(loss_values[key]) for key, _ in loss_fields},
         }
     )
 
-summary_lines.extend(
-    [
-        "",
-        "## 说明",
-        "",
-        "- README 新表的均值由脚本读取每个 trial 的 `evaluation_results.json` 自动计算。",
-        "- `training_summary.json` 在存在时会一起读入并写到汇总产物里。",
-        f"- 本次 {trial_count} 个 trial 统一使用 `seed=42`，汇总值表示同一设置重复运行 {trial_count} 次的均值。",
-        f"- README 自动写回位置: `{readme_path}`",
-        "",
-    ]
-)
-
 summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
-artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False), encoding="utf-8")
 
-begin_marker = "<!-- README_MYSELF_ALLMETHODS_AVG_TABLE_BEGIN -->"
-end_marker = "<!-- README_MYSELF_ALLMETHODS_AVG_TABLE_END -->"
-replacement = "\n".join(
-    [
-        begin_marker,
-        f"### 全方法 {repeat_title}",
-        "",
-        *readme_table_lines,
-        "",
-        f"- 自动生成自 `compositional/runs/{run_name}`。",
-        f"- {trial_count} 个 trial 统一使用 `seed=42`，该表表示同一设置重复运行 {trial_count} 次的均值。",
-        "- 默认 `gate_network=linear`、`probe_from=tool`，辅助 loss weight 统一使用默认值 `0.1`。",
-        end_marker,
-    ]
-)
-
-readme_text = readme_path.read_text(encoding="utf-8")
-updated = replace_or_insert_block(
-    readme_text,
+begin_marker = "<!-- README_MYSELF_ALLMETHODS_TABLE:BEGIN -->"
+end_marker = "<!-- README_MYSELF_ALLMETHODS_TABLE:END -->"
+replacement_lines = [
     begin_marker,
+    f"## Compositional maintained methods（{trial_count} 次重复均值）",
+    "",
+    f"- run: `{run_name}`",
+    "- 模式只保留当前维护方法：`baseline`、`eoc-only`、`eoc+js_trunc`、`eoc+logit_bias`、`eoc+js_trunc+logit_bias`。",
+    "- 默认 `logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。",
+    "",
+    *readme_table_lines,
     end_marker,
-    replacement,
-    "脚注：",
-)
-readme_path.write_text(updated, encoding="utf-8")
-PY
+]
+replacement = "\n".join(replacement_lines)
 
-echo
-echo "Finished. Summary: $SUMMARY_FILE"
-echo "Artifacts: $ARTIFACTS_FILE"
-echo "README updated: $README_FILE"
+if readme_path.exists():
+    updated = replace_or_insert_block(
+        readme_path.read_text(encoding="utf-8"),
+        begin_marker,
+        end_marker,
+        replacement,
+        "## Readme Myself",
+    )
+    readme_path.write_text(updated, encoding="utf-8")
+PY

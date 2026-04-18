@@ -1,5 +1,4 @@
 import inspect
-import math
 import os
 import tempfile
 from pathlib import Path
@@ -13,34 +12,20 @@ import torch.nn.functional as F
 LOSS_METRIC_ORDER = (
     "total_loss",
     "ar_loss",
-    "eoc_loss",
-    "tool_loss",
-    "gate_loss",
-    "toolmix_aux_loss",
     "logit_bias_loss",
 )
 
 
-def _resolve_mode_flags(model, use_eoc=None, use_gate=None, use_eoc_loss=None, use_js_trunc=None):
+def _resolve_mode_flags(model, use_eoc=None, use_js_trunc=None):
     resolved_use_eoc = bool(getattr(model, "use_eoc", False) if use_eoc is None else use_eoc)
-    resolved_use_gate = bool(getattr(model, "use_gate", False) if use_gate is None else use_gate)
-    resolved_use_eoc_loss = bool(
-        getattr(model, "use_eoc_loss", False) if use_eoc_loss is None else use_eoc_loss
-    )
     resolved_use_js_trunc = bool(
         getattr(model, "use_js_trunc", False) if use_js_trunc is None else use_js_trunc
     )
 
-    if resolved_use_gate and not resolved_use_eoc:
-        raise ValueError("use_gate=True requires use_eoc=True")
     if resolved_use_js_trunc and not resolved_use_eoc:
         raise ValueError("use_js_trunc=True requires use_eoc=True")
-    if resolved_use_gate and resolved_use_js_trunc:
-        raise ValueError("use_gate=True and use_js_trunc=True are mutually exclusive")
-    if resolved_use_eoc_loss and not resolved_use_eoc:
-        raise ValueError("use_eoc_loss=True requires use_eoc=True")
 
-    return resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss, resolved_use_js_trunc
+    return resolved_use_eoc, resolved_use_js_trunc
 
 
 def _call_method_with_supported_kwargs(method, **kwargs):
@@ -51,48 +36,11 @@ def _call_method_with_supported_kwargs(method, **kwargs):
 
     supported_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
     return method(**supported_kwargs)
-
-
-def _ground_truth_gate_supported(model):
-    return any(
-        callable(getattr(model, method_name, None))
-        for method_name in ("generate_with_ground_truth_tools_and_gate", "generate_with_gated_ground_truth_tools")
-    )
-
-
-def _is_tool_token_id(token_id, model):
-    return token_id in getattr(model, "token_id_to_tool_id", {})
-
-
-def compute_toolmix_alpha(vocab_size, tool_token_count):
-    """Compute the automatic toolmix scaling factor."""
-    if vocab_size is None or int(vocab_size) <= 1:
-        raise ValueError("toolmix_alpha requires vocab_size > 1")
-    if tool_token_count is None or int(tool_token_count) <= 1:
-        raise ValueError("toolmix_alpha requires at least two tool tokens")
-    return math.log(float(vocab_size)) / math.log(float(tool_token_count))
-
-
 def _metric_value_to_float(value):
     if isinstance(value, torch.Tensor):
         return float(value.detach().item())
     return float(value)
 
-
-def _average_probability(probabilities, default=0.0):
-    if probabilities is None or probabilities.numel() == 0:
-        return float(default)
-    return float(probabilities.detach().mean().item())
-
-
-def _boundary_prob_logging_mask(shift_labels, batch_indices, time_indices, excluded_token_id=None):
-    if batch_indices is None or time_indices is None:
-        return torch.zeros((0,), dtype=torch.bool, device=shift_labels.device)
-    if batch_indices.numel() == 0:
-        return torch.zeros((0,), dtype=torch.bool, device=shift_labels.device)
-    if excluded_token_id is None:
-        return torch.ones(batch_indices.numel(), dtype=torch.bool, device=shift_labels.device)
-    return shift_labels[batch_indices, time_indices] != int(excluded_token_id)
 
 
 def _build_loss_metrics(total_loss, ar_loss, extra_loss_metrics=None):
@@ -248,10 +196,7 @@ def _plot_loss_trends(ax, loss_steps):
     line_styles = {
         "total_loss": {"color": "#1f77b4", "linewidth": 2.4, "alpha": 0.98, "linestyle": "-"},
         "ar_loss": {"color": "#ff7f0e", "linewidth": 2.0, "alpha": 0.92, "linestyle": "-"},
-        "tool_loss": {"color": "#2ca02c", "linewidth": 1.5, "alpha": 0.8, "linestyle": "--"},
-        "eoc_loss": {"color": "#9467bd", "linewidth": 1.4, "alpha": 0.75, "linestyle": "--"},
-        "gate_loss": {"color": "#d62728", "linewidth": 1.4, "alpha": 0.75, "linestyle": "--"},
-        "toolmix_aux_loss": {"color": "#8c564b", "linewidth": 1.4, "alpha": 0.8, "linestyle": ":"},
+        "logit_bias_loss": {"color": "#2ca02c", "linewidth": 1.5, "alpha": 0.8, "linestyle": "--"},
     }
 
     y_limits = _loss_ylim(loss_series)
@@ -369,7 +314,7 @@ def compute_tool_subset_targets(shift_labels, model):
     return tool_targets, tool_mask
 
 
-def build_shift_supervision_masks(shift_labels, model, use_eoc=False, use_gate=False):
+def build_shift_supervision_masks(shift_labels, model, use_eoc=False):
     """Build post-truncation supervision masks from shifted labels."""
     valid_mask = shift_labels != -100
     tool_targets, tool_mask = compute_tool_subset_targets(shift_labels, model)
@@ -385,106 +330,7 @@ def build_shift_supervision_masks(shift_labels, model, use_eoc=False, use_gate=F
         "tool_mask": tool_mask,
         "tool_targets": tool_targets,
         "eoc_mask": eoc_mask,
-        "use_gate": use_gate,
     }
-
-
-def gather_routing_probe_examples(hidden_states, labels, model, return_indices=False, probe_from=None):
-    """Collect boundary hidden states and labels for the next-token tool decision."""
-    eoc_token_id = getattr(model, "eoc_token_id", None)
-    resolved_probe_from = getattr(model, "probe_from", "eoc") if probe_from is None else probe_from
-    if eoc_token_id is None:
-        empty_hidden = hidden_states.new_zeros((0, hidden_states.size(-1)))
-        empty_targets = hidden_states.new_zeros((0,), dtype=torch.float32)
-        empty_indices = torch.zeros((0,), dtype=torch.long, device=hidden_states.device)
-        if return_indices:
-            return empty_hidden, empty_targets, empty_indices, empty_indices, 0, 0
-        return empty_hidden, empty_targets, 0, 0
-
-    shift_labels = labels[:, 1:]
-    valid_mask = shift_labels != -100
-
-    toolmix_hidden_states = []
-    toolmix_targets = []
-    batch_indices = []
-    time_indices = []
-    initial_sites = 0
-    eoc_sites = 0
-
-    for batch_idx in range(labels.size(0)):
-        valid_positions = torch.nonzero(valid_mask[batch_idx], as_tuple=False).flatten()
-        if valid_positions.numel() == 0:
-            continue
-
-        first_valid_pos = int(valid_positions[0].item())
-        initial_pos = first_valid_pos
-        if (
-            initial_pos >= 0
-            and initial_pos < shift_labels.size(1)
-            and labels[batch_idx, initial_pos].item() == -100
-        ):
-            next_token_id = int(shift_labels[batch_idx, initial_pos].item())
-            if next_token_id != -100:
-                source_pos = initial_pos if resolved_probe_from == "eoc" else initial_pos + 1
-                if source_pos < hidden_states.size(1):
-                    toolmix_hidden_states.append(hidden_states[batch_idx, source_pos])
-                    toolmix_targets.append(1.0 if _is_tool_token_id(next_token_id, model) else 0.0)
-                    batch_indices.append(batch_idx)
-                    time_indices.append(initial_pos)
-                    initial_sites += 1
-
-        eoc_positions = torch.nonzero(
-            (labels[batch_idx, :-1] == eoc_token_id) & valid_mask[batch_idx],
-            as_tuple=False,
-        ).flatten()
-        for position in eoc_positions.tolist():
-            next_token_id = int(shift_labels[batch_idx, position].item())
-            if next_token_id == -100:
-                continue
-            source_pos = position if resolved_probe_from == "eoc" else position + 1
-            if source_pos >= hidden_states.size(1):
-                continue
-            toolmix_hidden_states.append(hidden_states[batch_idx, source_pos])
-            toolmix_targets.append(1.0 if _is_tool_token_id(next_token_id, model) else 0.0)
-            batch_indices.append(batch_idx)
-            time_indices.append(position)
-            eoc_sites += 1
-
-    if not toolmix_hidden_states:
-        empty_hidden = hidden_states.new_zeros((0, hidden_states.size(-1)))
-        empty_targets = hidden_states.new_zeros((0,), dtype=torch.float32)
-        empty_indices = torch.zeros((0,), dtype=torch.long, device=hidden_states.device)
-        if return_indices:
-            return empty_hidden, empty_targets, empty_indices, empty_indices, initial_sites, eoc_sites
-        return empty_hidden, empty_targets, initial_sites, eoc_sites
-
-    stacked_hidden_states = torch.stack(toolmix_hidden_states, dim=0)
-    stacked_targets = torch.tensor(toolmix_targets, dtype=torch.float32, device=hidden_states.device)
-    stacked_batch_indices = torch.tensor(batch_indices, dtype=torch.long, device=hidden_states.device)
-    stacked_time_indices = torch.tensor(time_indices, dtype=torch.long, device=hidden_states.device)
-    if return_indices:
-        return (
-            stacked_hidden_states,
-            stacked_targets,
-            stacked_batch_indices,
-            stacked_time_indices,
-            initial_sites,
-            eoc_sites,
-        )
-    return stacked_hidden_states, stacked_targets, initial_sites, eoc_sites
-
-
-def gather_gate_examples(hidden_states, labels, model):
-    """Collect hidden states and binary labels for gate supervision."""
-    return gather_routing_probe_examples(hidden_states, labels, model, return_indices=False)
-
-
-def compute_routing_probe_loss(model, routing_hidden_states, routing_targets):
-    """Run the shared routing probe on boundary states and return logits, probabilities, and BCE loss."""
-    routing_logits = model._get_routing_probe_scores(routing_hidden_states.detach())
-    routing_prob = torch.sigmoid(routing_logits)
-    routing_loss = F.binary_cross_entropy_with_logits(routing_logits, routing_targets)
-    return routing_logits, routing_prob, routing_loss
 
 
 def gather_logit_bias_examples(hidden_states, labels, model, return_indices=False):
@@ -574,14 +420,32 @@ def compute_logit_bias_loss(model, boundary_hidden_states, tool_targets):
     return tool_logits, tool_loss
 
 
-def _forward_with_optional_hidden_states(model, input_ids, attention_mask, output_hidden_states=False):
+def _forward_with_optional_hidden_states(
+    model,
+    input_ids,
+    attention_mask,
+    output_hidden_states=False,
+    final_hidden_state_only=False,
+):
+    if output_hidden_states and final_hidden_state_only and hasattr(model, "forward_with_final_hidden_states"):
+        logits, final_hidden_states = model.forward_with_final_hidden_states(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        return logits, final_hidden_states
+
     forward_model = getattr(model, "model", model)
-    return forward_model(
+    outputs = forward_model(
         input_ids=input_ids,
         attention_mask=attention_mask,
         output_hidden_states=output_hidden_states,
         return_dict=True,
     )
+    logits = outputs.logits if hasattr(outputs, "logits") else outputs
+    hidden_states = None
+    if output_hidden_states and hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+        hidden_states = outputs.hidden_states[-1]
+    return logits, hidden_states
 
 
 def _generate_results(
@@ -589,11 +453,9 @@ def _generate_results(
     tokenizer,
     user_tokens,
     user_mask,
-    use_gate=False,
     use_js_trunc=False,
     use_logit_bias=False,
     use_eoc=False,
-    gate_threshold=0.5,
     use_ground_truth_tools=False,
     ground_truth_tools=None,
     max_new_tokens=256,
@@ -603,27 +465,9 @@ def _generate_results(
 ):
     candidate_methods = []
     if use_ground_truth_tools:
-        if use_gate:
-            candidate_methods.extend(
-                [
-                    "generate_with_ground_truth_tools_and_gate",
-                    "generate_with_gated_ground_truth_tools",
-                    "generate_with_ground_truth_tools",
-                ]
-            )
-        else:
-            candidate_methods.append("generate_with_ground_truth_tools")
+        candidate_methods.append("generate_with_ground_truth_tools")
     else:
-        if use_gate:
-            candidate_methods.extend(
-                [
-                    "generate_with_optional_gate",
-                    "generate_with_gate",
-                    "generate_with_tool_prediction",
-                ]
-            )
-        else:
-            candidate_methods.append("generate_with_tool_prediction")
+        candidate_methods.append("generate_with_tool_prediction")
 
     generation_kwargs = {
         "user_tokens": user_tokens,
@@ -633,8 +477,6 @@ def _generate_results(
         "temperature": temperature,
         "top_p": top_p,
         "do_sample": do_sample,
-        "gate_threshold": gate_threshold,
-        "use_gate": use_gate,
         "use_js_trunc": use_js_trunc,
         "use_logit_bias": use_logit_bias,
         "use_eoc": use_eoc,
@@ -649,7 +491,7 @@ def _generate_results(
 
     raise AttributeError(
         f"Model {type(model).__name__} does not expose a compatible generation method "
-        f"for use_gate={use_gate}, use_js_trunc={use_js_trunc}, "
+        f"for use_js_trunc={use_js_trunc}, "
         f"use_logit_bias={use_logit_bias}, use_ground_truth_tools={use_ground_truth_tools}."
     )
 
@@ -674,11 +516,9 @@ def _generate_results_with_example_fallback(
     attention_mask,
     raw_examples,
     batch_idx,
-    use_gate,
     use_js_trunc,
     use_logit_bias,
     use_eoc,
-    gate_threshold,
     use_ground_truth_tools,
 ):
     """Generate batch results, falling back to per-example decoding on batch failures."""
@@ -697,11 +537,9 @@ def _generate_results_with_example_fallback(
                     tokenizer,
                     single_input,
                     single_mask,
-                    use_gate=use_gate,
                     use_js_trunc=use_js_trunc,
                     use_logit_bias=use_logit_bias,
                     use_eoc=use_eoc,
-                    gate_threshold=gate_threshold,
                     use_ground_truth_tools=True,
                     ground_truth_tools=expected_tools,
                     max_new_tokens=256,
@@ -721,11 +559,9 @@ def _generate_results_with_example_fallback(
             tokenizer,
             input_ids,
             attention_mask,
-            use_gate=use_gate,
             use_js_trunc=use_js_trunc,
             use_logit_bias=use_logit_bias,
             use_eoc=use_eoc,
-            gate_threshold=gate_threshold,
             use_ground_truth_tools=False,
             max_new_tokens=256,
             temperature=0.6,
@@ -745,11 +581,9 @@ def _generate_results_with_example_fallback(
                     tokenizer,
                     single_input,
                     single_mask,
-                    use_gate=use_gate,
                     use_js_trunc=use_js_trunc,
                     use_logit_bias=use_logit_bias,
                     use_eoc=use_eoc,
-                    gate_threshold=gate_threshold,
                     use_ground_truth_tools=False,
                     max_new_tokens=256,
                     temperature=0.6,
@@ -788,18 +622,9 @@ def train_native_function_calling_model(
     active_tool_ids=None,
     renorm_active_rows=False,
     use_eoc=None,
-    use_gate=None,
     use_js_trunc=None,
     use_logit_bias=None,
-    use_eoc_loss=False,
-    use_tool_loss=False,
-    use_toolmix=False,
-    eoc_loss_weight=0.1,
-    tool_loss_weight=0.1,
-    gate_loss_weight=0.1,
-    toolmix_loss_weight=0.1,
     logit_bias_loss_weight=0.1,
-    gate_threshold=0.5,
     plot_history=None,
     plot_step_offset=0,
     plot_round=None,
@@ -809,27 +634,17 @@ def train_native_function_calling_model(
     from transformers import get_linear_schedule_with_warmup
 
     model.train()
-    resolved_use_eoc, resolved_use_gate, resolved_use_eoc_loss, resolved_use_js_trunc = _resolve_mode_flags(
+    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
         model,
         use_eoc,
-        use_gate,
-        use_eoc_loss,
         use_js_trunc,
     )
-    resolved_use_toolmix = bool(
-        getattr(model, "use_toolmix", False)
-        if use_toolmix is None else use_toolmix
-    )
     resolved_use_logit_bias = bool(
-        getattr(model, "use_logit_bias", False)
-        if use_logit_bias is None else use_logit_bias
+        getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
-    if resolved_use_toolmix and not resolved_use_eoc:
-        raise ValueError("use_toolmix=True requires use_eoc=True")
     if resolved_use_logit_bias and not resolved_use_eoc:
         raise ValueError("use_logit_bias=True requires use_eoc=True")
 
-    # Set up optimizer with different learning rates for embeddings and LoRA.
     if model.lora_config and lora_lr is not None:
         embedding_params, lora_params = model.get_trainable_parameters(separate_lora=True)
         known_param_ids = {id(param) for param in embedding_params + lora_params}
@@ -884,29 +699,13 @@ def train_native_function_calling_model(
     print(f"Warmup steps: {total_steps // 10}")
     print(
         "Mode: "
-        f"use_eoc={resolved_use_eoc}, use_eoc_loss={resolved_use_eoc_loss}, "
-        f"use_gate={resolved_use_gate}, use_js_trunc={resolved_use_js_trunc}, "
-        f"use_tool_loss={use_tool_loss}, use_toolmix={resolved_use_toolmix}, "
+        f"use_eoc={resolved_use_eoc}, use_js_trunc={resolved_use_js_trunc}, "
         f"use_logit_bias={resolved_use_logit_bias}, "
-        f"eoc_loss_weight={eoc_loss_weight}, tool_loss_weight={tool_loss_weight}, "
-        f"gate_loss_weight={gate_loss_weight}, toolmix_loss_weight={toolmix_loss_weight}, "
-        f"logit_bias_loss_weight={logit_bias_loss_weight}, "
-        f"gate_threshold={gate_threshold}"
+        f"logit_bias_loss_weight={logit_bias_loss_weight}"
     )
 
     all_trainable_params = model.get_trainable_parameters()
     total_trainable = sum(param.numel() for param in all_trainable_params)
-    toolmix_alpha = None
-    if resolved_use_toolmix:
-        toolmix_alpha = compute_toolmix_alpha(
-            getattr(getattr(model, "config", None), "vocab_size", None),
-            len(getattr(model, "reserved_token_ids", [])),
-        )
-        model.toolmix_alpha = toolmix_alpha
-        print(
-            f"Toolmix alpha: {toolmix_alpha:.6f} "
-            f"(|V|={model.config.vocab_size}, |T|={len(model.reserved_token_ids)})"
-        )
 
     if model.decouple_embeddings:
         print("Training mode: Decoupled embeddings")
@@ -926,20 +725,6 @@ def train_native_function_calling_model(
     total_valid_positions = 0
     total_eoc_positions = 0
     total_tool_positions = 0
-    total_gate_positions = 0
-    total_gate_initial_positions = 0
-    total_gate_eoc_positions = 0
-    total_gate_prob_positions = 0
-    total_gate_prob_sum = 0.0
-    total_toolmix_positions = 0
-    total_toolmix_initial_positions = 0
-    total_toolmix_eoc_positions = 0
-    total_toolmix_prob_positions = 0
-    total_toolmix_prob_sum = 0.0
-    total_toolmix_mixed_loss_sum = 0.0
-    total_toolmix_tool_ce_sum = 0.0
-    total_toolmix_alpha_tool_loss_sum = 0.0
-    total_toolmix_mixed_tool_positions = 0
     total_logit_bias_positions = 0
     total_logit_bias_initial_positions = 0
     total_logit_bias_eoc_positions = 0
@@ -951,30 +736,10 @@ def train_native_function_calling_model(
     window_valid_positions = 0
     window_eoc_positions = 0
     window_tool_positions = 0
-    window_gate_positions = 0
-    window_gate_prob_positions = 0
-    window_gate_prob_sum = 0.0
-    window_toolmix_positions = 0
-    window_toolmix_prob_positions = 0
-    window_toolmix_prob_sum = 0.0
-    window_toolmix_mixed_loss_sum = 0.0
-    window_toolmix_tool_ce_sum = 0.0
-    window_toolmix_alpha_tool_loss_sum = 0.0
-    window_toolmix_mixed_tool_positions = 0
     window_logit_bias_positions = 0
 
     zero = torch.tensor(0.0, device=device)
-    tool_token_ids = torch.tensor(model.reserved_token_ids, device=device, dtype=torch.long)
-    has_routing_probe = hasattr(model, "routing_probe") and model.routing_probe is not None
     has_logit_bias_head = hasattr(model, "logit_bias_head") and model.logit_bias_head is not None
-    eot_token_id = None
-    tokenizer = getattr(model, "tokenizer", None)
-    if tokenizer is not None:
-        eot_token_ids = tokenizer("<|eot_id|>", add_special_tokens=False).get("input_ids", [])
-        if len(eot_token_ids) == 1:
-            eot_token_id = int(eot_token_ids[0])
-    if (resolved_use_gate or resolved_use_toolmix) and not has_routing_probe:
-        print("Warning: gate/toolmix requested but model has no routing_probe; boundary losses will stay zero and toolmix will fall back to plain CE.")
     if resolved_use_logit_bias and not has_logit_bias_head:
         print("Warning: logit bias requested but model has no logit_bias_head; detached prior loss will stay zero.")
 
@@ -984,18 +749,13 @@ def train_native_function_calling_model(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            outputs = _forward_with_optional_hidden_states(
+            logits, hidden_states = _forward_with_optional_hidden_states(
                 model,
                 input_ids,
                 attention_mask,
-                output_hidden_states=(resolved_use_gate or resolved_use_toolmix or resolved_use_logit_bias),
+                output_hidden_states=resolved_use_logit_bias,
+                final_hidden_state_only=resolved_use_logit_bias,
             )
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            hidden_states = None
-            if (
-                resolved_use_gate or resolved_use_toolmix or resolved_use_logit_bias
-            ) and hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
-                hidden_states = outputs.hidden_states[-1]
 
             if not torch.isfinite(logits).all():
                 print(
@@ -1032,78 +792,14 @@ def train_native_function_calling_model(
                 shift_labels,
                 model,
                 use_eoc=resolved_use_eoc,
-                use_gate=resolved_use_gate,
             )
-
-            eoc_loss = zero
-            tool_loss = zero
-            gate_loss = zero
-            toolmix_aux_loss = zero
-            logit_bias_loss = zero
-
             eoc_count = int(masks["eoc_mask"].sum().item())
             tool_count = int(masks["tool_mask"].sum().item())
-            toolmix_count = 0
-            toolmix_initial_count = 0
-            toolmix_eoc_count = 0
-            mixed_tool_count = 0
-            boundary_prob_map = torch.zeros_like(ce_loss_per_position)
-            boundary_mask = torch.zeros_like(masks["tool_mask"], dtype=torch.bool)
-            mixed_tool_loss = zero
-            toolmix_tool_ce_loss = zero
-            toolmix_alpha_tool_loss = zero
-
-            if resolved_use_eoc_loss and eoc_count > 0:
-                eoc_loss = F.cross_entropy(shift_logits[masks["eoc_mask"]], shift_labels[masks["eoc_mask"]])
-
-            tool_loss_per_position = torch.zeros_like(ce_loss_per_position)
-            if resolved_use_eoc and (use_tool_loss or resolved_use_toolmix) and tool_count > 0:
-                tool_logits = shift_logits[masks["tool_mask"]][:, tool_token_ids]
-                tool_targets = masks["tool_targets"][masks["tool_mask"]]
-                tool_loss_values = F.cross_entropy(tool_logits, tool_targets, reduction="none")
-                tool_loss = tool_loss_values.mean()
-                tool_loss_per_position[masks["tool_mask"]] = tool_loss_values
-
-            gate_hidden_states = None
-            gate_targets = None
-            gate_initial_count = 0
-            gate_eoc_count = 0
-            gate_batch_indices = None
-            gate_time_indices = None
-            gate_prob = None
-            gate_prob_logging_mask = None
-            if (resolved_use_gate or resolved_use_toolmix) and hidden_states is not None:
-                (
-                    gate_hidden_states,
-                    gate_targets,
-                    gate_batch_indices,
-                    gate_time_indices,
-                    gate_initial_count,
-                    gate_eoc_count,
-                ) = gather_routing_probe_examples(
-                    hidden_states,
-                    labels,
-                    model,
-                    return_indices=True,
-                )
-                gate_prob_logging_mask = _boundary_prob_logging_mask(
-                    shift_labels,
-                    gate_batch_indices,
-                    gate_time_indices,
-                    excluded_token_id=eot_token_id,
-                )
-                if gate_targets.numel() > 0 and has_routing_probe:
-                    # Stop routing BCE gradients at the branch input so routing supervision
-                    # updates only the routing probe, not the backbone or reserved-token embeddings.
-                    _, gate_prob, gate_loss = compute_routing_probe_loss(
-                        model,
-                        gate_hidden_states,
-                        gate_targets,
-                    )
-
+            logit_bias_loss = zero
             logit_bias_targets = None
             logit_bias_initial_count = 0
             logit_bias_eoc_count = 0
+
             if resolved_use_logit_bias and hidden_states is not None:
                 (
                     logit_bias_hidden_states,
@@ -1125,62 +821,7 @@ def train_native_function_calling_model(
                         logit_bias_targets,
                     )
 
-            if resolved_use_toolmix and hidden_states is not None:
-                toolmix_count = int(gate_targets.numel()) if gate_targets is not None else 0
-                toolmix_initial_count = gate_initial_count
-                toolmix_eoc_count = gate_eoc_count
-                if toolmix_count > 0:
-                    boundary_mask[gate_batch_indices, gate_time_indices] = True
-                    if gate_prob is not None:
-                        boundary_prob_map[gate_batch_indices, gate_time_indices] = gate_prob.to(boundary_prob_map.dtype)
-                        toolmix_aux_loss = gate_loss
-                if gate_prob is not None and gate_prob_logging_mask is not None:
-                    toolmix_prob_count = int(gate_prob_logging_mask.sum().item())
-                    if toolmix_prob_count > 0:
-                        toolmix_prob_sum = float(gate_prob[gate_prob_logging_mask].detach().sum().item())
-                        total_toolmix_prob_sum += toolmix_prob_sum
-                        window_toolmix_prob_sum += toolmix_prob_sum
-                        total_toolmix_prob_positions += toolmix_prob_count
-                        window_toolmix_prob_positions += toolmix_prob_count
-
-            main_loss = ar_loss
-            if resolved_use_toolmix:
-                main_loss_per_position = ce_loss_per_position.clone()
-                mixed_tool_mask = masks["tool_mask"] & boundary_mask
-                mixed_tool_count = int(mixed_tool_mask.sum().item())
-                if mixed_tool_count > 0:
-                    mixed_tool_values = (
-                        (1.0 - boundary_prob_map[mixed_tool_mask]) * ce_loss_per_position[mixed_tool_mask]
-                        + boundary_prob_map[mixed_tool_mask] * toolmix_alpha * tool_loss_per_position[mixed_tool_mask]
-                    )
-                    main_loss_per_position[mixed_tool_mask] = mixed_tool_values
-                    mixed_tool_loss = mixed_tool_values.mean()
-                    toolmix_tool_ce_loss = ce_loss_per_position[mixed_tool_mask].mean()
-                    toolmix_alpha_tool_loss = (toolmix_alpha * tool_loss_per_position[mixed_tool_mask]).mean()
-                    total_toolmix_mixed_loss_sum += float(mixed_tool_values.sum().item())
-                    window_toolmix_mixed_loss_sum += float(mixed_tool_values.sum().item())
-                    total_toolmix_tool_ce_sum += float(ce_loss_per_position[mixed_tool_mask].sum().item())
-                    window_toolmix_tool_ce_sum += float(ce_loss_per_position[mixed_tool_mask].sum().item())
-                    total_toolmix_alpha_tool_loss_sum += float(
-                        (toolmix_alpha * tool_loss_per_position[mixed_tool_mask]).sum().item()
-                    )
-                    window_toolmix_alpha_tool_loss_sum += float(
-                        (toolmix_alpha * tool_loss_per_position[mixed_tool_mask]).sum().item()
-                    )
-                    total_toolmix_mixed_tool_positions += mixed_tool_count
-                    window_toolmix_mixed_tool_positions += mixed_tool_count
-                main_loss = main_loss_per_position[valid_mask].mean()
-
-            loss = main_loss
-            if resolved_use_eoc:
-                if resolved_use_eoc_loss:
-                    loss = loss + eoc_loss_weight * eoc_loss
-                if use_tool_loss and not resolved_use_toolmix:
-                    loss = loss + tool_loss_weight * tool_loss
-            if resolved_use_gate and not resolved_use_toolmix:
-                loss = loss + gate_loss_weight * gate_loss
-            if resolved_use_toolmix:
-                loss = loss + toolmix_loss_weight * toolmix_aux_loss
+            loss = ar_loss
             if resolved_use_logit_bias:
                 loss = loss + logit_bias_loss_weight * logit_bias_loss
 
@@ -1188,10 +829,6 @@ def train_native_function_calling_model(
                 total_loss=loss,
                 ar_loss=ar_loss,
                 extra_loss_metrics={
-                    "eoc_loss": eoc_loss if resolved_use_eoc_loss else None,
-                    "tool_loss": tool_loss if resolved_use_eoc and (use_tool_loss or resolved_use_toolmix) else None,
-                    "gate_loss": gate_loss if resolved_use_gate else None,
-                    "toolmix_aux_loss": toolmix_aux_loss if resolved_use_toolmix else None,
                     "logit_bias_loss": logit_bias_loss if resolved_use_logit_bias else None,
                 },
             )
@@ -1280,19 +917,6 @@ def train_native_function_calling_model(
             total_valid_positions += int(valid_mask.sum().item())
             total_eoc_positions += eoc_count
             total_tool_positions += tool_count
-            total_gate_positions += int(gate_targets.numel()) if (resolved_use_gate and gate_targets is not None) else 0
-            total_gate_initial_positions += gate_initial_count if resolved_use_gate else 0
-            total_gate_eoc_positions += gate_eoc_count if resolved_use_gate else 0
-            if resolved_use_gate and gate_prob is not None and gate_prob_logging_mask is not None:
-                gate_prob_count = int(gate_prob_logging_mask.sum().item())
-                gate_prob_sum = float(gate_prob[gate_prob_logging_mask].detach().sum().item()) if gate_prob_count > 0 else 0.0
-                total_gate_prob_sum += gate_prob_sum
-                window_gate_prob_sum += gate_prob_sum
-                total_gate_prob_positions += gate_prob_count
-                window_gate_prob_positions += gate_prob_count
-            total_toolmix_positions += toolmix_count
-            total_toolmix_initial_positions += toolmix_initial_count
-            total_toolmix_eoc_positions += toolmix_eoc_count
             if resolved_use_logit_bias and logit_bias_targets is not None:
                 total_logit_bias_positions += int(logit_bias_targets.numel())
                 total_logit_bias_initial_positions += logit_bias_initial_count
@@ -1307,8 +931,6 @@ def train_native_function_calling_model(
             window_valid_positions += int(valid_mask.sum().item())
             window_eoc_positions += eoc_count
             window_tool_positions += tool_count
-            window_gate_positions += int(gate_targets.numel()) if (resolved_use_gate and gate_targets is not None) else 0
-            window_toolmix_positions += toolmix_count
             if resolved_use_logit_bias and logit_bias_targets is not None:
                 window_logit_bias_positions += int(logit_bias_targets.numel())
             if plot_history is not None:
@@ -1331,44 +953,6 @@ def train_native_function_calling_model(
 
                 window_denom = max(1, window_batches)
                 window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
-                window_avg_gate_prob = (
-                    window_gate_prob_sum / window_gate_prob_positions
-                    if window_gate_prob_positions > 0
-                    else 0.0
-                )
-                tool_loss_fragment = ""
-                if "tool_loss" in window_avg_metrics:
-                    tool_loss_fragment = f"Tool: {window_avg_metrics['tool_loss']:.4f}, "
-                toolmix_fragment = ""
-                if resolved_use_toolmix:
-                    window_avg_prob = (
-                        window_toolmix_prob_sum / window_toolmix_prob_positions
-                        if window_toolmix_prob_positions > 0
-                        else 0.0
-                    )
-                    window_avg_mixed_tool_loss = (
-                        window_toolmix_mixed_loss_sum / window_toolmix_mixed_tool_positions
-                        if window_toolmix_mixed_tool_positions > 0
-                        else 0.0
-                    )
-                    window_avg_tool_ce = (
-                        window_toolmix_tool_ce_sum / window_toolmix_mixed_tool_positions
-                        if window_toolmix_mixed_tool_positions > 0
-                        else 0.0
-                    )
-                    window_avg_alpha_tool = (
-                        window_toolmix_alpha_tool_loss_sum / window_toolmix_mixed_tool_positions
-                        if window_toolmix_mixed_tool_positions > 0
-                        else 0.0
-                    )
-                    toolmix_fragment = (
-                        f"ToolmixAlpha: {toolmix_alpha:.4f}, "
-                        f"ToolmixAux: {window_avg_metrics.get('toolmix_aux_loss', 0.0):.4f}, "
-                        f"ToolmixProb: {window_avg_prob:.4f}, "
-                        f"MixedTool: {window_avg_mixed_tool_loss:.4f}, "
-                        f"ToolCE: {window_avg_tool_ce:.4f}, "
-                        f"AlphaTool: {window_avg_alpha_tool:.4f}, "
-                    )
                 logit_bias_fragment = ""
                 if resolved_use_logit_bias:
                     logit_bias_fragment = (
@@ -1378,14 +962,9 @@ def train_native_function_calling_model(
                     f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
                     f"Loss: {window_avg_metrics.get('total_loss', 0.0):.4f}, "
                     f"AR: {window_avg_metrics.get('ar_loss', 0.0):.4f}, "
-                    f"EOC: {window_avg_metrics.get('eoc_loss', 0.0):.4f}, "
-                    f"{tool_loss_fragment}"
-                    f"{toolmix_fragment}"
                     f"{logit_bias_fragment}"
-                    f"Gate: {window_avg_metrics.get('gate_loss', 0.0):.4f}, "
-                    f"GateProb: {window_avg_gate_prob:.4f}, "
-                    f"Sites(valid/eoc/tool/gate/toolmix/logit_bias): {window_valid_positions}/{window_eoc_positions}/"
-                    f"{window_tool_positions}/{window_gate_positions}/{window_toolmix_positions}/{window_logit_bias_positions}, "
+                    f"Sites(valid/eoc/tool/logit_bias): {window_valid_positions}/{window_eoc_positions}/"
+                    f"{window_tool_positions}/{window_logit_bias_positions}, "
                     f"{lr_info}"
                 )
 
@@ -1394,85 +973,25 @@ def train_native_function_calling_model(
                 window_valid_positions = 0
                 window_eoc_positions = 0
                 window_tool_positions = 0
-                window_gate_positions = 0
-                window_gate_prob_positions = 0
-                window_gate_prob_sum = 0.0
-                window_toolmix_positions = 0
-                window_toolmix_prob_positions = 0
-                window_toolmix_prob_sum = 0.0
-                window_toolmix_mixed_loss_sum = 0.0
-                window_toolmix_tool_ce_sum = 0.0
-                window_toolmix_alpha_tool_loss_sum = 0.0
-                window_toolmix_mixed_tool_positions = 0
                 window_logit_bias_positions = 0
 
             step += 1
+
     avg_loss_metrics = _average_metrics(total_loss_metrics, successful_steps)
     default_inactive_avg = 0.0 if successful_steps > 0 else float("nan")
     avg_total_loss = avg_loss_metrics.get("total_loss", float("nan"))
     avg_ar_loss = avg_loss_metrics.get("ar_loss", float("nan"))
-    avg_eoc_loss = avg_loss_metrics.get("eoc_loss", default_inactive_avg)
-    avg_tool_loss = avg_loss_metrics.get("tool_loss", default_inactive_avg)
-    avg_gate_loss = avg_loss_metrics.get("gate_loss", default_inactive_avg)
-    avg_gate_prob = (
-        total_gate_prob_sum / total_gate_prob_positions
-        if total_gate_prob_positions > 0
-        else default_inactive_avg
-    )
-    avg_toolmix_aux_loss = avg_loss_metrics.get("toolmix_aux_loss", default_inactive_avg)
-    avg_toolmix_prob = (
-        total_toolmix_prob_sum / total_toolmix_prob_positions
-        if total_toolmix_prob_positions > 0
-        else default_inactive_avg
-    )
-    avg_mixed_tool_loss = (
-        total_toolmix_mixed_loss_sum / total_toolmix_mixed_tool_positions
-        if total_toolmix_mixed_tool_positions > 0
-        else default_inactive_avg
-    )
-    avg_toolmix_tool_ce_loss = (
-        total_toolmix_tool_ce_sum / total_toolmix_mixed_tool_positions
-        if total_toolmix_mixed_tool_positions > 0
-        else default_inactive_avg
-    )
-    avg_toolmix_alpha_tool_loss = (
-        total_toolmix_alpha_tool_loss_sum / total_toolmix_mixed_tool_positions
-        if total_toolmix_mixed_tool_positions > 0
-        else default_inactive_avg
-    )
     avg_logit_bias_loss = avg_loss_metrics.get("logit_bias_loss", default_inactive_avg)
 
     print("\nTraining completed!")
     print(f"Average total loss: {avg_total_loss:.4f}")
     print(f"Average AR loss:    {avg_ar_loss:.4f}")
-    if resolved_use_eoc_loss:
-        print(f"Average EOC loss:   {avg_eoc_loss:.4f}")
-    if resolved_use_eoc and (use_tool_loss or resolved_use_toolmix):
-        print(f"Average Tool loss:  {avg_tool_loss:.4f}")
-    if resolved_use_gate:
-        print(f"Average Gate loss:   {avg_gate_loss:.4f}")
-        print(f"Average Gate prob:   {avg_gate_prob:.4f}")
-    if resolved_use_toolmix:
-        print(f"Average Toolmix aux loss: {avg_toolmix_aux_loss:.4f}")
-        print(f"Toolmix alpha: {toolmix_alpha:.6f}")
-        print(f"Average Toolmix prob: {avg_toolmix_prob:.4f}")
-        print(f"Average mixed tool loss: {avg_mixed_tool_loss:.4f}")
-        print(f"Average tool CE on tool positions: {avg_toolmix_tool_ce_loss:.4f}")
-        print(f"Average alpha*tool loss on tool positions: {avg_toolmix_alpha_tool_loss:.4f}")
     if resolved_use_logit_bias:
         print(f"Average Logit bias loss: {avg_logit_bias_loss:.4f}")
     print(f"Total valid supervised positions: {total_valid_positions}")
     if resolved_use_eoc:
         print(f"Total EOC positions: {total_eoc_positions}")
         print(f"Total tool positions: {total_tool_positions}")
-    if resolved_use_gate:
-        print(f"Total gate positions: {total_gate_positions}")
-        print(f"Gate sites from assistant-start positions: {total_gate_initial_positions}")
-        print(f"Gate sites from EOC positions: {total_gate_eoc_positions}")
-    if resolved_use_toolmix:
-        print(f"Total toolmix positions: {total_toolmix_positions}")
-        print(f"Toolmix sites from assistant-start positions: {total_toolmix_initial_positions}")
-        print(f"Toolmix sites from EOC positions: {total_toolmix_eoc_positions}")
     if resolved_use_logit_bias:
         print(f"Total logit-bias positions: {total_logit_bias_positions}")
         print(f"Logit-bias tool sites from assistant-start positions: {total_logit_bias_initial_positions}")
@@ -1482,35 +1001,16 @@ def train_native_function_calling_model(
     return {
         "avg_total_loss": avg_total_loss,
         "avg_ar_loss": avg_ar_loss,
-        "avg_eoc_loss": avg_eoc_loss,
-        "avg_tool_loss": avg_tool_loss,
-        "avg_gate_loss": avg_gate_loss,
-        "avg_gate_prob": avg_gate_prob,
-        "avg_toolmix_aux_loss": avg_toolmix_aux_loss,
-        "avg_toolmix_prob": avg_toolmix_prob,
-        "avg_mixed_tool_loss": avg_mixed_tool_loss,
-        "avg_toolmix_tool_ce_loss": avg_toolmix_tool_ce_loss,
-        "avg_toolmix_alpha_tool_loss": avg_toolmix_alpha_tool_loss,
         "avg_logit_bias_loss": avg_logit_bias_loss,
-        "toolmix_alpha": toolmix_alpha,
         "total_valid_positions": total_valid_positions,
         "total_eoc_positions": total_eoc_positions,
         "total_tool_positions": total_tool_positions,
-        "total_gate_positions": total_gate_positions,
-        "total_toolmix_positions": total_toolmix_positions,
-        "total_toolmix_initial_positions": total_toolmix_initial_positions,
-        "total_toolmix_eoc_positions": total_toolmix_eoc_positions,
-        "total_toolmix_mixed_tool_positions": total_toolmix_mixed_tool_positions,
         "total_logit_bias_positions": total_logit_bias_positions,
         "total_logit_bias_initial_positions": total_logit_bias_initial_positions,
         "total_logit_bias_eoc_positions": total_logit_bias_eoc_positions,
         "successful_steps": successful_steps,
         "use_eoc": resolved_use_eoc,
-        "use_eoc_loss": resolved_use_eoc_loss,
-        "use_gate": resolved_use_gate,
         "use_js_trunc": resolved_use_js_trunc,
-        "use_tool_loss": use_tool_loss,
-        "use_toolmix": resolved_use_toolmix,
         "use_logit_bias": resolved_use_logit_bias,
         "avg_loss_metrics": avg_loss_metrics,
         "plot_next_step": plot_step_offset + successful_steps,
@@ -1525,28 +1025,20 @@ def demo_native_function_calling(
     device="cuda",
     use_ground_truth_tools=False,
     use_eoc=None,
-    use_gate=None,
     use_js_trunc=None,
     use_logit_bias=None,
-    gate_threshold=0.5,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
-    resolved_use_eoc, resolved_use_gate, _, resolved_use_js_trunc = _resolve_mode_flags(
+    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
         model,
         use_eoc,
-        use_gate,
-        use_js_trunc=use_js_trunc,
+        use_js_trunc,
     )
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
-    ground_truth_gate_active = use_ground_truth_tools and resolved_use_gate and _ground_truth_gate_supported(model)
-    if resolved_use_gate and (not use_ground_truth_tools or ground_truth_gate_active):
-        mode_desc += " + gate"
-    elif use_ground_truth_tools and resolved_use_gate:
-        mode_desc += " (gate bypassed by ground-truth tool forcing)"
     if resolved_use_js_trunc:
         mode_desc += " + JS trunc"
     if resolved_use_logit_bias:
@@ -1579,11 +1071,9 @@ def demo_native_function_calling(
             tokenizer,
             user_tokens["input_ids"],
             user_tokens["attention_mask"],
-            use_gate=resolved_use_gate,
             use_js_trunc=resolved_use_js_trunc,
             use_logit_bias=resolved_use_logit_bias,
             use_eoc=resolved_use_eoc,
-            gate_threshold=gate_threshold,
             use_ground_truth_tools=use_ground_truth_tools,
             ground_truth_tools=expected_tools if use_ground_truth_tools else None,
             max_new_tokens=150,
@@ -1592,10 +1082,6 @@ def demo_native_function_calling(
             do_sample=True,
         )
         mode_line = "Ground truth tools used" if use_ground_truth_tools else "Model predicts tools"
-        if resolved_use_gate and (not use_ground_truth_tools or ground_truth_gate_active):
-            mode_line += " + gate"
-        elif use_ground_truth_tools and resolved_use_gate:
-            mode_line += " (gate bypassed by ground-truth tool forcing)"
         if resolved_use_js_trunc:
             mode_line += " + JS trunc"
         if resolved_use_logit_bias:
@@ -1633,21 +1119,18 @@ def eval_native_function_calling(
     device="cuda",
     use_ground_truth_tools=False,
     use_eoc=None,
-    use_gate=None,
     use_js_trunc=None,
     use_logit_bias=None,
-    gate_threshold=0.5,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
-    from eval import compare_function_calls_advanced, calculate_argument_accuracy
+    from eval import compare_function_calls_advanced, calculate_argument_accuracy, calculate_tool_metrics
     import time
 
     model.eval()
-    resolved_use_eoc, resolved_use_gate, _, resolved_use_js_trunc = _resolve_mode_flags(
+    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
         model,
         use_eoc,
-        use_gate,
-        use_js_trunc=use_js_trunc,
+        use_js_trunc,
     )
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
@@ -1655,11 +1138,6 @@ def eval_native_function_calling(
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
-    ground_truth_gate_active = use_ground_truth_tools and resolved_use_gate and _ground_truth_gate_supported(model)
-    if resolved_use_gate and (not use_ground_truth_tools or ground_truth_gate_active):
-        mode_desc += " + gate"
-    elif use_ground_truth_tools and resolved_use_gate:
-        mode_desc += " (gate bypassed by ground-truth tool forcing)"
     if resolved_use_js_trunc:
         mode_desc += " + JS trunc"
     if resolved_use_logit_bias:
@@ -1670,7 +1148,11 @@ def eval_native_function_calling(
     print()
 
     exact_matches = 0
-    tool_correct = 0
+    tool_tp = 0
+    tool_tn = 0
+    tool_fp = 0
+    tool_fn = 0
+    tool_exact_matches = 0
     matched_arguments = 0
     total_target_arguments = 0
     f1_scores = []
@@ -1685,7 +1167,11 @@ def eval_native_function_calling(
         lambda: {
             "total": 0,
             "exact_matches": 0,
-            "tool_correct": 0,
+            "tool_tp": 0,
+            "tool_tn": 0,
+            "tool_fp": 0,
+            "tool_fn": 0,
+            "tool_exact_matches": 0,
             "matched_arguments": 0,
             "target_arguments": 0,
             "f1_scores": [],
@@ -1697,6 +1183,15 @@ def eval_native_function_calling(
             "parse_errors": 0,
         }
     )
+
+    candidate_tools = list(getattr(model, "tool_names", []))
+    if not candidate_tools:
+        candidate_tools = [
+            tool
+            for example in getattr(test_dataloader.dataset, "data", [])
+            for tool in example.get("tools", [])
+        ]
+    candidate_tools = list(dict.fromkeys(candidate_tools))
 
     start_time = time.time()
     print("🔄 Running batch evaluation...")
@@ -1718,11 +1213,9 @@ def eval_native_function_calling(
             attention_mask=attention_mask,
             raw_examples=batch["raw_data"],
             batch_idx=batch_idx,
-            use_gate=resolved_use_gate,
             use_js_trunc=resolved_use_js_trunc,
             use_logit_bias=resolved_use_logit_bias,
             use_eoc=resolved_use_eoc,
-            gate_threshold=gate_threshold,
             use_ground_truth_tools=use_ground_truth_tools,
         )
 
@@ -1735,27 +1228,34 @@ def eval_native_function_calling(
             breakdown = call_count_breakdown[expected_call_count]
             breakdown["total"] += 1
 
+            if "predicted_tools" in result and result["predicted_tools"]:
+                predicted_tools = [tool_info["tool_name"] for tool_info in result["predicted_tools"]]
+                predicted_calls = result["function_calls"]
+            else:
+                predicted_tools = [result["predicted_tool_name"]] if result["predicted_tool_name"] != "none" else []
+                predicted_calls = [result["function_call"]] if result["function_call"] else []
+
+            tool_metrics = calculate_tool_metrics(
+                predicted_tools=predicted_tools,
+                expected_tools=expected_tools,
+                candidate_tools=candidate_tools,
+            )
+            tool_f1_scores.append(tool_metrics["tool_f1_score"])
+            tool_precision_scores.append(tool_metrics["tool_precision"])
+            tool_recall_scores.append(tool_metrics["tool_recall"])
+            tool_tp += tool_metrics["tool_tp"]
+            tool_tn += tool_metrics["tool_tn"]
+            tool_fp += tool_metrics["tool_fp"]
+            tool_fn += tool_metrics["tool_fn"]
+            if tool_metrics["tool_exact_match_acc"] >= 1.0:
+                tool_exact_matches += 1
+                breakdown["tool_exact_matches"] += 1
+            breakdown["tool_tp"] += tool_metrics["tool_tp"]
+            breakdown["tool_tn"] += tool_metrics["tool_tn"]
+            breakdown["tool_fp"] += tool_metrics["tool_fp"]
+            breakdown["tool_fn"] += tool_metrics["tool_fn"]
+
             try:
-                if "predicted_tools" in result and result["predicted_tools"]:
-                    predicted_tools = [tool_info["tool_name"] for tool_info in result["predicted_tools"]]
-                    predicted_calls = result["function_calls"]
-                else:
-                    predicted_tools = [result["predicted_tool_name"]] if result["predicted_tool_name"] != "none" else []
-                    predicted_calls = [result["function_call"]] if result["function_call"] else []
-
-                from collections import Counter
-                from eval import calculate_f1_score
-
-                tool_f1_result = calculate_f1_score(predicted_tools, expected_tools)
-                tool_f1_scores.append(tool_f1_result["f1_score"])
-                tool_precision_scores.append(tool_f1_result["precision"])
-                tool_recall_scores.append(tool_f1_result["recall"])
-
-                tool_match = Counter(predicted_tools) == Counter(expected_tools)
-                if tool_match:
-                    tool_correct += 1
-                    breakdown["tool_correct"] += 1
-
                 eval_result = compare_function_calls_advanced(
                     predicted_calls,
                     expected_calls,
@@ -1777,9 +1277,9 @@ def eval_native_function_calling(
                 breakdown["f1_scores"].append(eval_result.f1_score)
                 breakdown["precision_scores"].append(eval_result.precision)
                 breakdown["recall_scores"].append(eval_result.recall)
-                breakdown["tool_f1_scores"].append(tool_f1_result["f1_score"])
-                breakdown["tool_precision_scores"].append(tool_f1_result["precision"])
-                breakdown["tool_recall_scores"].append(tool_f1_result["recall"])
+                breakdown["tool_f1_scores"].append(tool_metrics["tool_f1_score"])
+                breakdown["tool_precision_scores"].append(tool_metrics["tool_precision"])
+                breakdown["tool_recall_scores"].append(tool_metrics["tool_recall"])
 
                 if "parse_errors" in eval_result.details:
                     current_parse_errors = eval_result.details["parse_errors"]["outputs"]
@@ -1792,20 +1292,19 @@ def eval_native_function_calling(
                 f1_scores.append(0.0)
                 precision_scores.append(0.0)
                 recall_scores.append(0.0)
-                tool_f1_scores.append(0.0)
-                tool_precision_scores.append(0.0)
-                tool_recall_scores.append(0.0)
                 breakdown["f1_scores"].append(0.0)
                 breakdown["precision_scores"].append(0.0)
                 breakdown["recall_scores"].append(0.0)
-                breakdown["tool_f1_scores"].append(0.0)
-                breakdown["tool_precision_scores"].append(0.0)
-                breakdown["tool_recall_scores"].append(0.0)
+                breakdown["tool_f1_scores"].append(tool_metrics["tool_f1_score"])
+                breakdown["tool_precision_scores"].append(tool_metrics["tool_precision"])
+                breakdown["tool_recall_scores"].append(tool_metrics["tool_recall"])
 
     eval_time = time.time() - start_time
 
     exact_accuracy = exact_matches / total_examples
-    tool_accuracy = tool_correct / total_examples
+    tool_judgments = tool_tp + tool_tn + tool_fp + tool_fn
+    tool_accuracy = (tool_tp + tool_tn) / tool_judgments if tool_judgments > 0 else 1.0
+    tool_exact_match_acc = tool_exact_matches / total_examples if total_examples > 0 else 0.0
     arguments_accuracy = matched_arguments / total_target_arguments if total_target_arguments > 0 else 1.0
     avg_f1_score = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
     avg_precision = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
@@ -1827,8 +1326,14 @@ def eval_native_function_calling(
     print("🎯 RESULTS:")
     print(f"   Exact Match Accuracy:     {exact_accuracy:.3f} ({exact_matches}/{total_examples})")
     print(f"   Full Correctness:         {exact_accuracy:.3f} ({exact_matches}/{total_examples})")
-    print(f"   Tool Prediction Accuracy: {tool_accuracy:.3f} ({tool_correct}/{total_examples})")
-    print(f"   Tool Selection Accuracy:  {tool_accuracy:.3f} ({tool_correct}/{total_examples})")
+    print(
+        "   Tool Acc (tool_accuracy): "
+        f"{tool_accuracy:.3f} (TP={tool_tp}, TN={tool_tn}, FP={tool_fp}, FN={tool_fn})"
+    )
+    print(
+        "   Tool Exact Match Acc (tool_exact_match_acc): "
+        f"{tool_exact_match_acc:.3f} ({tool_exact_matches}/{total_examples})"
+    )
     print(f"   Arguments Accuracy:       {arguments_accuracy:.3f} ({matched_arguments}/{total_target_arguments})")
     print(f"   Average F1 Score:         {avg_f1_score:.3f}")
     print(f"   Average Precision:        {avg_precision:.3f}")
@@ -1847,12 +1352,27 @@ def eval_native_function_calling(
         print(f"   {call_count} call(s): {accuracy:.3f} ({stats['exact_matches']}/{stats['total']})")
     print("=" * 50)
 
-    print("\n📊 TOOL SELECTION ACCURACY:")
+    print("\n📊 TOOL ACCURACY (tool_accuracy):")
     print("-" * 50)
     for call_count in sorted(call_count_breakdown.keys()):
         stats = call_count_breakdown[call_count]
-        per_call_tool_accuracy = stats["tool_correct"] / stats["total"] if stats["total"] > 0 else 0.0
-        print(f"   {call_count} call(s): {per_call_tool_accuracy:.3f} ({stats['tool_correct']}/{stats['total']})")
+        tool_total = stats["tool_tp"] + stats["tool_tn"] + stats["tool_fp"] + stats["tool_fn"]
+        per_call_tool_accuracy = (stats["tool_tp"] + stats["tool_tn"]) / tool_total if tool_total > 0 else 1.0
+        print(
+            f"   {call_count} call(s): {per_call_tool_accuracy:.3f} "
+            f"(TP={stats['tool_tp']}, TN={stats['tool_tn']}, FP={stats['tool_fp']}, FN={stats['tool_fn']})"
+        )
+    print("=" * 50)
+
+    print("\n📊 TOOL EXACT MATCH ACCURACY (tool_exact_match_acc):")
+    print("-" * 50)
+    for call_count in sorted(call_count_breakdown.keys()):
+        stats = call_count_breakdown[call_count]
+        per_call_tool_exact_match_acc = stats["tool_exact_matches"] / stats["total"] if stats["total"] > 0 else 0.0
+        print(
+            f"   {call_count} call(s): {per_call_tool_exact_match_acc:.3f} "
+            f"({stats['tool_exact_matches']}/{stats['total']})"
+        )
     print("=" * 50)
 
     print("\n📊 ARGUMENTS ACCURACY:")
@@ -1902,7 +1422,7 @@ def eval_native_function_calling(
         "exact_accuracy": exact_accuracy,
         "full_correctness": exact_accuracy,
         "tool_accuracy": tool_accuracy,
-        "tool_selection_accuracy": tool_accuracy,
+        "tool_exact_match_acc": tool_exact_match_acc,
         "arguments_accuracy": arguments_accuracy,
         "avg_f1_score": avg_f1_score,
         "avg_precision": avg_precision,
