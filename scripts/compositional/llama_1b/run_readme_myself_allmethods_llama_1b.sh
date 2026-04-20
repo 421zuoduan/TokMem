@@ -137,9 +137,10 @@ launcher_epochs = sys.argv[6]
 launcher_lr = sys.argv[7]
 
 metric_fields = (
-    ("tool_accuracy", "Tool Prediction Acc"),
+    ("tool_accuracy", "Tool Acc"),
     ("avg_tool_f1_score", "Tool F1"),
     ("avg_f1_score", "Arguments F1"),
+    ("tool_exact_match_acc", "Tool Exact Match Acc"),
     ("exact_accuracy", "Exact Match Acc"),
     ("parse_error_rate", "Parse Error Rate"),
 )
@@ -220,8 +221,8 @@ artifacts = {
     "settings": [],
 }
 
-header = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
-separator = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+header = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
+separator = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
 summary_lines = [
     f"# README_MYSELF 全方法对比（{trial_count} 次重复均值）",
     "",
@@ -246,8 +247,12 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
         eval_path = Path(row["evaluation_results"])
         if eval_path.exists():
             payload = json.loads(eval_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("rounds"):
+                eval_payload = payload["rounds"][-1].get("eval_results", {})
+            else:
+                eval_payload = payload
             for key, _ in metric_fields:
-                value = payload.get(key)
+                value = eval_payload.get(key)
                 if value is not None:
                     metric_values[key].append(value)
         train_path = Path(row["training_summary"])

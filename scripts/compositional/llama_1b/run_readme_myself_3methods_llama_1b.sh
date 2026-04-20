@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="readme_myself_7settings_llama_1b_${RUN_ID}"
+RUN_NAME="readme_myself_3methods_llama_1b_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 DATA_DIR="$RUN_DIR/data"
 TRIAL_ROOT="$RUN_DIR/trials"
@@ -61,9 +61,7 @@ printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_js_trunc\tuse_logit_bias\tru
 SETTINGS=(
     "1|baseline|0|0|0"
     "2|eoc-only|1|0|0"
-    "3|eoc+js_trunc|1|1|0"
-    "4|eoc+logit_bias|1|0|1"
-    "5|eoc+js_trunc+logit_bias|1|1|1"
+    "3|eoc+logit_bias|1|0|1"
 )
 
 for setting_entry in "${SETTINGS[@]}"; do
@@ -72,7 +70,7 @@ for setting_entry in "${SETTINGS[@]}"; do
     trial_index=0
     for seed in "${TRIAL_SEEDS[@]}"; do
         trial_index=$((trial_index + 1))
-        trial_name="readme_myself_setting${setting_id}_trial${trial_index}_${RUN_ID}"
+        trial_name="readme_myself_3methods_setting${setting_id}_trial${trial_index}_${RUN_ID}"
         trial_dir="$TRIAL_ROOT/$trial_name"
         mkdir -p "$trial_dir"
 
@@ -94,7 +92,7 @@ for setting_entry in "${SETTINGS[@]}"; do
             --tensorboard
             --run_root_dir "$TRIAL_ROOT"
             --run_name "$trial_name"
-            --run_tag "readme_myself_setting${setting_id}"
+            --run_tag "readme_myself_3methods_setting${setting_id}"
         )
 
         if [[ "$use_eoc" == "1" ]]; then
@@ -124,6 +122,7 @@ done
 python - "$MANIFEST_FILE" "$SUMMARY_FILE" "$ARTIFACTS_FILE" "$README_FILE" "$RUN_NAME" "$EPOCHS" "$LR" <<'PY'
 import csv
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -137,21 +136,36 @@ launcher_epochs = sys.argv[6]
 launcher_lr = sys.argv[7]
 
 metric_fields = (
-    ("tool_accuracy", "Tool Prediction Acc"),
+    ("tool_accuracy", "Tool Acc"),
     ("avg_tool_f1_score", "Tool F1"),
     ("avg_f1_score", "Arguments F1"),
+    ("tool_exact_match_acc", "Tool Exact Match Acc"),
     ("exact_accuracy", "Exact Match Acc"),
     ("parse_error_rate", "Parse Error Rate"),
 )
 
+loss_fields = (
+    ("avg_total_loss", "avg total loss"),
+    ("avg_ar_loss", "avg AR loss"),
+    ("avg_logit_bias_loss", "avg Logit bias loss"),
+)
+
+FALLBACK_HEADER = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
+FALLBACK_SEPARATOR = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+SEPARATOR_PATTERN = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+$")
+
+
 def as_bool_text(value):
     return "√" if value == "1" else "×"
+
 
 def mean_or_none(values):
     return statistics.mean(values) if values else None
 
+
 def format_metric(value):
     return "" if value is None else f"{value:.3f}"
+
 
 def format_hparam(value):
     if value is None:
@@ -159,6 +173,15 @@ def format_hparam(value):
     if isinstance(value, float):
         return f"{value:g}"
     return str(value)
+
+
+def last_training_round(training_payload):
+    if isinstance(training_payload, dict):
+        return training_payload["rounds"][-1]
+    if isinstance(training_payload, list):
+        return training_payload[-1]
+    raise TypeError(f"Unsupported training_summary payload type: {type(training_payload)!r}")
+
 
 def load_run_hparams(row):
     run_config_path = Path(row["run_dir"]) / "run_config.json"
@@ -168,18 +191,31 @@ def load_run_hparams(row):
     args = run_config.get("args", {})
     return format_hparam(args.get("epochs", launcher_epochs)), format_hparam(args.get("lr", launcher_lr))
 
-def replace_or_insert_block(text, begin_marker, end_marker, replacement, anchor_text):
+
+def replace_or_append_block(text, begin_marker, end_marker, replacement):
     if begin_marker in text and end_marker in text:
         start = text.index(begin_marker)
         end = text.index(end_marker) + len(end_marker)
         return text[:start] + replacement + text[end:]
-    insertion = replacement + "\n\n"
-    if anchor_text in text:
-        anchor_index = text.index(anchor_text)
-        return text[:anchor_index] + insertion + text[anchor_index:]
-    if not text.endswith("\n"):
-        text += "\n"
-    return text + "\n" + replacement + "\n"
+    text = text.rstrip() + "\n\n" if text else ""
+    return text + replacement + "\n"
+
+
+def load_last_table_header(readme_text):
+    last_pair = None
+    lines = readme_text.splitlines()
+    for index in range(len(lines) - 1):
+        if not lines[index].startswith("|"):
+            continue
+        if not lines[index + 1].startswith("|"):
+            continue
+        if not SEPARATOR_PATTERN.fullmatch(lines[index + 1]):
+            continue
+        last_pair = (lines[index], lines[index + 1])
+    if last_pair is None:
+        return FALLBACK_HEADER, FALLBACK_SEPARATOR
+    return last_pair
+
 
 rows = list(csv.DictReader(manifest_path.open("r", encoding="utf-8"), delimiter="\t"))
 grouped = {}
@@ -187,13 +223,27 @@ for row in rows:
     grouped.setdefault(row["setting_id"], []).append(row)
 
 trial_count = len({row["trial"] for row in rows if row["setting_id"] == "1"})
-artifacts = {"run_name": run_name, "manifest": rows}
-header = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Prediction Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
-separator = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+artifacts = {
+    "run_name": run_name,
+    "manifest": rows,
+    "defaults": {
+        "seed": 42,
+        "logit_bias_network": "linear",
+        "logit_bias_loss_weight": 0.1,
+        "logit_bias_scale": 1.0,
+    },
+    "settings": [],
+}
+
+readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+header, separator = load_last_table_header(readme_text)
 summary_lines = [
-    f"# README_MYSELF 当前五种维护设置（{trial_count} 次重复均值）",
+    f"# README_MYSELF 三种维护方法对比（{trial_count} 次重复均值）",
     "",
     f"- run: `{run_name}`",
+    f"- trials per setting: `{trial_count}`",
+    "- methods: `baseline`, `eoc-only`, `eoc+logit_bias`",
+    "- defaults: `logit_bias_network=linear`, `logit_bias_loss_weight=0.1`, `logit_bias_scale=1.0`",
     "",
     header,
     separator,
@@ -205,15 +255,29 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
     first_row = setting_rows[0]
     epochs, lr = load_run_hparams(first_row)
     metric_values = {key: [] for key, _ in metric_fields}
+    loss_values = {key: [] for key, _ in loss_fields}
+
     for row in setting_rows:
         eval_path = Path(row["evaluation_results"])
-        if not eval_path.exists():
-            continue
-        payload = json.loads(eval_path.read_text(encoding="utf-8"))
-        for key, _ in metric_fields:
-            value = payload.get(key)
-            if value is not None:
-                metric_values[key].append(value)
+        if eval_path.exists():
+            payload = json.loads(eval_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("rounds"):
+                eval_payload = payload["rounds"][-1].get("eval_results", {})
+            else:
+                eval_payload = payload
+            for key, _ in metric_fields:
+                value = eval_payload.get(key)
+                if value is not None:
+                    metric_values[key].append(value)
+        train_path = Path(row["training_summary"])
+        if train_path.exists():
+            payload = json.loads(train_path.read_text(encoding="utf-8"))
+            round_payload = last_training_round(payload)
+            for key, _ in loss_fields:
+                value = round_payload.get(key)
+                if value is not None:
+                    loss_values[key].append(value)
+
     row_text = (
         f"| `{setting_id}` | {first_row['mode']} | {epochs} | {lr} | "
         f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_js_trunc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
@@ -223,27 +287,40 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
     summary_lines.append(row_text)
     readme_table_lines.append(row_text)
 
+    artifacts["settings"].append(
+        {
+            "setting_id": int(setting_id),
+            "mode": first_row["mode"],
+            "epochs": epochs,
+            "lr": lr,
+            "flags": {
+                "use_eoc": first_row["use_eoc"] == "1",
+                "use_js_trunc": first_row["use_js_trunc"] == "1",
+                "use_logit_bias": first_row["use_logit_bias"] == "1",
+            },
+            "metrics": {key: mean_or_none(metric_values[key]) for key, _ in metric_fields},
+            "losses": {key: mean_or_none(loss_values[key]) for key, _ in loss_fields},
+        }
+    )
+
 summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False), encoding="utf-8")
 
-begin_marker = "<!-- README_MYSELF_7SETTINGS_TABLE:BEGIN -->"
-end_marker = "<!-- README_MYSELF_7SETTINGS_TABLE:END -->"
-replacement = "\n".join([
+begin_marker = "<!-- README_MYSELF_3METHODS_TABLE:BEGIN -->"
+end_marker = "<!-- README_MYSELF_3METHODS_TABLE:END -->"
+replacement_lines = [
     begin_marker,
-    f"## Compositional 当前维护设置（{trial_count} 次重复均值）",
+    f"## Compositional baseline / eoc / logit bias（{trial_count} 次重复均值）",
     "",
     f"- run: `{run_name}`",
+    "- 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。",
+    "- 默认 `logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。",
+    "",
     *readme_table_lines,
     end_marker,
-])
+]
+replacement = "\n".join(replacement_lines)
 
-if readme_path.exists():
-    updated = replace_or_insert_block(
-        readme_path.read_text(encoding="utf-8"),
-        begin_marker,
-        end_marker,
-        replacement,
-        "## Readme Myself",
-    )
-    readme_path.write_text(updated, encoding="utf-8")
+updated_readme = replace_or_append_block(readme_text, begin_marker, end_marker, replacement)
+readme_path.write_text(updated_readme, encoding="utf-8")
 PY

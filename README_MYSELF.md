@@ -112,7 +112,7 @@
 - `Tool F1` 对应日志中的 `Average Tool F1 Score`。
 - 表中的 `use task loss` 对应当前 compositional 脚本里的 `use_tool_loss` 开关。
 - 对 `2`-`3` 而言，`avg EOC loss` 留空是因为该组实验未开启 `use_eoc_loss`，不是因为日志缺失。
-- 当前 5 次均值表来自 `compositional/runs/readme_myself_7settings_llama_1b_20260415_170743` 的 `35` 个已完成 trial。
+- 当前 5 次均值表来自 `compositional/runs/readme_myself_7settings_llama_1b_20260416_032936` 的 `35` 个已完成 trial。
 - 上面的主结果表读取 `evaluation_results.json` 汇总，训练 loss 表读取同一批 run 下各 trial 的 `training_summary.json` 汇总。
  
 
@@ -121,3 +121,19 @@
 1. 因为现在 gate 的梯度不会传导回 memory embedding 了, 所以需要重跑 gate 的代码
 2. gate 从 mlp 换成 linear 再试一下
 3. 在所有 token 上算 gate,
+
+<!-- README_MYSELF_ALLMETHODS_TABLE:BEGIN -->
+## Compositional maintained methods（5 次重复均值）
+
+- run: `readme_myself_allmethods_llama_1b_20260418_185507`
+- 模式只保留当前维护方法：`baseline`、`eoc-only`、`eoc+js_trunc`、`eoc+logit_bias`、`eoc+js_trunc+logit_bias`。
+- 默认 `logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。
+
+| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | 0.985 | 0.843 | 0.661 | 0.593 | 0.393 | 0.892 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | 0.987 | 0.870 | 0.715 | 0.639 | 0.454 | 1.542 |
+| `3` | eoc+js_trunc | 3 | 0.005 | √ | √ | × | 0.954 | 0.671 | 0.431 | 0.003 | 0.000 | 4.530 |
+| `4` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.990 | 0.903 | 0.730 | 0.691 | 0.478 | 2.800 |
+| `5` | eoc+js_trunc+logit_bias | 3 | 0.005 | √ | √ | √ | 0.968 | 0.755 | 0.479 | 0.003 | 0.000 | 6.038 |
+<!-- README_MYSELF_ALLMETHODS_TABLE:END -->
