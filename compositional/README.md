@@ -36,6 +36,7 @@ Useful flags:
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
 - `--max_length` default `1024`
+- `--max_new_tokens` default `512`
 
 ## Method Notes
 
@@ -59,6 +60,8 @@ When `--use_eoc` is enabled, each gold tool span becomes:
 4. if the mean JS exceeds the fixed threshold, masks logits to the tool-token subset for that step
 
 Training stays plain autoregressive teacher forcing. `js_trunc` changes decoding only.
+
+`--max_new_tokens` controls only the training-time evaluation and demo decode budget in `main_sequential.py`. It does not change teacher-forcing supervision length during training.
 
 ### Logit bias
 
@@ -146,6 +149,24 @@ These older shell entrypoints remain in the repository for reference but are not
 - `compositional/run_n_rounds_main.sh`
 - `compositional/run_n_rounds_lora.sh`
 - `compositional/icl_baseline.sh`
+
+## Dataset Inspection
+
+For quick manual inspection of newly synthesized compositional data over tools `1-100`, use:
+
+```bash
+bash scripts/compositional/datasets/inspect_synth_data_tools1_100.sh
+```
+
+This script regenerates the synthetic data files under `compositional/data/` with fixed settings and prints:
+
+- train/test file locations
+- training-set `function_calls` distribution
+- training-set `unique_tools` distribution
+- single-tool training-sample call-count distribution
+- a few representative training samples
+
+`xlam_datasets.py` accepts variable-length `--train_multi_tool_ratios` / `--test_multi_tool_ratios`. A ratio list of length `k` maps to `2-tool` through `(k+1)-tool`, and output filenames keep following `..._{max_function_calls}calls.json`, such as `..._4calls.json` or `..._10calls.json`.
 
 ## Key Components
 

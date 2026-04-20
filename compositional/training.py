@@ -520,6 +520,7 @@ def _generate_results_with_example_fallback(
     use_logit_bias,
     use_eoc,
     use_ground_truth_tools,
+    max_new_tokens,
 ):
     """Generate batch results, falling back to per-example decoding on batch failures."""
     batch_size = len(raw_examples)
@@ -542,7 +543,7 @@ def _generate_results_with_example_fallback(
                     use_eoc=use_eoc,
                     use_ground_truth_tools=True,
                     ground_truth_tools=expected_tools,
-                    max_new_tokens=256,
+                    max_new_tokens=max_new_tokens,
                     temperature=0.6,
                     top_p=0.9,
                     do_sample=False,
@@ -563,7 +564,7 @@ def _generate_results_with_example_fallback(
             use_logit_bias=use_logit_bias,
             use_eoc=use_eoc,
             use_ground_truth_tools=False,
-            max_new_tokens=256,
+            max_new_tokens=max_new_tokens,
             temperature=0.6,
             top_p=0.9,
             do_sample=False,
@@ -585,7 +586,7 @@ def _generate_results_with_example_fallback(
                     use_logit_bias=use_logit_bias,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=False,
-                    max_new_tokens=256,
+                    max_new_tokens=max_new_tokens,
                     temperature=0.6,
                     top_p=0.9,
                     do_sample=False,
@@ -1023,6 +1024,7 @@ def demo_native_function_calling(
     tokenizer,
     test_examples,
     device="cuda",
+    max_new_tokens=512,
     use_ground_truth_tools=False,
     use_eoc=None,
     use_js_trunc=None,
@@ -1076,7 +1078,7 @@ def demo_native_function_calling(
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             ground_truth_tools=expected_tools if use_ground_truth_tools else None,
-            max_new_tokens=150,
+            max_new_tokens=max_new_tokens,
             temperature=0.6,
             top_p=0.9,
             do_sample=True,
@@ -1117,6 +1119,7 @@ def eval_native_function_calling(
     tokenizer,
     test_dataloader,
     device="cuda",
+    max_new_tokens=512,
     use_ground_truth_tools=False,
     use_eoc=None,
     use_js_trunc=None,
@@ -1217,6 +1220,7 @@ def eval_native_function_calling(
             use_logit_bias=resolved_use_logit_bias,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
+            max_new_tokens=max_new_tokens,
         )
 
         for i in range(batch_size):

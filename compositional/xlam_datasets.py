@@ -479,11 +479,66 @@ def create_sample(single_samples, multi_call_samples, tool_names, num_tools=1, m
     return None
 
 
+def build_multi_tool_ratios(ratio_values):
+    """Map ratio list [r2, r3, ...] to {2: r2, 3: r3, ...}."""
+    return {num_tools: ratio for num_tools, ratio in enumerate(ratio_values, start=2)}
+
+
+def count_available_single_tools(tool_data):
+    """Count tools that can contribute at least one synthesized single call."""
+    available_tool_count = 0
+
+    for samples in tool_data.values():
+        has_single_call_sample = any(
+            len(sample['calls']) == 1 and sample['calls'][0].get('arguments')
+            for sample in samples
+        )
+        if has_single_call_sample:
+            available_tool_count += 1
+
+    return available_tool_count
+
+
+def filter_feasible_multi_tool_ratios(ratios, max_function_calls=None, available_tool_count=None, split_name=""):
+    """
+    Drop tool counts that cannot be sampled for this split.
+    Remaining ratios keep their original weights and are normalized later.
+    """
+    feasible_ratios = {}
+    dropped_tool_counts = []
+
+    for num_tools, ratio in sorted(ratios.items()):
+        if ratio <= 0:
+            continue
+
+        reasons = []
+        if max_function_calls is not None and num_tools > max_function_calls:
+            reasons.append(f"max_function_calls={max_function_calls}")
+        if available_tool_count is not None and num_tools > available_tool_count:
+            reasons.append(f"available_single_tools={available_tool_count}")
+
+        if reasons:
+            dropped_tool_counts.append((num_tools, ratio, ", ".join(reasons)))
+            continue
+
+        feasible_ratios[num_tools] = ratio
+
+    if dropped_tool_counts:
+        split_prefix = f"{split_name} " if split_name else ""
+        print(f"Warning: dropping infeasible {split_prefix}multi-tool ratios:")
+        for num_tools, ratio, reason in dropped_tool_counts:
+            print(f"  {num_tools}-tool ratio {ratio:.6f} dropped ({reason})")
+        if feasible_ratios:
+            print("  Remaining multi-tool ratios will be renormalized over feasible tool counts.")
+
+    return feasible_ratios
+
+
 def save_training_data(data, filename="function_calling_data.json", split_name=""):
     """Save data in format compatible with training pipeline"""
     
     # Enhanced analysis showing precise tool usage breakdown
-    tool_count_stats = {1: 0, 2: 0, 3: 0, 4: 0}  # Support up to 4 tools if needed
+    tool_count_stats = {}
     samples_with_multi_calls = 0
     
     for sample in data:
@@ -491,8 +546,7 @@ def save_training_data(data, filename="function_calling_data.json", split_name="
         unique_tools = len(set(tools))  # Count unique tools
         
         # Count by unique tools (this is what the user wants to control)
-        if unique_tools in tool_count_stats:
-            tool_count_stats[unique_tools] += 1
+        tool_count_stats[unique_tools] = tool_count_stats.get(unique_tools, 0) + 1
         
         # Count samples that have multiple calls of the same tool
         if len(tools) > unique_tools:
@@ -522,23 +576,22 @@ def verify_ratios(data, intended_ratios, split_name=""):
     Single-tool: All available samples included
     Multi-tool: Ratios among multi-tool samples only
     """
-    tool_count_stats = {1: 0, 2: 0, 3: 0}
+    tool_count_stats = {}
     
     for sample in data:
         tools = sample['tools']
         unique_tools = len(set(tools))  # Count unique tools
-        if unique_tools in tool_count_stats:
-            tool_count_stats[unique_tools] += 1
+        tool_count_stats[unique_tools] = tool_count_stats.get(unique_tools, 0) + 1
     
     total_samples = len(data)
-    single_tool_samples = tool_count_stats[1]
+    single_tool_samples = tool_count_stats.get(1, 0)
     multi_tool_samples = total_samples - single_tool_samples
     
     if split_name:
         print(f"{split_name} verification: {single_tool_samples} single-tool, {multi_tool_samples} multi-tool samples")
     
     # Return actual ratios for compatibility
-    actual_ratios = {k: v/total_samples for k, v in tool_count_stats.items() if v > 0}
+    actual_ratios = {k: v/total_samples for k, v in tool_count_stats.items() if total_samples > 0 and v > 0}
     return actual_ratios
 
 def main():
@@ -578,11 +631,13 @@ def main():
     parser.add_argument("--max_samples_per_tool", type=int, default=None, help="Maximum number of samples per tool (None for no limit)")
     
     def parse_ratios(ratio_string):
-        """Parse comma-separated ratios like '0.6,0.4'"""
+        """Parse comma-separated ratios like '0.5,0.5' or '0.125,...'."""
         try:
-            ratios = [float(x.strip()) for x in ratio_string.split(',')]
-            if len(ratios) != 2:
-                raise ValueError(f"Expected exactly 2 ratios, got {len(ratios)}")
+            ratios = [float(x.strip()) for x in ratio_string.split(',') if x.strip()]
+            if not ratios:
+                raise ValueError("Expected at least one ratio")
+            if any(ratio < 0 for ratio in ratios):
+                raise ValueError("Ratios must be non-negative")
             if abs(sum(ratios) - 1.0) > 0.001:
                 raise ValueError(f"Ratios must sum to 1.0, got {sum(ratios):.3f}")
             return ratios
@@ -590,9 +645,9 @@ def main():
             raise argparse.ArgumentTypeError(f"Invalid ratio format: {e}")
     
     parser.add_argument("--train_multi_tool_ratios", type=parse_ratios, default=[0.5,0.5],
-                       help="Training multi-tool ratios as 'ratio2,ratio3' (e.g., '0.6,0.4')")
+                       help="Training multi-tool ratios as 'ratio2,ratio3,...' mapping to 2-tool, 3-tool, ... samples")
     parser.add_argument("--test_multi_tool_ratios", type=parse_ratios, default=[0.5,0.5],
-                       help="Test multi-tool ratios as 'ratio2,ratio3' (e.g., '0.6,0.4')")
+                       help="Test multi-tool ratios as 'ratio2,ratio3,...' mapping to 2-tool, 3-tool, ... samples")
     parser.add_argument("--train_max_function_calls", type=int, default=4, help="Maximum number of function calls per sample (None for no limit)")
     parser.add_argument("--test_max_function_calls", type=int, default=4, help="Maximum number of function calls per sample (None for no limit)")
     parser.add_argument("--output_dir", type=str, default=".", help="Output directory for generated files (default: current directory)")
@@ -603,18 +658,9 @@ def main():
     total_samples = args.train_size + args.test_size
     train_ratio = args.train_size / total_samples
     
-    # Handle ratios - single-tool samples are included completely, multi-tool ratios are normalized
-    # Auto-adjust ratios if max function calls is too low for 3-tool samples
-    train_ratios = {2: args.train_multi_tool_ratios[0], 3: args.train_multi_tool_ratios[1]}
-    test_ratios = {2: args.test_multi_tool_ratios[0], 3: args.test_multi_tool_ratios[1]}
-    
-    if args.train_max_function_calls is not None and args.train_max_function_calls < 3:
-        print(f"Warning: train_max_function_calls={args.train_max_function_calls} < 3, setting 3-tool ratio to 0")
-        train_ratios = {2: 1.0, 3: 0.0}
-    
-    if args.test_max_function_calls is not None and args.test_max_function_calls < 3:
-        print(f"Warning: test_max_function_calls={args.test_max_function_calls} < 3, setting 3-tool ratio to 0")
-        test_ratios = {2: 1.0, 3: 0.0}
+    # Handle ratios - single-tool samples are included completely, multi-tool ratios are normalized later
+    train_ratios = build_multi_tool_ratios(args.train_multi_tool_ratios)
+    test_ratios = build_multi_tool_ratios(args.test_multi_tool_ratios)
     
     print("Processing XLAM dataset...")
     
@@ -637,6 +683,28 @@ def main():
     print(f"Saved tool descriptions: {tool_desc_path}")
     
     train_tool_data, test_tool_data = split_single_tool_data(tool_data, train_ratio)
+    train_available_single_tools = count_available_single_tools(train_tool_data)
+    test_available_single_tools = count_available_single_tools(test_tool_data)
+
+    train_ratios = filter_feasible_multi_tool_ratios(
+        train_ratios,
+        max_function_calls=args.train_max_function_calls,
+        available_tool_count=train_available_single_tools,
+        split_name="training"
+    )
+    test_ratios = filter_feasible_multi_tool_ratios(
+        test_ratios,
+        max_function_calls=args.test_max_function_calls,
+        available_tool_count=test_available_single_tools,
+        split_name="test"
+    )
+
+    if args.test_size > 0 and not test_ratios:
+        raise ValueError(
+            "No feasible multi-tool test ratios remain after applying "
+            f"test_max_function_calls={args.test_max_function_calls} and "
+            f"available_single_tools={test_available_single_tools}."
+        )
     
     # Use separate seeds for train and test synthesis to ensure test consistency
     random.seed(100)  # Training seed

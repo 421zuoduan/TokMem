@@ -255,6 +255,8 @@ def build_parser():
                         help="Evaluate on all previous test sets after each round")
     parser.add_argument("--eval_batch_size", type=int, default=32,
                         help="Batch size for evaluation")
+    parser.add_argument("--max_new_tokens", type=int, default=512,
+                        help="Maximum generated tokens for training-time evaluation and demo decoding")
     parser.add_argument("--demo", type=int, default=None,
                         help="Number of demo examples to show after training")
     parser.add_argument("--use_ground_truth_tools", action="store_true",
@@ -338,6 +340,8 @@ def validate_args(args, parser):
         parser.error("--use_logit_bias requires --use_eoc")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
+    if args.max_new_tokens <= 0:
+        parser.error("--max_new_tokens must be positive")
     if args.epochs is not None and args.epochs <= 0:
         parser.error("--epochs must be positive")
     if args.logit_bias_loss_weight < 0:
@@ -479,6 +483,7 @@ def main():
         print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
         print(f"Logit bias scale: {args.logit_bias_scale}")
     print(f"Max length: {args.max_length}")
+    print(f"Max new tokens: {args.max_new_tokens}")
     print(f"Run directory: {run_context['run_dir']}")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA will be frozen after first round")
@@ -727,6 +732,7 @@ def main():
                         tokenizer=tokenizer,
                         test_dataloader=test_dataloader,
                         device=args.device,
+                        max_new_tokens=args.max_new_tokens,
                         use_ground_truth_tools=args.use_ground_truth_tools,
                         use_eoc=args.use_eoc,
                         use_js_trunc=args.use_js_trunc,
@@ -769,6 +775,7 @@ def main():
                                 tokenizer=tokenizer,
                                 test_dataloader=prev_test_dataloader,
                                 device=args.device,
+                                max_new_tokens=args.max_new_tokens,
                                 use_ground_truth_tools=args.use_ground_truth_tools,
                                 use_eoc=args.use_eoc,
                                 use_js_trunc=args.use_js_trunc,
@@ -829,6 +836,7 @@ def main():
                 tokenizer=tokenizer,
                 test_examples=test_examples[:args.demo],
                 device=args.device,
+                max_new_tokens=args.max_new_tokens,
                 use_ground_truth_tools=args.use_ground_truth_tools,
                 use_eoc=args.use_eoc,
                 use_js_trunc=args.use_js_trunc,

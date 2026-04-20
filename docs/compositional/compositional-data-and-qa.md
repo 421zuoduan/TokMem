@@ -43,6 +43,8 @@
 - `test/function_calling_test_tools1-50_4calls.json`
 - `test/function_calling_test_tools51-100_4calls.json`
 
+文件名里的 `Ncalls` 由 `train_max_function_calls` / `test_max_function_calls` 决定，所以同一套脚本也可以生成 `..._10calls.json` 这类文件。
+
 #### 2.3 维护脚本里的固定参数
 
 `scripts/download/prepare_xlam_dataset.sh` 和 `scripts/compositional/llama_1b/*.sh` 使用的是同一组核心参数：
@@ -60,6 +62,14 @@ python xlam_datasets.py \
 ```
 
 这组参数基本对应论文附录里的设置：每个 tool 保留 50 个 query-call pairs，并把最终 train / test 规模控制在 `5000 / 500`。
+
+当前 `xlam_datasets.py` 的 ratio 语义是：
+
+- `train_multi_tool_ratios` / `test_multi_tool_ratios` 接受任意长度的逗号分隔比例串
+- 如果 ratio 串长度是 `k`，它对应 `2-tool, 3-tool, ..., (k+1)-tool`
+- 现有 maintained launcher 继续使用 `0.5,0.5`，也就是 `2-tool` 和 `3-tool`
+- ratio 之和需要接近 `1.0`
+- 超出当前 split 的 `max_function_calls` 或可用单工具池上限的 tool-count bucket 会被丢弃，剩余 bucket 按原权重重归一化
 
 ### 3. 原始 XLAM / APIGen 数据长什么样
 
@@ -257,6 +267,139 @@ python xlam_datasets.py \
 
 可以看出，仓库最终训练/评测用的是“线性化后的 gold tool sequence + 参数序列”。
 
+### 5.3 当前仓库里既有合成数据的实际统计
+
+下面这些数字都基于当前仓库里已经生成好的数据文件，以及当前 `xlam_datasets.py` 的实现口径：
+
+- `1-tool` 指 `len(set(sample["tools"])) == 1`
+- `n-call` 指 `len(sample["function_calls"]) == n`
+- 测试集是否包含 `1-tool` 样本由生成逻辑决定，当前实现中测试集跳过了 single-tool 样本，只生成 multi-tool 样本
+
+#### 5.3.1 `51-100` 这组既有数据
+
+对应文件：
+
+- `compositional/data/training/function_calling_train_tools51-100_4calls.json`
+- `compositional/data/test/function_calling_test_tools51-100_4calls.json`
+
+`51-100` 训练集与测试集的 `1-tool` 数量如下：
+
+| split | `1-tool` 样本数 | 总样本数 |
+| --- | ---: | ---: |
+| train | 2243 | 5000 |
+| test | 0 | 500 |
+| train + test | 2243 | 5500 |
+
+`51-100` 测试集的 `unique tools` 分布如下：
+
+| `unique tools` 数量 | 样本数 |
+| --- | ---: |
+| 2-tools | 250 |
+| 3-tools | 250 |
+
+`51-100` 测试集的 `function_calls` 数量分布如下：
+
+| `function_calls` 数量 | 样本数 |
+| --- | ---: |
+| 2-call | 229 |
+| 3-call | 233 |
+| 4-call | 38 |
+
+`51-100` 训练集中，单工具样本内部的 call 数分布如下：
+
+| 单工具样本的 `function_calls` 数量 | 样本数 |
+| --- | ---: |
+| 1-call | 1904 |
+| 2-call | 283 |
+| 3-call | 50 |
+| 4-call | 6 |
+
+整个 `51-100` 训练集的 `function_calls` 分布如下：
+
+| `function_calls` 数量 | 样本数 |
+| --- | ---: |
+| 1-call | 1904 |
+| 2-call | 1434 |
+| 3-call | 1350 |
+| 4-call | 312 |
+
+#### 5.3.2 `1-100` 这组既有数据
+
+对应文件：
+
+- `compositional/data/training/function_calling_train_tools1-100_4calls.json`
+- `compositional/data/test/function_calling_test_tools1-100_4calls.json`
+
+`1-100` 训练集与测试集的 `1-tool` 数量如下：
+
+| split | `1-tool` 样本数 | 总样本数 |
+| --- | ---: | ---: |
+| train | 4483 | 5000 |
+| test | 0 | 500 |
+| train + test | 4483 | 5500 |
+
+`1-100` 训练集的 `function_calls` 分布如下：
+
+| `function_calls` 数量 | 样本数 |
+| --- | ---: |
+| 1-call | 3734 |
+| 2-call | 809 |
+| 3-call | 388 |
+| 4-call | 69 |
+
+`1-100` 训练集的 `unique tools` 分布如下：
+
+| `unique tools` 数量 | 样本数 |
+| --- | ---: |
+| 1-tool | 4483 |
+| 2-tool | 258 |
+| 3-tool | 259 |
+
+`1-100` 训练集中，单工具样本内部的 call 数分布如下：
+
+| 单工具样本的 `function_calls` 数量 | 样本数 |
+| --- | ---: |
+| 1-call | 3734 |
+| 2-call | 596 |
+| 3-call | 134 |
+| 4-call | 19 |
+
+#### 5.3.3 为什么测试集没有 `1-tool` 样本
+
+当前实现中，`synthesize_multi_tool_data()` 在 `split_name == "test"` 时跳过了 single-tool 样本的加入；训练集才会先加入全部 single-tool 样本，再补 multi-tool 样本。对应源码逻辑如下：
+
+- `test` 分支直接跳过 single-tool 样本
+- `training` 分支先加入 single-call single-tool 样本
+- `training` 分支再加入同一个 tool 多次调用的 single-tool 样本
+- 最后再根据 `train_multi_tool_ratios` / `test_multi_tool_ratios` 合成 multi-tool 样本
+
+所以在当前既有数据里：
+
+- train 中可以同时看到 `1-tool`、`2-tool`、`3-tool`
+- test 中只会看到 `2-tool` 和 `3-tool`
+
+更一般地说，当前实现遵循下面的 split 语义：
+
+- training split 始终先保留 single-tool 样本，再按 ratio 配置补 multi-tool 样本
+- test split 只生成 multi-tool 样本
+- 当 ratio 串扩展到更多 bucket 时，train / test 会覆盖对应的 `2-tool..N-tool`
+
+#### 5.3.4 原始 `1-100` 单工具池与 `max_samples_per_tool=80`
+
+按当前本地原始 XLAM / APIGen 数据统计，`1-100` 这 100 个工具一共能抽到 `11695` 条 single-tool 样本，其中 `2036` 条是同一个 tool 的 multi-call 样本。
+
+如果把 `max_samples_per_tool` 设为 `80`，覆盖情况如下：
+
+- 有 `99` 个工具能拿到至少 `80` 条 single-tool 样本
+- 有 `1` 个工具低于 `80`
+- 这个工具是 `is_anagram_phrase`
+- `is_anagram_phrase` 当前只有 `79` 条 single-tool 样本
+
+所以对当前数据来说：
+
+- `max_samples_per_tool=80` 基本可行
+- 要求所有 `1-100` 工具完全统一上限时，`79` 是更稳的值
+
 ### 6. 论文和源码是如何从原始数据里抽出这 100 个 tools 的
 
 #### 6.1 论文里的说法
@@ -292,9 +435,9 @@ python xlam_datasets.py \
 7. 对选中的每个 tool，最多保留 `50` 条原始 query-call pairs。
 8. 按 `train_size / (train_size + test_size) = 5000 / 5500 ≈ 90.9%` 的比例，先对每个 tool 的原始样本做 train / test 拆分。
 9. 在拆分后的单工具样本上继续合成 multi-tool queries：
-   - 训练集：保留单工具样本，再补充 2-tool / 3-tool 合成样本
-   - 测试集：在当前仓库默认实现下，只保留 2-tool / 3-tool compositional 样本
-10. 每条最终样本最多允许 `4` 个 function calls。
+   - 训练集：保留单工具样本，再补充 ratio 配置对应的 multi-tool 合成样本
+   - 测试集：只保留 ratio 配置对应的 compositional multi-tool 样本
+10. 每条最终样本最多允许 `train_max_function_calls` / `test_max_function_calls` 指定的 function calls；maintained launcher 当前使用 `4`。
 
 #### 6.3 当前仓库里可以直接验证到的事实
 
@@ -467,8 +610,9 @@ is_valid_parentheses
 
 是。
 
-- 当前 launcher 会生成并读取 `..._4calls.json`
-- `4calls` 的意思是每条样本最多 `4` 个 function calls，不是每条都恰好 `4` 个 calls
+- 当前 maintained launcher 会生成并读取 `..._4calls.json`
+- `4calls` 的意思是每条样本最多 `4` 个 function calls
+- 数据生成器本身已经支持其他 `Ncalls` 文件名，例如 `..._10calls.json`
 
 ### Q2. 当前选取的 50 个 benchmark tools，是否满足每个 tool 都有 `100` 个训练样本和 `10` 个测试样本？
 
@@ -886,6 +1030,189 @@ TokMem 训练本身并不是逐条样本把整份 `tools` 列表喂进模型。
 - 这个值表示每个样本平均会产生多少次 parse error
 - 数值可以大于 `1`
 - 这个统计口径与论文保持一致
+
+当前 repo 里，`parse` 实际分两层：
+
+### 1. 先把生成序列切成多条 `function_calls`
+
+模型生成结束后，`compositional/model.py::_parse_generated_sequences` 会先把“用户输入之后新生成的 token”拿出来，再做这几步：
+
+- 去掉 `eos` 之后的内容
+- 扫描整段生成，找出所有 tool token 的位置
+- 对每个 tool token，取它后面的参数 span
+- 开启 `use_eoc` 时，优先截到下一个 `eoc`
+- 没找到 `eoc` 时，退回到下一个 tool token；如果后面也没有 tool token，就截到序列尾部
+- 把每一段参数 token decode 成字符串，放进 `function_calls`
+
+所以这一层只是在做 span 切分。此时得到的是：
+
+- `predicted_tools`
+- `function_calls`
+
+其中 `function_calls` 还是字符串列表，还没有做 JSON 解析。
+
+### 2. 再把每条 `function_call` 字符串解析成结构化对象
+
+评测阶段，`compositional/eval.py::parse_function_call` 会对每条 call 依次尝试：
+
+1. 直接 `json.loads(text)`
+2. 如果字符串里有 `{ ... }`，就截出最外层第一段对象子串再 `json.loads`
+3. 如果像 `func_name(arg1=..., arg2=...)`，就按简单函数调用格式解析
+4. 前面都失败时，返回：
+
+```python
+{"raw_text": text, "parse_error": True}
+```
+
+所以当前 `parse error` 的直接含义是：这条输出 call 没能成功转成结构化对象。
+
+### 3. parse error 会怎样影响各个指标？
+
+这部分最容易混，当前 repo 里至少有三套不同口径。
+
+#### 3.1 `Tool F1`
+
+`Tool F1` 只看 `predicted_tools` 和 `expected_tools`。
+
+- 它不依赖 `function_calls` 是否 parse 成功
+- 只要 tool token 已经被切出来，tool 名预测对了，这条样本就会给 `Tool F1` 加分
+
+所以完全可能出现：
+
+- 某条 call 的参数串已经 parse error
+- 但 `Tool F1` 仍然很高
+
+#### 3.2 表里的 `Arguments F1`
+
+README 和汇总表里的 `Arguments F1`，当前实际对应的是评测结果中的 `avg_f1_score`，也就是 `Average F1 Score (Function Calls)`。
+
+它的比较单位是“整条 call 的规范化结果”，不是参数 token 级别的部分匹配。
+
+如果某条预测 call parse 失败：
+
+- 这条 call 仍然会参与 `avg_f1_score`
+- 参与时会以 `raw_text` 这一整条坏字符串进入比较
+- 它通常和 gold call 对不上
+- 效果上通常等价于：
+  - 少一个 `TP`
+  - 多一个 `FP`
+  - 对应 gold 再多一个 `FN`
+
+所以 parse 失败时，这条 `function call` 里的 arguments 会整体失分；当前实现里没有“虽然 JSON 坏了，但前半段几个参数还能拿部分分”的 token-level credit。
+
+#### 3.3 `arguments_accuracy`
+
+当前评测还会单独打印一个 `Arguments Accuracy`。
+
+它和表里的 `Arguments F1` 不是同一个指标。它会先抽取 `(tool_name, normalized_args)` 对，再看有多少 gold pair 被命中。
+
+这里如果某条 call parse error：
+
+- 这条 call 不会产出有效的 `(tool, args)` pair
+- 对应 gold arguments 匹配不上
+- 效果上也是整条 arguments 失分
+
+#### 3.4 `Parse Error Rate`
+
+`Parse Error Rate` 单独累计每条 output call 的 parse 失败次数，再除以 `total_examples`。
+
+所以：
+
+- 它的统计粒度是 call-level
+- 同一个样本里如果坏了两条 call，就会累加两次
+- 因此这个值可以大于 `1`
+
+### 4. 具体样本：一条 call 提前被 `eoc` 截断时，F1 怎么算？
+
+测试集中有这类 4-call 样本：
+
+```python
+tools = [
+  "project_population",
+  "project_population",
+  "whois",
+  "greatest_common_divisor",
+]
+
+target_calls = [
+  "{\"current_pop\": 5000, \"num_years\": 5, \"annual_growth\": 1.0}",
+  "{\"current_pop\": 3000, \"num_years\": 5}",
+  "{\"domain\": \"google.com\"}",
+  "{\"a\": 84, \"b\": 252}",
+]
+```
+
+假设模型输出里第一条被提前截断：
+
+```python
+predicted_calls = [
+  "{\"current_pop\": 5000, \"num_years\": 5",
+  "{\"current_pop\": 3000, \"num_years\": 5}",
+  "{\"domain\": \"google.com\"}",
+  "{\"a\": 84, \"b\": 252}",
+]
+```
+
+这时：
+
+- 第 1 条 parse 失败，变成 `{"raw_text": "...", "parse_error": True}`
+- 后 3 条都能正常 parse
+
+对表里的 `Arguments F1` 而言，可以把它理解成：
+
+- 匹配成功的 call 有 `3` 条
+- 预测总条数是 `4`
+- gold 总条数也是 `4`
+
+于是：
+
+- `precision = 3 / 4 = 0.75`
+- `recall = 3 / 4 = 0.75`
+- `F1 = 0.75`
+
+同时：
+
+- `parse_errors["outputs"] = 1`
+
+如果这条样本的 tool 顺序和 tool 名都对，那么它还可能同时表现为：
+
+- `Tool F1` 很高
+- 表里的 `Arguments F1` 下降
+- `Parse Error Rate` 上升
+
+这正是当前 `eoc` 相关实验里经常出现的组合。
+
+### 5. 如果生成工具的顺序变化了，会有影响吗？
+
+当前实现里，顺序影响比直觉中小。
+
+#### 5.1 `Tool F1`
+
+当前 `Tool F1` 用的是工具集合式比较，顺序不影响结果。
+
+#### 5.2 表里的 `Arguments F1`
+
+当前 `compare_function_calls_advanced(..., ignore_order=True)` 会按无序多集合思路比较，所以只要整条 call 本身一致，顺序变化通常不影响 `avg_f1_score`。
+
+#### 5.3 `Exact Match Accuracy`
+
+当前 repo 里的 `Exact Match Accuracy` 在 compositional 评测里也复用了 `ignore_order=True` 的比较口径，所以纯粹的调用顺序变化通常也不会单独把它打成错误。
+
+### 6. 一个容易忽略的小细节
+
+当前 `avg_f1_score` 里面的 `calculate_f1_score` 用的是 `set(outputs)` 和 `set(targets)`。
+
+这意味着：
+
+- 顺序不敏感
+- 完全相同的重复 call 会被折叠
+
+所以如果以后要更严格地区分：
+
+- 调用顺序
+- 重复调用次数
+
+就需要单独改这层比较逻辑，而不是只看现在的 `Arguments F1`。
 
 ### Q30. adaptation 在 TokMem 的训练过程中有什么作用？
 

@@ -137,3 +137,17 @@
 | `4` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.990 | 0.903 | 0.730 | 0.691 | 0.478 | 2.800 |
 | `5` | eoc+js_trunc+logit_bias | 3 | 0.005 | √ | √ | √ | 0.968 | 0.755 | 0.479 | 0.003 | 0.000 | 6.038 |
 <!-- README_MYSELF_ALLMETHODS_TABLE:END -->
+
+<!-- README_MYSELF_3METHODS_TABLE:BEGIN -->
+## Compositional baseline / eoc / logit bias（5 次重复均值）
+
+- run: `readme_myself_3methods_llama_1b_20260420_033222`
+- 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。
+- 默认 `logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。
+
+| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | 0.985 | 0.846 | 0.678 | 0.600 | 0.407 | 0.652 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | 0.987 | 0.869 | 0.721 | 0.654 | 0.463 | 0.801 |
+| `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.991 | 0.912 | 0.745 | 0.716 | 0.498 | 1.006 |
+<!-- README_MYSELF_3METHODS_TABLE:END -->
