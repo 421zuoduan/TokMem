@@ -151,3 +151,19 @@
 | `2` | eoc-only | 3 | 0.005 | √ | × | × | 0.987 | 0.869 | 0.721 | 0.654 | 0.463 | 0.801 |
 | `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.991 | 0.912 | 0.745 | 0.716 | 0.498 | 1.006 |
 <!-- README_MYSELF_3METHODS_TABLE:END -->
+
+<!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:BEGIN -->
+## Compositional baseline / eoc / logit bias（top1-100 / 10 calls, 5 次重复均值）
+
+- launcher: `scripts/compositional/llama_1b/run_readme_myself_3methods_top1_100_10calls_llama_1b.sh`
+- 该块保留给 `top_k=1-100`、`max_samples_per_tool=50`、`train_size=12000`、`test_size=1200`、`train_max_function_calls=10`、`test_max_function_calls=10` 的 5 次重复均值。
+- launcher 跑完后会把这里写成实际均值表。
+- 5 个 trial 统一使用 `seed=42`。
+- `train_multi_tool_ratios` / `test_multi_tool_ratios` 都固定为 8 个 `0.125`，对应 `2-tool` 到 `9-tool`。
+
+| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 |
+| `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 | 待运行 |
+<!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:END -->
