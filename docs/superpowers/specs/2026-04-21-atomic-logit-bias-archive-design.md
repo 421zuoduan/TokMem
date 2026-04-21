@@ -89,7 +89,6 @@
 以下文件保留在 `atomic/` 主目录：
 
 - `main_in_domain_logit_bias.py`
-- `main_in_domain_fixed_split.py`
 - `main_lora_baseline.py`
 - `main_lora_baseline.sh`
 - `main_tokmem_fixed_split.sh`
@@ -127,23 +126,11 @@ archive 区域存放的是被 supersede 的 TokMem entrypoint 和 legacy launche
 - official-style runtime path
 - maintained 的 fixed-split path
 
-### `main_in_domain_fixed_split.py`
-
-这个文件保留在顶层，但其角色改成 compatibility entrypoint。
-
-它的职责是兼容现有 fixed-split 调用方式，而不是继续作为一条独立方法线存在。它会接受当前脚本已经使用的 fixed-split 调用模式，然后转发到新的 maintained `main_in_domain_logit_bias.py`。
-
-这样可以保留现有操作习惯：
-
-```bash
-python -u main_in_domain_fixed_split.py --split_cache_path ...
-```
-
 ### `main_tokmem_fixed_split.sh`
 
 这个脚本保留在 `atomic/` 顶层，并继续指向 fixed-split maintained path。
 
-必要时可以简化，让它更明确地调用新的 maintained 实现或兼容 fixed-split 入口。
+必要时可以简化，让它更明确地直接调用新的 maintained `main_in_domain_logit_bias.py`。
 
 ## Atomic 版 Logit Bias 方法形态
 
@@ -199,7 +186,7 @@ maintained 训练模块需要：
 
 `fixed_split` 是 maintained feature，需要明确保留。
 
-新的 maintained 实现需要支持：
+新的 maintained 实现需要直接在 `main_in_domain_logit_bias.py` 中支持：
 
 - 加载预先构建好的 split cache
 - 写出后续分析仍然需要的 run metadata
@@ -258,7 +245,7 @@ archived 部分需要明确写出：
 
 1. 一个缩小版 fixed-split run，验证新的 maintained path 可以完整跑通
 2. 一个 checkpoint save/load round-trip，验证 bias head 会被正确保存与恢复
-3. 一个通过 `main_in_domain_fixed_split.py` 的兼容调用验证
+3. 一个通过固定划分 launcher 的兼容调用验证
 
 不新增专门的 test-only 文件。
 
@@ -268,7 +255,7 @@ archived 部分需要明确写出：
 2. 从官方上游引入 `main_in_domain_logit_bias.py`
 3. 给这个 maintained entrypoint 加上 `split_cache_path` 和 `logit bias`
 4. 更新 `task_model.py` 与 `task_training.py`，支持 atomic first-step `logit bias`
-5. 把 `main_in_domain_fixed_split.py` 改造成兼容入口
+5. 调整 `main_tokmem_fixed_split.sh` 和相关 fixed-split launcher，使其指向新的 maintained 实现
 6. 保留 `main_lora_baseline.py` 和 `main_lora_baseline.sh`
 7. 更新 `atomic/README.md` 和根目录 `README.md`
 
@@ -292,7 +279,7 @@ archived 部分需要明确写出：
 
 缓解：
 
-- 保留顶层 fixed-split 兼容入口
+- 保留顶层 fixed-split launcher
 - 只移动那些明显属于 legacy 或方法专属的脚本
 
 ## 成功标准
