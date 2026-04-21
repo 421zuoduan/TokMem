@@ -139,7 +139,7 @@
 <!-- README_MYSELF_ALLMETHODS_TABLE:END -->
 
 <!-- README_MYSELF_3METHODS_TABLE:BEGIN -->
-## Compositional baseline / eoc / logit bias（5 次重复均值）
+## Compositional baseline / eoc / logit bias（选用 top51-100 工具合成数据 / max 4 calls，5 次重复均值）
 
 - run: `readme_myself_3methods_llama_1b_20260420_033222`
 - 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。
@@ -153,7 +153,7 @@
 <!-- README_MYSELF_3METHODS_TABLE:END -->
 
 <!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:BEGIN -->
-## Compositional baseline / eoc / logit bias（top1-100 / 10 calls, 5 次重复均值）
+## Compositional baseline / eoc / logit bias（选用 top1-100 工具合成数据 / 10 calls, 5 次重复均值）
 
 - run: `readme_myself_3methods_top1_100_10calls_llama_1b_20260420_180300`
 - 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。
@@ -165,3 +165,11 @@
 | `2` | eoc-only | 3 | 0.005 | √ | × | × | 0.985 | 0.848 | 0.689 | 0.381 | 0.193 | 3.020 |
 | `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.988 | 0.882 | 0.722 | 0.470 | 0.221 | 1.552 |
 <!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:END -->
+
+- `Tool F1` 和 `Args F1` 对标论文给的评价指标，Tool 表示 tool token 的选择，Args 表示 args token 的选择。args token 指的是选定 tool token 后，tool token 后面继续生成的 tokens，用于表示执行工具完成任务所需的具体参数。
+- `Tool Exact Match Acc` 是所有工具都预测正确的样本比例，`Exact Match Acc` 是所有工具和参数都预测正确的样本比例
+- `Tool Acc` 是所有参数
+- `Parse Error Rate` 表示解析参数时有错误的工具比例，越低越好；它高时表示结构化输出本身已经损坏，即使 `Tool F1` 或 `Arguments F1` 不算太低，最终 `Exact Match Acc` 也可能上不去。
+
+
+是按每个样本 x 每个候选工具计算的 binary accuracy，

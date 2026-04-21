@@ -19,11 +19,12 @@ Focuses on learning individual, distinct tasks using reserved special tokens as 
 - **Dataset**: [Natural Instructions (v2.8)](https://github.com/allenai/natural-instructions).
 - **Goal**: Train task-specific embeddings that encode the procedural knowledge required for hundreds of diverse NLP tasks.
 - **Key Methods**:
-  - `TokMem`: Training specialized embeddings for each task.
+  - `TokMem`: Upstream atomic baseline with local fixed-split support and first-step logit bias.
   - `LoRA Baseline`: Sequential training with LoRA and optional experience replay.
+- **Archive Note**: Older locally evolved atomic TokMem implementations now live under `atomic/archive/current_local/` and `scripts/atomic/archive/current_local/`.
 - **Quick Start**:
   ```bash
-  cd atomic && bash main_tokmem.sh
+  cd atomic && bash main_tokmem_fixed_split.sh
   ```
 
 ### 2. Compositional Memory Recall (`compositional/`)

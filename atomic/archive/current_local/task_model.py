@@ -1,9 +1,38 @@
+"""Task-token model used by the atomic TokMem experiments."""
+
+import copy
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.utils import is_accelerate_available
 import json
-import math
+
+
+class FirstStepTaskTokenLogitsProcessor(LogitsProcessor):
+    """Restrict only the first generated token to the reserved task-token set."""
+
+    def __init__(self, allowed_token_ids, prompt_length):
+        self.allowed_token_ids = tuple(int(token_id) for token_id in allowed_token_ids)
+        self.prompt_length = int(prompt_length)
+        self._allowed_mask_cache = {}
+
+    def _get_allowed_mask(self, scores):
+        device = scores.device
+        if device not in self._allowed_mask_cache:
+            mask = torch.zeros(scores.shape[-1], dtype=torch.bool, device=device)
+            mask[list(self.allowed_token_ids)] = True
+            self._allowed_mask_cache[device] = mask
+        return self._allowed_mask_cache[device]
+
+    def __call__(self, input_ids, scores):
+        if input_ids.shape[1] != self.prompt_length:
+            return scores
+
+        allowed_mask = self._get_allowed_mask(scores)
+        scores = scores.clone()
+        scores[:, ~allowed_mask] = -float("inf")
+        return scores
 
 def count_parameters(model):
     """Count trainable and total parameters in a model"""
@@ -41,8 +70,8 @@ class TaskCallingModel(nn.Module):
     
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
                  num_tasks=100, task_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, is_extended=False, device_map=None, use_logit_bias=False,
-                 logit_bias_network="linear", logit_bias_scale=1.0):
+                 decouple_embeddings=False, is_extended=False, device_map=None,
+                 generation_routing="first_step_routing"):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name)
         # self.num_tasks = min(num_tasks, 248)  # Max 248 reserved tokens available
@@ -51,9 +80,8 @@ class TaskCallingModel(nn.Module):
         self.dtype = dtype
         self.decouple_embeddings = decouple_embeddings
         self.device_map = device_map
-        self.use_logit_bias = use_logit_bias
-        self.logit_bias_network = logit_bias_network
-        self.logit_bias_scale = logit_bias_scale
+        self.generation_routing = generation_routing
+        self._reserved_token_tensor_cache = {}
         
         # Load tokenizer to get reserved token mappings
         self.tokenizer = tokenizer
@@ -74,6 +102,17 @@ class TaskCallingModel(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_load_kwargs)
         if device_map is None:
             self.model = self.model.to(device)
+
+        pretrained_input_embeddings = self.model.model.embed_tokens.weight
+        pretrained_vocab_size = pretrained_input_embeddings.shape[0]
+        output_embeddings = self.model.get_output_embeddings()
+        with torch.no_grad():
+            pretrained_input_mean = pretrained_input_embeddings.detach().mean(dim=0, keepdim=True)
+            if output_embeddings is not None:
+                pretrained_output_mean = output_embeddings.weight.detach().mean(dim=0, keepdim=True)
+            else:
+                pretrained_output_mean = pretrained_input_mean
+
         if is_extended:
             self.model.resize_token_embeddings(len(tokenizer))
 
@@ -84,52 +123,36 @@ class TaskCallingModel(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         
-        # Get original embedding parameters for initialization
-        original_input_embeddings = self.model.model.embed_tokens.weight.data
-        original_output_embeddings = self.model.lm_head.weight.data
-        
-        # Create trainable parameters for task tokens (coupled or decoupled)
-        # Clone the embeddings for the reserved tokens and make them parameters
-        # Pre-create tensors for efficient task-token lookup during training/inference.
-        self.register_buffer(
-            "reserved_token_tensor",
-            torch.tensor(self.reserved_token_ids, device=self.input_device),
-            persistent=False,
+        self._initialize_added_token_rows_with_pretrained_average(
+            pretrained_vocab_size=pretrained_vocab_size,
+            input_average=pretrained_input_mean,
+            output_average=pretrained_output_mean,
         )
-        task_token_lookup = torch.full(
-            (original_input_embeddings.shape[0],),
-            -1,
-            dtype=torch.long,
-            device=self.input_device,
-        )
-        task_token_lookup[self.reserved_token_tensor] = torch.arange(
-            self.num_tasks,
-            dtype=torch.long,
-            device=self.input_device,
-        )
-        self.register_buffer(
-            "task_token_lookup",
-            task_token_lookup,
-            persistent=False,
-        )
+        reserved_on_input_device = self.get_reserved_token_tensor(self.input_device)
+        task_input_init = pretrained_input_mean.to(
+            device=self.input_device, dtype=self.model.model.embed_tokens.weight.dtype
+        ).repeat(len(reserved_on_input_device), 1)
+        task_output_init = pretrained_output_mean.to(
+            device=self.output_device, dtype=self.model.lm_head.weight.dtype
+        ).repeat(len(reserved_on_input_device), 1)
         
         if self.decouple_embeddings:
             # Separate parameters for input and output layers
             self.trainable_task_input_embeddings = nn.Parameter(
-                original_input_embeddings[self.reserved_token_tensor].clone()
+                task_input_init
             )
-            reserved_token_tensor_on_output = self.reserved_token_tensor.to(self.output_device)
             self.trainable_task_output_embeddings = nn.Parameter(
-                original_output_embeddings[reserved_token_tensor_on_output].clone()
+                task_output_init
             )
         else:
             # Shared parameter for both input and output layers
             self.trainable_task_embeddings = nn.Parameter(
-                original_input_embeddings[self.reserved_token_tensor].clone().to(self.output_device)
+                task_input_init.to(self.output_device)
             )
             # Create aliases for backward compatibility
             self.trainable_task_input_embeddings = self.trainable_task_embeddings
             self.trainable_task_output_embeddings = self.trainable_task_embeddings
+        print("Task token initialization: average of pretrained embeddings")
         
         # Task name mapping
         self.task_names = task_names or [f"task_{i}" for i in range(self.num_tasks)]
@@ -139,32 +162,9 @@ class TaskCallingModel(nn.Module):
         # Task token mappings (using reserved tokens)
         self.task_id_to_token_id = {i: self.reserved_token_ids[i] for i in range(self.num_tasks)}
         self.token_id_to_task_id = {self.reserved_token_ids[i]: i for i in range(self.num_tasks)} 
-        self.logit_bias_head = self._build_logit_bias_head()
 
         # Override the model's forward method to use our custom embeddings and logits
         self._setup_model_override()
-
-    def _build_logit_bias_head(self):
-        """Create the optional first-step bias head over reserved task tokens."""
-        if not self.use_logit_bias:
-            return None
-
-        hidden_size = self.config.hidden_size
-        if self.logit_bias_network == "mlp":
-            head = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
-                nn.GELU(),
-                nn.Linear(hidden_size, self.num_tasks),
-            )
-            nn.init.zeros_(head[-1].weight)
-            nn.init.zeros_(head[-1].bias)
-        else:
-            head = nn.Linear(hidden_size, self.num_tasks)
-            nn.init.zeros_(head.weight)
-            nn.init.zeros_(head.bias)
-
-        head_dtype = self.model.lm_head.weight.dtype
-        return head.to(device=self.output_device, dtype=head_dtype)
     
     def _setup_model_override(self):
         """Set up model override to make embedding/logit modifications transparent"""
@@ -172,36 +172,36 @@ class TaskCallingModel(nn.Module):
         self.original_embed_forward = self.model.model.embed_tokens.forward
         self.original_lm_head_forward = self.model.lm_head.forward
         
-        # Override embedding layer
+        # ---- Embedding override ----
         def custom_embed_forward(input_ids):
-            # Get standard embeddings
+            # Get standard embeddings.
             embeddings = self.original_embed_forward(input_ids)
-            task_token_lookup = self.task_token_lookup.to(input_ids.device)
-            task_token_rows = task_token_lookup[input_ids]
-            is_reserved = task_token_rows >= 0
+            reserved_token_ids_on_device = self.get_reserved_token_tensor(input_ids.device)
+            task_input_embedding_rows = self.trainable_task_input_embeddings.to(embeddings.device)
+            
+            # Replace only the reserved-token rows with trainable task embeddings.
+            is_reserved = torch.isin(input_ids, reserved_token_ids_on_device)
             if is_reserved.any():
-                task_input_embedding_rows = self.trainable_task_input_embeddings.to(embeddings.device)
-                embeddings[is_reserved] = task_input_embedding_rows[
-                    task_token_rows[is_reserved]
-                ]
-
+                for i, reserved_token_id in enumerate(self.reserved_token_ids):
+                    mask = (input_ids == reserved_token_id)
+                    if mask.any():
+                        embeddings[mask] = task_input_embedding_rows[i]
+            
             return embeddings
         
-        # Override lm_head  
+        # ---- LM-head override ----
         def custom_lm_head_forward(hidden_states):
-            # Get standard logits
+            # Get standard logits.
             logits = self.original_lm_head_forward(hidden_states)
-            reserved_token_tensor = self.reserved_token_tensor.to(logits.device)
+            reserved_token_ids_on_device = self.get_reserved_token_tensor(logits.device)
             task_output_embedding_rows = self.trainable_task_output_embeddings.to(hidden_states.device)
             
-            # Efficiently replace reserved token logits using batch matmul
-            # Shape: hidden_states (..., hidden_dim), task_embeddings (num_tasks, hidden_dim)
-            task_logits = torch.matmul(hidden_states, task_output_embedding_rows.T)  # (..., num_tasks)
+            # Efficiently replace reserved-token logits using batch matmul.
+            task_logits = torch.matmul(hidden_states, task_output_embedding_rows.T)
             if task_logits.device != logits.device:
                 task_logits = task_logits.to(logits.device)
             
-            # Replace the specific reserved token positions with our computed logits
-            logits[..., reserved_token_tensor] = task_logits
+            logits[..., reserved_token_ids_on_device] = task_logits
             
             return logits
         
@@ -234,11 +234,89 @@ class TaskCallingModel(nn.Module):
         if len(self.reserved_token_ids) > 5:
             print(f"  ... and {len(self.reserved_token_ids) - 5} more")
         print(f"Embedding coupling mode: {'Decoupled' if self.decouple_embeddings else 'Coupled'}")
-        if self.use_logit_bias:
-            print(
-                f"Logit-bias head: {self.logit_bias_network}, "
-                f"scale={self.logit_bias_scale}"
+        if self.generation_routing == "first_step_routing":
+            print("Generation routing mode: First-step restricted")
+        else:
+            print("Generation routing mode: Full-vocab generation")
+
+    def _initialize_added_token_rows_with_pretrained_average(
+        self,
+        pretrained_vocab_size,
+        input_average,
+        output_average,
+    ):
+        """Initialize any newly added tokenizer rows with the average pretrained embedding."""
+        current_input_embeddings = self.model.model.embed_tokens.weight.data
+        if current_input_embeddings.shape[0] > pretrained_vocab_size:
+            current_input_embeddings[pretrained_vocab_size:] = input_average.to(
+                device=current_input_embeddings.device,
+                dtype=current_input_embeddings.dtype,
+            ).repeat(current_input_embeddings.shape[0] - pretrained_vocab_size, 1)
+
+        output_embeddings = self.model.get_output_embeddings()
+        if output_embeddings is None:
+            return
+
+        current_output_embeddings = output_embeddings.weight.data
+        if current_output_embeddings.shape[0] > pretrained_vocab_size:
+            current_output_embeddings[pretrained_vocab_size:] = output_average.to(
+                device=current_output_embeddings.device,
+                dtype=current_output_embeddings.dtype,
+            ).repeat(current_output_embeddings.shape[0] - pretrained_vocab_size, 1)
+    
+    def get_reserved_token_tensor(self, device):
+        """Return reserved token IDs as a tensor on the requested device."""
+        device = torch.device(device)
+        if device not in self._reserved_token_tensor_cache:
+            self._reserved_token_tensor_cache[device] = torch.tensor(
+                self.reserved_token_ids, device=device, dtype=torch.long
             )
+        return self._reserved_token_tensor_cache[device]
+
+    def get_input_device(self):
+        """Return the device where input_ids should be placed."""
+        return self.input_device
+
+    def get_output_device(self):
+        """Return the device where logits/labels should be placed."""
+        return self.output_device
+
+    def _sample_restricted_token_positions(self, restricted_logits, temperature=0.6, top_p=0.9, do_sample=False):
+        """Select positions from logits restricted to a candidate token subset."""
+        if not do_sample:
+            return torch.argmax(restricted_logits, dim=-1)
+
+        temperature = max(float(temperature), 1e-5)
+        restricted_logits = restricted_logits / temperature
+
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(restricted_logits, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = False
+            sorted_logits = sorted_logits.masked_fill(sorted_indices_to_remove, -float("inf"))
+            probs = torch.softmax(sorted_logits, dim=-1)
+            sampled_sorted_indices = torch.multinomial(probs, num_samples=1)
+            return sorted_indices.gather(-1, sampled_sorted_indices).squeeze(-1)
+
+        probs = torch.softmax(restricted_logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+    def _select_first_task_tokens(self, instruction_tokens, instruction_mask, temperature=0.6, top_p=0.9, do_sample=False):
+        """Select the first task token using only the reserved task-token subset."""
+        outputs = self.model(input_ids=instruction_tokens, attention_mask=instruction_mask, use_cache=False)
+        logits = outputs.logits[:, -1, :]
+        reserved_token_ids_on_device = self.get_reserved_token_tensor(logits.device)
+        restricted_logits = logits.index_select(dim=-1, index=reserved_token_ids_on_device)
+        selected_positions = self._sample_restricted_token_positions(
+            restricted_logits,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        selected_tokens = reserved_token_ids_on_device[selected_positions]
+        return selected_tokens.to(instruction_tokens.device)
     
     def forward(self, input_ids, attention_mask, return_hidden_states=False):
         """
@@ -246,76 +324,27 @@ class TaskCallingModel(nn.Module):
         
         Sequence: [Instruction] [Reserved_Task_Token] [Response] <|eot_id|>
         """
+        if return_hidden_states:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+                output_hidden_states=True,
+            )
+            logits = outputs.logits
+            last_hidden_state = outputs.hidden_states[-1]
+            if last_hidden_state.device != logits.device:
+                last_hidden_state = last_hidden_state.to(logits.device)
+            return logits, last_hidden_state
+
+        # Disable KV cache during training/eval forward passes to reduce memory use.
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_cache=False,
-            return_dict=True,
-            output_hidden_states=return_hidden_states,
         )
-        if return_hidden_states:
-            last_hidden_state = outputs.hidden_states[-1]
-            if last_hidden_state.device != outputs.logits.device:
-                last_hidden_state = last_hidden_state.to(outputs.logits.device)
-            return outputs.logits, last_hidden_state
         return outputs.logits
-
-    def get_task_bias_targets(self, token_ids):
-        """Map reserved task token IDs to 0..num_tasks-1 class labels."""
-        task_token_lookup = self.task_token_lookup.to(token_ids.device)
-        task_targets = task_token_lookup[token_ids]
-        if (task_targets < 0).any():
-            raise ValueError("Task bias targets require reserved task token IDs")
-        return task_targets
-
-    def compute_task_logit_bias(self, hidden_states, detach_hidden_states=True):
-        """Project hidden states to task-token bias logits."""
-        if not self.use_logit_bias or self.logit_bias_head is None:
-            raise RuntimeError("Logit bias head is not enabled on this model")
-
-        if detach_hidden_states:
-            hidden_states = hidden_states.detach()
-        head_param = next(self.logit_bias_head.parameters())
-        hidden_states = hidden_states.to(
-            device=head_param.device,
-            dtype=head_param.dtype,
-        )
-        return self.logit_bias_head(hidden_states)
-
-    def _apply_first_step_logit_bias(self, next_token_logits, hidden_states):
-        """Add task-token bias only to the first generated token logits."""
-        if not self.use_logit_bias:
-            return next_token_logits
-
-        bias_logits = self.compute_task_logit_bias(hidden_states, detach_hidden_states=True)
-        bias_log_probs = torch.log_softmax(bias_logits.float(), dim=-1)
-        uniform_log_prob = math.log(max(1, self.num_tasks))
-        centered_bias = (bias_log_probs + uniform_log_prob) * self.logit_bias_scale
-        centered_bias = centered_bias.to(next_token_logits.device, dtype=next_token_logits.dtype)
-        biased_logits = next_token_logits.clone()
-        reserved_token_tensor = self.reserved_token_tensor.to(next_token_logits.device)
-        biased_logits[:, reserved_token_tensor] += centered_bias
-        return biased_logits
-
-    def _sample_next_tokens(self, logits, temperature=0.6, top_p=0.9, do_sample=False):
-        """Sample or greedily select the next tokens from logits."""
-        if do_sample:
-            logits = logits / max(float(temperature), 1e-5)
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-
-                for i in range(logits.shape[0]):
-                    indices_to_remove = sorted_indices[i][sorted_indices_to_remove[i]]
-                    logits[i][indices_to_remove] = -float('inf')
-
-            probs = torch.softmax(logits, dim=-1)
-            return torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-        return torch.argmax(logits, dim=-1)
 
     
     def generate_with_task_prediction(self, instruction_tokens, instruction_mask, tokenizer, 
@@ -324,66 +353,40 @@ class TaskCallingModel(nn.Module):
         self.eval()
         
         with torch.no_grad():
-            if self.use_logit_bias and max_new_tokens > 0:
-                outputs = self.model(
+            generation_config = copy.deepcopy(self.model.generation_config)
+            generation_config.pad_token_id = tokenizer.eos_token_id
+            generation_config.use_cache = True
+            generation_config.max_new_tokens = max_new_tokens
+            generation_config.do_sample = do_sample
+            if do_sample:
+                generation_config.temperature = temperature
+                generation_config.top_p = top_p
+            else:
+                generation_config.temperature = 1.0
+                generation_config.top_p = 1.0
+                generation_config.top_k = 50
+
+            if self.generation_routing == "full_vocab_generation":
+                generated = self.model.generate(
                     input_ids=instruction_tokens,
                     attention_mask=instruction_mask,
-                    return_dict=True,
-                    output_hidden_states=True,
-                    use_cache=False,
+                    generation_config=generation_config,
                 )
-                next_token_logits = outputs.logits[:, -1, :]
-                last_hidden_states = outputs.hidden_states[-1][:, -1, :]
-                if last_hidden_states.device != next_token_logits.device:
-                    last_hidden_states = last_hidden_states.to(next_token_logits.device)
-                next_token_logits = self._apply_first_step_logit_bias(
-                    next_token_logits,
-                    last_hidden_states,
-                )
-                first_step_tokens = self._sample_next_tokens(
-                    next_token_logits,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                )
-                generated = torch.cat([instruction_tokens, first_step_tokens.unsqueeze(-1)], dim=-1)
-                generated_attention_mask = torch.cat(
+            else:
+                logits_processor = LogitsProcessorList(
                     [
-                        instruction_mask,
-                        torch.ones(
-                            instruction_mask.shape[0],
-                            1,
-                            device=instruction_mask.device,
-                            dtype=instruction_mask.dtype,
-                        ),
-                    ],
-                    dim=-1,
+                        FirstStepTaskTokenLogitsProcessor(
+                            allowed_token_ids=self.reserved_token_ids,
+                            prompt_length=instruction_tokens.shape[1],
+                        )
+                    ]
                 )
-                remaining_new_tokens = max_new_tokens - 1
-                if remaining_new_tokens > 0 and not (first_step_tokens == tokenizer.eos_token_id).all():
-                    generated = self.model.generate(
-                        input_ids=generated,
-                        attention_mask=generated_attention_mask,
-                        max_new_tokens=remaining_new_tokens,
-                        temperature=temperature,
-                        top_p=top_p,
-                        do_sample=do_sample,
-                        pad_token_id=tokenizer.eos_token_id,
-                        use_cache=True
-                    )
-                return self._parse_generated_sequences(generated, instruction_tokens, tokenizer)
-
-            # Use native generation - our overrides make the custom embeddings/logits transparent
-            generated = self.model.generate(
-                input_ids=instruction_tokens,
-                attention_mask=instruction_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True
-            )
+                generated = self.model.generate(
+                    input_ids=instruction_tokens,
+                    attention_mask=instruction_mask,
+                    generation_config=generation_config,
+                    logits_processor=logits_processor,
+                )
             
             # Parse the generated sequences
             return self._parse_generated_sequences(generated, instruction_tokens, tokenizer)
@@ -411,6 +414,25 @@ class TaskCallingModel(nn.Module):
             input_ids = instruction_tokens.clone()
             attention_mask = instruction_mask.clone()
             task_replacement_count = [0] * batch_size  # Track how many tasks replaced per example
+
+            if gt_task_token_ids:
+                first_gt_token = gt_task_token_ids[0]
+                first_gt_tensor = torch.full(
+                    (batch_size, 1),
+                    first_gt_token,
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+                input_ids = torch.cat([input_ids, first_gt_tensor], dim=-1)
+                attention_mask = torch.cat(
+                    [
+                        attention_mask,
+                        torch.ones(batch_size, 1, device=attention_mask.device, dtype=attention_mask.dtype),
+                    ],
+                    dim=-1,
+                )
+                task_replacement_count = [1] * batch_size
+                max_new_tokens = max(0, max_new_tokens - 1)
             
             for step in range(max_new_tokens):
                 # Get model predictions
@@ -454,11 +476,12 @@ class TaskCallingModel(nn.Module):
                     break
                 
                 # Append new tokens to input_ids and update attention_mask
-                input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
+                next_tokens_for_input = next_tokens.to(input_ids.device)
+                input_ids = torch.cat([input_ids, next_tokens_for_input.unsqueeze(-1)], dim=-1)
                 attention_mask = torch.cat(
                     [
                         attention_mask,
-                        torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype),
+                        torch.ones(batch_size, 1, device=attention_mask.device, dtype=attention_mask.dtype),
                     ],
                     dim=-1,
                 )
@@ -580,14 +603,10 @@ class TaskCallingModel(nn.Module):
     
     def get_trainable_parameters(self):
         """Get list of trainable parameters for optimizer initialization"""
-        params = []
         if self.decouple_embeddings:
-            params.extend([self.trainable_task_input_embeddings, self.trainable_task_output_embeddings])
+            return [self.trainable_task_input_embeddings, self.trainable_task_output_embeddings]
         else:
-            params.append(self.trainable_task_embeddings)
-        if self.use_logit_bias and self.logit_bias_head is not None:
-            params.extend(self.logit_bias_head.parameters())
-        return params
+            return [self.trainable_task_embeddings]
     
     def save_task_tokens(self, filepath):
         """Save trained task token embeddings to file"""
@@ -597,9 +616,6 @@ class TaskCallingModel(nn.Module):
             'decouple_embeddings': self.decouple_embeddings,
             'task_name_to_id': self.task_name_to_id,
             'reserved_token_ids': self.reserved_token_ids,
-            'use_logit_bias': self.use_logit_bias,
-            'logit_bias_network': self.logit_bias_network,
-            'logit_bias_scale': self.logit_bias_scale,
         }
         
         if self.decouple_embeddings:
@@ -607,11 +623,6 @@ class TaskCallingModel(nn.Module):
             save_data['output_embeddings'] = self.trainable_task_output_embeddings.detach().cpu()
         else:
             save_data['embeddings'] = self.trainable_task_embeddings.detach().cpu()
-        if self.use_logit_bias and self.logit_bias_head is not None:
-            save_data['logit_bias_head'] = {
-                key: value.detach().cpu()
-                for key, value in self.logit_bias_head.state_dict().items()
-            }
         
         torch.save(save_data, filepath)
         print(f"Task tokens saved to {filepath}")
@@ -633,12 +644,6 @@ class TaskCallingModel(nn.Module):
             self.trainable_task_output_embeddings.data = data['output_embeddings'].to(self.output_device)
         else:
             self.trainable_task_embeddings.data = data['embeddings'].to(self.output_device)
-
-        saved_logit_bias_head = data.get('logit_bias_head')
-        if self.use_logit_bias and self.logit_bias_head is not None and saved_logit_bias_head is not None:
-            self.logit_bias_head.load_state_dict(saved_logit_bias_head)
-        elif self.use_logit_bias and self.logit_bias_head is not None:
-            print("Loaded checkpoint has no logit-bias head. Keeping current bias-head initialization.")
         
         print(f"Task tokens loaded from {filepath}")
         return data
