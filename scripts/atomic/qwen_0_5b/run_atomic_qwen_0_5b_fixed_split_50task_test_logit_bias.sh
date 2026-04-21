@@ -23,7 +23,7 @@ RUN_DIR="${REPO_ROOT}/atomic/runs/${RUN_NAME}"
 mkdir -p "${RUN_DIR}"
 cp "${SCRIPT_PATH}" "${RUN_DIR}/$(basename "${SCRIPT_PATH}")"
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_SHOW_CPP_STACKTRACES=1
@@ -47,16 +47,17 @@ python -u main_in_domain.py \
     --model_name "${REPO_ROOT}/models/Qwen2.5-0.5B-Instruct" \
     --split_cache_path "${SPLIT_CACHE}" \
     --use_logit_bias \
-    --logit_bias_loss_weight 1.0 \
+    --logit_bias_loss_weight 0.1 \
     --logit_bias_network linear \
     --logit_bias_scale 1.0 \
     --num_epochs 1 \
-    --batch_size 8 \
+    --batch_size 4 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --max_instruction_tokens 1024 \
     --lr 5e-4 \
-    --eval_batch_size 32 \
+    --val_batch_size 16 \
+    --test_batch_size 400 \
     --validate_every_n_steps 500 \
     --seed 42 \
     2>&1 | tee "${RUN_DIR}/stdout.log"

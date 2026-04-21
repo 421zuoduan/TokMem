@@ -2150,7 +2150,7 @@ bash scripts/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split.sh
 | 测试 prompt 形式 | 支持 `instruction_and_query` / `query_only` / `both` | 基本只有 `instruction + query` 这一路 | 论文用抽象符号 `q`，没有把这两种 prompt 形式单独做成公开代码开关 |
 | 训练与评测日志 | 每次 run 会保存 `run_config.json`、`split_cache.pt`、`split_cache_metadata.json`、stdout log、结果 JSON | 只有较简化的 training/evaluation log | 论文只给实验设定，不涉及代码级 run artifact 设计 |
 | 脚本默认运行环境 | 已明显本地化：本地模型路径、`device_map`、多卡/平衡分布脚本、额外归档脚本 | 更接近原始 Hugging Face 路径 + 单机单脚本运行 | 论文报告的是单张 A6000 48GB、bf16 |
-| `main_tokmem.sh` 默认设置 | 当前脚本偏本地机器可跑：本地 `Llama-3.2-3B-Instruct`、`CUDA_VISIBLE_DEVICES=0,1,2,3`、`device_map=balanced`、`batch_size=1`、`grad_acc=2`、`max_length=1280` | 原脚本是单卡、HF model name、`batch_size=2`、`eval_batch_size=32`、`max_instruction_tokens=1024` | 论文写的是 1 epoch、batch size 4、max length 1024、单张 A6000 |
+| `main_tokmem.sh` 默认设置 | 当前脚本偏本地机器可跑：本地 `Llama-3.2-3B-Instruct`、`CUDA_VISIBLE_DEVICES=0,1,2,3`、`device_map=balanced`、`batch_size=1`、`grad_acc=2`、`max_length=1280` | 原脚本是单卡、HF model name、`batch_size=2`、`val_batch_size=32`、`test_batch_size=32`、`max_instruction_tokens=1024` | 论文写的是 1 epoch、batch size 4、max length 1024、单张 A6000 |
 | dataloader 顺序 | 当前 atomic 还是 `shuffle=False`，但又额外加入 fixed-split 和更多对照开关 | `94fa1dd` 时 atomic 也已是 `shuffle=False` | 论文描述更接近“按 task 顺序引入，但 task 内样本做 shuffle” |
 | 与论文的一致性 | 在 **routing 开关** 和 **平均初始化** 上比原始代码更接近论文；但本地脚本默认硬件/批大小/长度设定又和论文不完全一致 | 方法大体一致，但若按源码细节看，routing 和初始化都没完全贴论文 | 论文是方法论与实验口径基线，不等于任一版本源码逐行实现 |
 

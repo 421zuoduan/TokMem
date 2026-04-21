@@ -161,7 +161,8 @@ def main():
     parser.add_argument('--num_tasks', type=int, default=5, help='Number of tasks to sample')
     # Remove ratio-based splitting in favor of absolute sizes
     parser.add_argument('--batch_size', type=int, default=4, help='Training batch size')
-    parser.add_argument('--eval_batch_size', type=int, default=16, help='Evaluation batch size')
+    parser.add_argument('--val_batch_size', type=int, default=16, help='Validation batch size')
+    parser.add_argument('--test_batch_size', type=int, default=16, help='Test batch size')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
@@ -180,6 +181,8 @@ def main():
     parser.add_argument('--load_task_tokens', type=str, default=None, 
                         help='Path to saved task tokens file (for evaluation/inference)')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Gradient accumulation steps')
+    parser.add_argument('--shuffle_train', action=argparse.BooleanOptionalAction, default=True,
+                        help='Shuffle the training dataloader (default: enabled)')
     # Absolute per-task sizes (override ratios when provided)
     parser.add_argument('--train_size', type=int, default=None, help='Absolute number of training samples per task (overrides train_ratio)')
     parser.add_argument('--val_size', type=int, default=None, help='Absolute number of validation samples per task (overrides val_ratio)')
@@ -210,8 +213,11 @@ def main():
     print(f"Device: {args.device}")
     print(f"Device map: {args.device_map}")
     print(f"Number of tasks to sample: {args.num_tasks}")
+    print(f"Validation batch size: {args.val_batch_size}")
+    print(f"Test batch size: {args.test_batch_size}")
     # Ratios removed; using sizes mode only
     print(f"Decouple embeddings: {args.decouple_embeddings}")
+    print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use logit bias: {args.use_logit_bias}")
     print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
     print(f"Logit bias network: {args.logit_bias_network}")
@@ -317,7 +323,9 @@ def main():
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
-        eval_batch_size=args.eval_batch_size
+        val_batch_size=args.val_batch_size,
+        test_batch_size=args.test_batch_size,
+        shuffle_train=args.shuffle_train,
     )
     
     # Training

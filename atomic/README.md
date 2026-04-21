@@ -21,6 +21,7 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 - `--model_name`: The transformer model to use. Supports Llama 3 and Qwen 2.5 models (e.g., `meta-llama/Llama-3.2-3B-Instruct` or `Qwen/Qwen2.5-7B-Instruct`).
 - `--device_map`: Optional Hugging Face sharding mode such as `balanced` for multi-GPU frozen-backbone loading.
 - `--train_size`, `--val_size`, `--test_size`: Number of instances per task for training, validation, and testing.
+- `--shuffle_train` / `--no-shuffle_train`: Control whether the training dataloader shuffles samples. The maintained default is `--shuffle_train`.
 - `--split_cache_path`: Load `train_data`, `val_data`, `test_data`, and `task_names` from a cached split file instead of runtime sampling.
 - `--use_logit_bias`: Enable the first-step task logit-bias head over reserved task tokens.
 - `--logit_bias_loss_weight`: Weight on the detached hidden-state bias-head supervision loss.

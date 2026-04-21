@@ -23,7 +23,7 @@ RUN_DIR="${REPO_ROOT}/atomic/runs/${RUN_NAME}"
 mkdir -p "${RUN_DIR}"
 cp "${SCRIPT_PATH}" "${RUN_DIR}/$(basename "${SCRIPT_PATH}")"
 
-export CUDA_VISIBLE_DEVICES=4,5,6
+export CUDA_VISIBLE_DEVICES=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_SHOW_CPP_STACKTRACES=1
@@ -50,12 +50,13 @@ python -u main_in_domain.py \
     --device_map balanced \
     --split_cache_path "${SPLIT_CACHE}" \
     --num_epochs 1 \
-    --batch_size 8 \
+    --batch_size 6 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --max_instruction_tokens 1024 \
     --lr 5e-4 \
-    --eval_batch_size 16 \
+    --val_batch_size 16 \
+    --test_batch_size 400 \
     --validate_every_n_steps 500 \
     --seed 42 \
     2>&1 | tee "${RUN_DIR}/stdout.log"

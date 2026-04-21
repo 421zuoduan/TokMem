@@ -152,8 +152,9 @@ def build_block_replay_sequence(train_data, block_size=10, replay_ratio=0.1, see
 
     return final_sequence
 
-def create_lora_dataloaders(train_data, val_data, test_data, tokenizer, 
-                           batch_size=4, eval_batch_size=16, max_length=1024, shuffle_train=False):
+def create_lora_dataloaders(train_data, val_data, test_data, tokenizer,
+                           batch_size=4, val_batch_size=16, test_batch_size=16,
+                           max_length=1024, shuffle_train=False):
     """Create DataLoaders for LoRA training without task tokens"""
     
     class LoRAInstructionsDataset(NaturalInstructionsTaskDataset):
@@ -240,14 +241,14 @@ def create_lora_dataloaders(train_data, val_data, test_data, tokenizer,
     
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=eval_batch_size,
+        batch_size=val_batch_size,
         shuffle=False,
         collate_fn=lambda batch: lora_collate_fn(batch, tokenizer)
     ) if val_dataset else None
     
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=eval_batch_size,
+        batch_size=test_batch_size,
         shuffle=False,
         collate_fn=lambda batch: lora_collate_fn(batch, tokenizer)
     ) if test_dataset else None
@@ -518,7 +519,8 @@ def main():
                         help='HuggingFace model name')
     parser.add_argument('--num_tasks', type=int, default=10, help='Number of tasks to sample')
     parser.add_argument('--batch_size', type=int, default=4, help='Training batch size')
-    parser.add_argument('--eval_batch_size', type=int, default=16, help='Evaluation batch size')
+    parser.add_argument('--val_batch_size', type=int, default=16, help='Validation batch size')
+    parser.add_argument('--test_batch_size', type=int, default=16, help='Test batch size')
     parser.add_argument('--max_length', type=int, default=1024, help='Maximum sequence length')
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
@@ -565,6 +567,8 @@ def main():
     print(f"Model: {args.model_name}")
     print(f"Device: {args.device}")
     print(f"Number of tasks: {args.num_tasks}")
+    print(f"Validation batch size: {args.val_batch_size}")
+    print(f"Test batch size: {args.test_batch_size}")
     print(f"LoRA config: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
     print(f"Target modules: {args.target_modules}")
     print()
@@ -654,7 +658,8 @@ def main():
         test_data=test_data,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
-        eval_batch_size=args.eval_batch_size,
+        val_batch_size=args.val_batch_size,
+        test_batch_size=args.test_batch_size,
         max_length=args.max_length,
         shuffle_train=args.shuffle_train
     )
@@ -702,7 +707,7 @@ def main():
             test_examples=test_examples,
             device=args.device,
             max_new_tokens=256,
-            batch_size=args.eval_batch_size
+            batch_size=args.test_batch_size
         )
         
         # Print evaluation results
