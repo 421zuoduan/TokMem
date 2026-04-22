@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 import json
 import math
@@ -426,7 +427,15 @@ class TaskCallingModel(nn.Module):
         finished = first_step_tokens == tokenizer.eos_token_id
 
         for _ in range(remaining_new_tokens):
-            if finished.all():
+            local_all_finished = finished.all()
+            if dist.is_available() and dist.is_initialized():
+                global_finished = local_all_finished.to(dtype=torch.int32)
+                dist.all_reduce(global_finished, op=dist.ReduceOp.MIN)
+                should_stop = bool(global_finished.item())
+            else:
+                should_stop = bool(local_all_finished.item())
+
+            if should_stop:
                 break
 
             outputs = self.model.model(

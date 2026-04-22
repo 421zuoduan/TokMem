@@ -4,6 +4,7 @@ Natural Instructions task learning with reserved task tokens.
 """
 
 import argparse
+import json
 import os
 import random
 
@@ -66,6 +67,13 @@ def set_random_seed(seed):
 
     if os.environ.get("RANK", "0") == "0":
         print(f"Random seed set to: {seed}")
+
+
+def write_json(output_path, payload):
+    """Write a JSON payload with stable formatting."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def build_expected_split_metadata(args):
@@ -313,6 +321,8 @@ def main():
                         help="Validate every n forward steps")
     parser.add_argument("--split_cache_path", type=str, default=None,
                         help="Path to a cached train/val/test split")
+    parser.add_argument("--run_dir", type=str, default=None,
+                        help="Directory for run-scoped logs and structured outputs")
     parser.add_argument("--use_logit_bias", action="store_true",
                         help="Train and apply a first-step task logit-bias head")
     parser.add_argument("--logit_bias_loss_weight", type=float, default=1.0,
@@ -325,6 +335,8 @@ def main():
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     args.tasks_dir = resolve_tasks_dir(args.tasks_dir)
+    if args.run_dir:
+        args.run_dir = os.path.abspath(args.run_dir)
     accelerator = build_accelerator(args, args.model_name)
     should_log = accelerator.is_main_process
     fsdp_plugin = getattr(accelerator.state, "fsdp_plugin", None)
@@ -453,7 +465,8 @@ def main():
             print()
 
         training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(
-            is_main_process=should_log
+            log_dir=args.run_dir if args.run_dir else "logs",
+            is_main_process=should_log,
         )
         if should_log:
             print("Setting up logging...")
@@ -464,6 +477,19 @@ def main():
                 print(f"Accelerator device: {accelerator.device}")
                 print(f"Accelerator distributed type: {accelerator.distributed_type}")
                 print()
+
+        if should_log and args.run_dir:
+            write_json(
+                os.path.join(args.run_dir, "run_config.json"),
+                {
+                    "args": vars(args),
+                    "world_size": world_size,
+                    "split_cache_path": split_cache_path,
+                    "task_names": task_names,
+                    "training_log": training_log,
+                    "evaluation_log": evaluation_log,
+                },
+            )
 
         if should_log:
             print("Creating data loaders...")
@@ -527,6 +553,7 @@ def main():
                 gradient_accumulation_steps=args.gradient_accumulation_steps,
             )
 
+        train_results = None
         task_token_checkpoint = args.load_task_tokens
         if not args.skip_training and train_dataloader is not None:
             if should_log:
@@ -551,6 +578,11 @@ def main():
             if should_log:
                 print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
                 print()
+                if args.run_dir:
+                    write_json(
+                        os.path.join(args.run_dir, "train_results.json"),
+                        train_results,
+                    )
 
         accelerator.wait_for_everyone()
         task_token_checkpoint = synchronize_checkpoint_path(task_token_checkpoint, accelerator)
@@ -599,6 +631,11 @@ def main():
             )
 
             if should_log and results is not None:
+                if args.run_dir:
+                    write_json(
+                        os.path.join(args.run_dir, "evaluation_results.json"),
+                        results,
+                    )
                 print("\n" + "=" * 50)
                 print("FINAL RESULTS SUMMARY:")
                 print(f"   Task Prediction Accuracy: {results['task_accuracy']:.3f}")

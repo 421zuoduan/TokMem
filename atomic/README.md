@@ -23,6 +23,7 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 - `--train_size`, `--val_size`, `--test_size`: Number of instances per task for training, validation, and testing.
 - `--shuffle_train` / `--no-shuffle_train`: Control whether the training dataloader shuffles samples. The maintained default is `--shuffle_train`.
 - `--split_cache_path`: Load `train_data`, `val_data`, `test_data`, and `task_names` from a cached split file instead of runtime sampling.
+- `--run_dir`: Save run-scoped logs and structured outputs such as `run_config.json`, `train_results.json`, and `evaluation_results.json` into one directory.
 - `--use_logit_bias`: Enable the first-step task logit-bias head over reserved task tokens.
 - `--logit_bias_loss_weight`: Weight on the detached hidden-state bias-head supervision loss.
 - `--logit_bias_network`: Bias-head architecture, `linear` or `mlp`.
@@ -80,6 +81,15 @@ bash main_tokmem_fixed_split.sh
 ```
 
 The maintained fixed-split launcher stays on the single-process Accelerate path by default. Copy its command and add an Accelerate FSDP config when you move to a distributed-aware atomic launch. In that FSDP launch shape, both validation and final evaluation batch sizes are interpreted per process. The multi-GPU baseline launchers under `scripts/atomic/qwen_0_5b/` and `scripts/atomic/llama_3b/` reuse the cached fixed split and run `main_in_domain.py` through a 3-process Accelerate FSDP launch.
+
+### 700-task mean comparison
+This launcher runs the `700-task / Qwen2.5-0.5B / seed=42` baseline and `logit_bias` settings three times each, then appends the mean `Task Prediction Accuracy` and `ROUGE-L` to `results/atomic_mean_results.md`:
+
+```bash
+bash ../scripts/atomic/qwen_0_5b/mean_baseline_logit_bias_qwen_0_5b_700task.sh
+```
+
+Each run writes `run_config.json`, `train_results.json`, `evaluation_results.json`, `stdout.log`, `gpu_monitor.log`, and `exit_code.txt` into its own folder under `atomic/runs/`.
 
 ### Older local atomic path
 Archived local experiments, scripts, and docs live under `atomic/archive/current_local/`.

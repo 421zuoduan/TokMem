@@ -99,6 +99,7 @@ Single-round maintained launchers for tools `51-100`:
 
 README 汇总复现实验的 maintained launcher:
 
+- `scripts/compositional/llama_3b/run_readme_myself_3methods_llama_3b.sh`
 - `scripts/compositional/llama_1b/run_readme_myself_7settings_llama_1b.sh`
 - `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh`
 - `scripts/compositional/llama_1b/run_readme_myself_logit_bias_methods_llama_1b.sh`

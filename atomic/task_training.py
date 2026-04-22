@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from datetime import datetime
 
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from transformers import get_linear_schedule_with_warmup
 
@@ -150,6 +151,31 @@ def _fsdp_generation_context(model, accelerator=None):
     if accelerator is not None and getattr(accelerator.distributed_type, "name", "") != "FSDP":
         return nullcontext()
     return FSDP.summon_full_params(model, recurse=True, writeback=False)
+
+
+def _sync_fsdp_ignored_module_gradients(model, accelerator=None):
+    """Average gradients for FSDP-ignored replicated modules across ranks."""
+    if accelerator is None:
+        return
+    if getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return
+    if not dist.is_available() or not dist.is_initialized():
+        return
+
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    if not hasattr(base_model, "get_fsdp_trainable_modules"):
+        return
+
+    world_size = dist.get_world_size()
+    if world_size <= 1:
+        return
+
+    for module in base_model.get_fsdp_trainable_modules():
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad.div_(world_size)
 
 
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
