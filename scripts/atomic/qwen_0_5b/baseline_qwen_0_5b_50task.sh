@@ -23,15 +23,14 @@ RUN_DIR="${REPO_ROOT}/atomic/runs/${RUN_NAME}"
 mkdir -p "${RUN_DIR}"
 cp "${SCRIPT_PATH}" "${RUN_DIR}/$(basename "${SCRIPT_PATH}")"
 
-export CUDA_VISIBLE_DEVICES=4,5,6
+export CUDA_VISIBLE_DEVICES=0,1,2
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_DEBUG=INFO
+MONITOR_GPU_IDS="${CUDA_VISIBLE_DEVICES}"
 
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 4,5,6
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i "${MONITOR_GPU_IDS}"
     } >> "${RUN_DIR}/gpu_monitor.log"
     sleep 10
 done &
@@ -59,9 +58,9 @@ accelerate launch \
     --max_length 1024 \
     --max_instruction_tokens 1024 \
     --lr 5e-4 \
-    --val_batch_size 16 \
-    --test_batch_size 400 \
-    --validate_every_n_steps 500 \
+    --val_batch_size 8 \
+    --test_batch_size 64 \
+    --validate_every_n_steps 200 \
     --num_workers 4 \
     --pin_memory \
     --seed 42 \

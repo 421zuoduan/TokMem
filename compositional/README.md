@@ -93,6 +93,9 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/tokmem_eoc_js_trunc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_js_trunc_logit_bias_llama_1b.sh`
+- `scripts/compositional/llama_3b/tokmem_baseline_llama_3b.sh`
+- `scripts/compositional/llama_3b/tokmem_eoc_llama_3b.sh`
+- `scripts/compositional/llama_3b/tokmem_eoc_logit_bias_llama_3b.sh`
 
 README 汇总复现实验的 maintained launcher:
 

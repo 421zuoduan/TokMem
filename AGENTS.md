@@ -10,6 +10,8 @@ This repository is organized by experiment track rather than by a shared package
 - `paper.pdf`: the paper corresponding to this repository. Treat it as the baseline method and results reference; future changes are expected to build on or modify the approaches described there.
 - `requirements.txt`: minimal Python dependency list.
 
+Execution scripts belong under `scripts/`. When adding or updating runnable experiment shell entrypoints, place them in `scripts/` rather than scattering them across track directories.
+
 Tests are limited. The main standalone test-like script is `atomic/test_sbert_retriever.py`.
 
 ## Current Experiment Focus
@@ -123,6 +125,16 @@ For Bash scripts, keep them flat and direct:
 - prefer one explicit command over generic reusable shell abstractions
 
 There is no enforced formatter or linter in this repository. If you use one locally, avoid large style-only diffs.
+
+## Error Handling Philosophy
+
+Prefer fail-fast behavior over defensive fallback logic when working in this repository.
+
+- keep control flow direct and let real errors surface
+- raise exceptions when assumptions are violated or required data is missing
+- add fallback or silent recovery only when the experiment contract explicitly requires it
+- avoid wrapping code just to keep execution going after an invalid state
+- prefer fixing the underlying bug over masking it with extra branches
 
 ## Testing Guidelines
 

@@ -25,20 +25,25 @@ cp "${SCRIPT_PATH}" "${RUN_DIR}/$(basename "${SCRIPT_PATH}")"
 
 export CUDA_VISIBLE_DEVICES=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_LAUNCH_BLOCKING=1
-export TORCH_SHOW_CPP_STACKTRACES=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=INFO
 
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 4
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 1
     } >> "${RUN_DIR}/gpu_monitor.log"
     sleep 10
 done &
 MONITOR_PID=$!
 trap 'kill "${MONITOR_PID}" 2>/dev/null || true' EXIT
 
-python -u main_in_domain.py \
+accelerate launch \
+    --num_processes 1 \
+    --num_machines 1 \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    main_in_domain.py \
     --tasks_dir "${REPO_ROOT}/datasets/natural-instructions-2.8/tasks" \
     --num_tasks "${NUM_TASKS}" \
     --train_size 500 \
@@ -46,6 +51,7 @@ python -u main_in_domain.py \
     --test_size 50 \
     --model_name "${REPO_ROOT}/models/Qwen2.5-0.5B-Instruct" \
     --split_cache_path "${SPLIT_CACHE}" \
+    --use_fsdp \
     --use_logit_bias \
     --logit_bias_loss_weight 0.1 \
     --logit_bias_network linear \
@@ -59,6 +65,8 @@ python -u main_in_domain.py \
     --val_batch_size 16 \
     --test_batch_size 400 \
     --validate_every_n_steps 500 \
+    --num_workers 4 \
+    --pin_memory \
     --seed 42 \
     2>&1 | tee "${RUN_DIR}/stdout.log"
 

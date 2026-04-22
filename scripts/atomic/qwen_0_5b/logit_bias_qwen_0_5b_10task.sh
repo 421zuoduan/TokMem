@@ -5,7 +5,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
-NUM_TASKS=50
+NUM_TASKS=10
 SPLIT_NAME="task${NUM_TASKS}-500-10-50-seed42"
 SPLIT_CACHE="${REPO_ROOT}/atomic/cached_splits/${SPLIT_NAME}/tokmem_atomic_fixed_split_maxlen1024.pt"
 
@@ -17,21 +17,20 @@ fi
 cd "${REPO_ROOT}/atomic"
 
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_tokmem_baseline_${RUN_ID}"
+RUN_NAME="atomic_qwen2.5_0.5b_${NUM_TASKS}tasks_logit_bias_${RUN_ID}"
 RUN_DIR="${REPO_ROOT}/atomic/runs/${RUN_NAME}"
 
 mkdir -p "${RUN_DIR}"
 cp "${SCRIPT_PATH}" "${RUN_DIR}/$(basename "${SCRIPT_PATH}")"
 
-export CUDA_VISIBLE_DEVICES=4,5,6
+export CUDA_VISIBLE_DEVICES=3,4,5
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_DEBUG=INFO
+MONITOR_GPU_IDS="${CUDA_VISIBLE_DEVICES}"
 
 while true; do
     {
         echo "===== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i 4,5,6
+        nvidia-smi --query-gpu=index,name,memory.used,memory.free,utilization.gpu --format=csv,noheader -i "${MONITOR_GPU_IDS}"
     } >> "${RUN_DIR}/gpu_monitor.log"
     sleep 10
 done &
@@ -53,15 +52,19 @@ accelerate launch \
     --model_name "${REPO_ROOT}/models/Qwen2.5-0.5B-Instruct" \
     --split_cache_path "${SPLIT_CACHE}" \
     --use_fsdp \
+    --use_logit_bias \
+    --logit_bias_loss_weight 0.1 \
+    --logit_bias_network linear \
+    --logit_bias_scale 1.0 \
     --num_epochs 1 \
     --batch_size 4 \
     --gradient_accumulation_steps 1 \
     --max_length 1024 \
     --max_instruction_tokens 1024 \
     --lr 5e-4 \
-    --val_batch_size 16 \
-    --test_batch_size 400 \
-    --validate_every_n_steps 500 \
+    --val_batch_size 8 \
+    --test_batch_size 64 \
+    --validate_every_n_steps 200 \
     --num_workers 4 \
     --pin_memory \
     --seed 42 \

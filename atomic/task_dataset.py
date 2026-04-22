@@ -717,7 +717,8 @@ def collate_fn(batch, tokenizer):
 def create_natural_instructions_dataloader(model, train_data=None, val_data=None, test_data=None,
                                          tokenizer=None, batch_size=4, max_length=512,
                                          val_batch_size=32, test_batch_size=32,
-                                         shuffle_train=True):
+                                         shuffle_train=True, num_workers=0,
+                                         pin_memory=True):
     """Create DataLoaders for Natural Instructions
     
     Args:
@@ -731,6 +732,8 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
         val_batch_size: Batch size for validation dataloader
         test_batch_size: Batch size for test dataloader
         shuffle_train: Whether to shuffle the training dataloader
+        num_workers: Number of dataloader worker processes
+        pin_memory: Whether to pin host memory for faster H2D transfer
     
     Returns:
         train_dataloader: Training DataLoader
@@ -754,7 +757,9 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
             train_dataset,
             batch_size=batch_size,
             shuffle=shuffle_train,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer)
+            collate_fn=lambda batch: collate_fn(batch, tokenizer),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         
         print(f"Training dataset created: {len(train_dataset)} samples (shuffle={shuffle_train})")
@@ -775,7 +780,9 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
             val_dataset,
             batch_size=val_batch_size,
             shuffle=False,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer)
+            collate_fn=lambda batch: collate_fn(batch, tokenizer),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         
         print(f"Validation dataset created: {len(val_dataset)} samples")
@@ -796,7 +803,9 @@ def create_natural_instructions_dataloader(model, train_data=None, val_data=None
             test_dataset,
             batch_size=test_batch_size,
             shuffle=False,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer)
+            collate_fn=lambda batch: collate_fn(batch, tokenizer),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
         
         test_examples = test_dataset.data.copy()
