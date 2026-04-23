@@ -5,16 +5,20 @@ Uses standard LoRA fine-tuning instead of tool-specific embeddings.
 """
 
 import argparse
+import math
 import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from accelerate.utils import disable_fsdp_ram_efficient_loading, enable_fsdp_ram_efficient_loading
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
 import json
 import os
 import logging
+from contextlib import nullcontext
 
+from fsdp_utils import build_accelerator
 from dataset import discover_available_tools
 from replay_buffer import SimpleReplayBuffer
 from run_layout import (
@@ -25,6 +29,11 @@ from run_layout import (
     resolve_run_context,
     write_json,
 )
+
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+except ImportError:
+    FSDP = None
 
 
 def set_random_seed(seed):
@@ -37,6 +46,68 @@ def set_random_seed(seed):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _unwrap_model(model, accelerator=None):
+    return accelerator.unwrap_model(model) if accelerator is not None else model
+
+
+def _maybe_move_batch(batch, device, accelerator=None):
+    if accelerator is not None:
+        return batch["input_ids"], batch["attention_mask"], batch.get("labels")
+    labels = batch.get("labels")
+    if labels is None:
+        return batch["input_ids"].to(device), batch["attention_mask"].to(device), None
+    return (
+        batch["input_ids"].to(device),
+        batch["attention_mask"].to(device),
+        labels.to(device),
+    )
+
+
+def _fsdp_generation_context(model, accelerator=None):
+    if FSDP is None:
+        return nullcontext()
+    if not isinstance(model, FSDP):
+        return nullcontext()
+    if accelerator is not None and getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return nullcontext()
+    fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None) if accelerator is not None else None
+    sharding_strategy = getattr(fsdp_plugin, "sharding_strategy", None)
+    strategy_name = getattr(sharding_strategy, "name", str(sharding_strategy))
+    if strategy_name == "NO_SHARD":
+        return nullcontext()
+    return FSDP.summon_full_params(model, recurse=True, writeback=False)
+
+
+def _optimizer_step_count(num_batches, num_epochs, gradient_accumulation_steps):
+    return max(1, math.ceil(num_batches / gradient_accumulation_steps) * num_epochs)
+
+
+def _generated_continuation_tokens(generated_sequence, padded_input_ids):
+    """Slice off the full padded prompt width before decoding generated tokens."""
+    prompt_width = int(padded_input_ids.shape[-1])
+    return generated_sequence[prompt_width:]
+
+
+def _save_lora_checkpoint(model, checkpoint_path, accelerator=None):
+    should_write = accelerator is None or accelerator.is_main_process
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    with _fsdp_generation_context(model, accelerator=accelerator):
+        if not should_write:
+            return None
+        os.makedirs(checkpoint_path, exist_ok=True)
+        state_dict = get_peft_model_state_dict(base_model)
+        base_model.save_pretrained(checkpoint_path, state_dict=state_dict)
+    return checkpoint_path
+
+
+def _cast_trainable_params_to_model_dtype(model):
+    """Keep PEFT adapter params in the same dtype as the base model for FSDP wrapping."""
+    target_dtype = next(model.parameters()).dtype
+    for param in model.parameters():
+        if param.requires_grad and param.dtype != target_dtype:
+            param.data = param.data.to(dtype=target_dtype)
 
 
 def collate_fn(batch):
@@ -247,68 +318,107 @@ def create_mixed_dataloader_with_replay(
     )
 
 
-def train_lora_model(model, train_dataloader, num_epochs=3, lr=5e-4, device="cuda"):
+def train_lora_model(
+    model,
+    train_dataloader,
+    num_epochs=3,
+    lr=5e-4,
+    device="cuda",
+    gradient_accumulation_steps=1,
+    accelerator=None,
+):
     """Train LoRA model using standard fine-tuning approach"""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
     
     model.train()
+    should_log = accelerator is None or accelerator.is_main_process
+    base_model = _unwrap_model(model, accelerator=accelerator)
     
     # Set up optimizer for LoRA parameters
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = AdamW((param for param in base_model.parameters() if param.requires_grad), lr=lr, weight_decay=0.01)
     
-    total_steps = len(train_dataloader) * num_epochs
+    total_optimizer_steps = _optimizer_step_count(
+        len(train_dataloader),
+        num_epochs,
+        gradient_accumulation_steps,
+    )
     
     # Create linear learning rate scheduler
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=total_steps // 10,  # 10% of steps for warmup
-        num_training_steps=total_steps
+        num_warmup_steps=total_optimizer_steps // 10,  # 10% of steps for warmup
+        num_training_steps=total_optimizer_steps
     )
-    
-    print(f"Training LoRA for {num_epochs} epochs, {len(train_dataloader)} batches per epoch")
-    print(f"Total steps: {total_steps}")
-    print(f"Learning rate: {lr} (with linear schedule + warmup)")
-    print(f"Warmup steps: {total_steps // 10}")
+    if accelerator is not None:
+        optimizer = accelerator.prepare_optimizer(optimizer)
+        scheduler = accelerator.prepare_scheduler(scheduler)
+
+    if should_log:
+        print(f"Training LoRA for {num_epochs} epochs, {len(train_dataloader)} batches per epoch")
+        print(f"Total optimizer steps: {total_optimizer_steps}")
+        print(f"Learning rate: {lr} (with linear schedule + warmup)")
+        print(f"Warmup steps: {total_optimizer_steps // 10}")
     
     total_loss = 0
     step_count = 0
+    optimizer_steps = 0
+    optimizer.zero_grad(set_to_none=True)
     
     for epoch in range(num_epochs):
         epoch_loss = 0
         for batch_idx, batch in enumerate(train_dataloader):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            
-            # Forward pass
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            accumulation_context = accelerator.accumulate(model) if accelerator is not None else nullcontext()
+            with accumulation_context:
+                input_ids, attention_mask, labels = _maybe_move_batch(batch, device, accelerator=accelerator)
+
+                # Forward pass
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
+
+                # Backward pass
+                if accelerator is not None:
+                    accelerator.backward(loss)
+                    should_step = accelerator.sync_gradients
+                else:
+                    (loss / gradient_accumulation_steps).backward()
+                    should_step = (
+                        ((step_count + 1) % gradient_accumulation_steps == 0)
+                        or (batch_idx + 1 == len(train_dataloader))
+                    )
+
+                if should_step:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    optimizer_steps += 1
             
             epoch_loss += loss.item()
             total_loss += loss.item()
             step_count += 1
             
-            if (batch_idx + 1) % 50 == 0:
+            if should_log and (batch_idx + 1) % 50 == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_dataloader)}, "
                       f"Loss: {loss.item():.4f}, LR: {current_lr:.2e}")
         
         avg_epoch_loss = epoch_loss / len(train_dataloader)
-        print(f"Epoch {epoch+1} completed, Average Loss: {avg_epoch_loss:.4f}")
+        if should_log:
+            print(f"Epoch {epoch+1} completed, Average Loss: {avg_epoch_loss:.4f}")
     
+    if accelerator is not None:
+        reduced = accelerator.reduce(torch.tensor([total_loss, float(step_count)], device=accelerator.device), reduction="sum")
+        total_loss = reduced[0].item()
+        step_count = int(reduced[1].item())
     avg_total_loss = total_loss / step_count
-    print(f"Training completed! Average total loss: {avg_total_loss:.4f}")
+    if should_log:
+        print(f"Training completed! Average total loss: {avg_total_loss:.4f}")
+        print(f"Optimizer steps: {optimizer_steps}")
     
     return {
         'avg_loss': avg_total_loss,
-        'total_steps': step_count
+        'total_steps': step_count,
+        'optimizer_steps': optimizer_steps,
     }
 
 
@@ -368,17 +478,19 @@ def extract_function_calls_from_text(text):
     return function_calls, tools
 
 
-def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
+def eval_lora_model(model, tokenizer, test_dataloader, device="cuda", accelerator=None):
     """Evaluate LoRA model using function calling metrics"""
     import time
     from collections import defaultdict
     from eval import compare_function_calls_advanced, calculate_tool_metrics
     
     model.eval()
+    should_log = accelerator is None or accelerator.is_main_process
     
     # Calculate total examples from dataloader
     total_examples = len(test_dataloader.dataset)
-    print("🔄 Running LoRA model evaluation...")
+    if should_log:
+        print("🔄 Running LoRA model evaluation...")
     start_time = time.time()
     
     exact_matches = 0
@@ -424,28 +536,38 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_dataloader):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            input_ids, attention_mask, _ = _maybe_move_batch(batch, device, accelerator=accelerator)
             batch_size = len(batch['raw_data'])
             processed_examples += batch_size
             
-            if batch_idx % 10 == 0 or processed_examples == total_examples:
+            if should_log and (batch_idx % 10 == 0 or processed_examples == total_examples):
                 print(f"   Progress: {processed_examples}/{total_examples} ({100 * processed_examples / total_examples:.1f}%)")
             
             # Generate responses
-            generated = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=256,
-                temperature=0.6,
-                top_p=0.9,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id
-            )
+            with _fsdp_generation_context(model, accelerator=accelerator):
+                generated = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=256,
+                    temperature=0.6,
+                    top_p=0.9,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id
+                )
+            local_outputs = []
+            for i, example in enumerate(batch["raw_data"]):
+                generated_tokens = _generated_continuation_tokens(generated[i], input_ids[i])
+                generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+                local_outputs.append({"example": example, "generated_text": generated_text})
+
+            if accelerator is not None:
+                local_outputs = accelerator.gather_for_metrics(local_outputs, use_gather_object=True)
+            if not should_log:
+                continue
             
             # Process each example
-            for i in range(batch_size):
-                example = batch['raw_data'][i]
+            for output in local_outputs:
+                example = output["example"]
                 expected_calls = example.get('function_calls', [])
                 expected_tools = example.get('tools', [])
                 expected_call_count = len(expected_calls)
@@ -454,9 +576,7 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
                 dataset = test_dataloader.dataset
                 expected_generic_tools = [dataset.tool_mapping.get(tool, "tool_unknown") for tool in expected_tools]
                 
-                # Extract generated text
-                generated_tokens = generated[i, input_ids.shape[1]:]
-                generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+                generated_text = output["generated_text"]
                 
                 # Extract function calls and predicted tools
                 predicted_calls, predicted_tools = extract_function_calls_from_text(generated_text)
@@ -516,6 +636,8 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
     
     end_time = time.time()
     eval_time = end_time - start_time
+    if not should_log:
+        return None
     
     # Calculate final metrics
     exact_accuracy = exact_matches / total_examples
@@ -714,6 +836,19 @@ def main():
                         help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         help="Model dtype")
+    parser.add_argument("--use_fsdp", action="store_true",
+                        help="Wrap the backbone with Accelerate FSDP for multi-GPU training")
+    parser.add_argument("--mixed_precision", type=str, default="bf16",
+                        choices=["no", "fp16", "bf16"],
+                        help="Accelerate mixed precision mode")
+    parser.add_argument("--fsdp_sharding_strategy", type=str, default="NO_SHARD",
+                       choices=["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2"],
+                       help="FSDP sharding strategy")
+    parser.add_argument("--fsdp_backward_prefetch", type=str, default="BACKWARD_PRE",
+                        choices=["BACKWARD_PRE", "BACKWARD_POST", "none"],
+                        help="FSDP backward prefetch mode")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Gradient accumulation steps")
     parser.add_argument("--max_length", type=int, default=512,
                         help="Maximum sequence length")
     
@@ -759,6 +894,9 @@ def main():
                         help="Optional tag appended to the generated run name")
     
     args = parser.parse_args()
+    accelerator = build_accelerator(args, args.model_name, use_seedable_sampler=True)
+    should_log = accelerator.is_main_process
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     set_random_seed(args.seed)
     
@@ -782,31 +920,30 @@ def main():
             if os.path.isabs(args.checkpoint_dir)
             else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
         )
-    open(evaluation_log_file, "a", encoding="utf-8").close()
+    if should_log:
+        open(evaluation_log_file, "a", encoding="utf-8").close()
 
-    log_handlers = [logging.StreamHandler(sys.stdout)]
-    log_handlers.append(logging.FileHandler(evaluation_log_file, mode='a'))
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        handlers=log_handlers
-    )
+    log_handlers = []
+    if should_log:
+        log_handlers = [logging.StreamHandler(sys.stdout), logging.FileHandler(evaluation_log_file, mode='a')]
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', handlers=log_handlers)
     logger = logging.getLogger(__name__)
     
     # Log start time and configuration
-    logger.info(f"=== LoRA Sequential Training Started at {datetime.now()} ===")
-    logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
-    logger.info(f"Run directory: {run_context['run_dir']}")
-    if args.reinit_lora_after_each_round:
-        logger.info("LoRA reinitialization enabled: Parameters will be reset after each round")
+    if should_log:
+        logger.info(f"=== LoRA Sequential Training Started at {datetime.now()} ===")
+        logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
+        logger.info(f"Run directory: {run_context['run_dir']}")
+        if args.reinit_lora_after_each_round:
+            logger.info("LoRA reinitialization enabled: Parameters will be reset after each round")
     
     # Parse training rounds
     try:
         rounds = parse_training_rounds(args.training_rounds)
-        print(f"Parsed {len(rounds)} training rounds:")
-        for i, round_spec in enumerate(rounds, 1):
-            print(f"  Round {i}: Tools {round_spec['tools']}, {round_spec['epochs']} epochs")
+        if should_log:
+            print(f"Parsed {len(rounds)} training rounds:")
+            for i, round_spec in enumerate(rounds, 1):
+                print(f"  Round {i}: Tools {round_spec['tools']}, {round_spec['epochs']} epochs")
     except ValueError as e:
         parser.error(str(e))
 
@@ -832,7 +969,8 @@ def main():
         if len(parsed_values) < num_rounds:
             parsed_values.extend([parsed_values[-1]] * (num_rounds - len(parsed_values)))
         elif len(parsed_values) > num_rounds:
-            print(f"Warning: {arg_label} specified {len(parsed_values)} values; using first {num_rounds}.")
+            if should_log:
+                print(f"Warning: {arg_label} specified {len(parsed_values)} values; using first {num_rounds}.")
             parsed_values = parsed_values[:num_rounds]
 
         return parsed_values
@@ -857,13 +995,17 @@ def main():
     else:
         dtype = torch.float32
     
-    print("\n=== LoRA Baseline - Sequential Function Calling Training ===")
-    print(f"Model: {args.model_name}")
-    print(f"Training rounds: {len(rounds)}")
-    print(f"Reinit LoRA after each round: {args.reinit_lora_after_each_round}")
-    print(f"Method: Standard LoRA fine-tuning{' with reinitialization' if args.reinit_lora_after_each_round else ''}")
-    print(f"Run directory: {run_context['run_dir']}")
-    print()
+    if should_log:
+        print("\n=== LoRA Baseline - Sequential Function Calling Training ===")
+        print(f"Model: {args.model_name}")
+        print(f"Training rounds: {len(rounds)}")
+        print(f"World size: {world_size}")
+        print(f"Use FSDP: {args.use_fsdp}")
+        print(f"Mixed precision: {args.mixed_precision}")
+        print(f"Reinit LoRA after each round: {args.reinit_lora_after_each_round}")
+        print(f"Method: Standard LoRA fine-tuning{' with reinitialization' if args.reinit_lora_after_each_round else ''}")
+        print(f"Run directory: {run_context['run_dir']}")
+        print()
     
     # Create tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -875,13 +1017,20 @@ def main():
     if args.save_checkpoints:
         os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # Initialize base model (will be wrapped with LoRA)
-    print("Loading base model...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        torch_dtype=dtype,
-        device_map="auto",
-    )
+    def load_base_model():
+        if should_log:
+            print("Loading base model...")
+        model_device = "cpu" if args.use_fsdp else (str(accelerator.device) if args.device == "cuda" else args.device)
+        if args.use_fsdp:
+            enable_fsdp_ram_efficient_loading()
+        try:
+            return AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                torch_dtype=dtype,
+            ).to(model_device)
+        finally:
+            if args.use_fsdp:
+                disable_fsdp_ram_efficient_loading()
     
     # Parse target modules once
     target_modules = [mod.strip() for mod in args.lora_target_modules.split(',')]
@@ -893,29 +1042,33 @@ def main():
     
     # Initialize model variable
     model = None
+    model_prepared = False
     
     # Initialize replay buffer if enabled
     replay_buffer = None
     if args.use_replay_buffer:
         replay_buffer = SimpleReplayBuffer(max_size=args.replay_buffer_size)
-        print(f"Initialized replay buffer with size {args.replay_buffer_size}, replay ratio {args.replay_ratio}")
+        if should_log:
+            print(f"Initialized replay buffer with size {args.replay_buffer_size}, replay ratio {args.replay_ratio}")
 
-    write_json(
-        artifact_path(run_context, "run_config.json"),
-        build_run_config(
-            vars(args),
-            run_context,
-            extra={
-                "experiment_type": "lora_sequential",
-                "rounds": rounds,
-                "data_dir": os.path.abspath(args.data_dir),
-                "artifacts": {
-                    "evaluation_log": evaluation_log_file,
-                    "checkpoint_dir": checkpoint_dir,
+    if should_log:
+        write_json(
+            artifact_path(run_context, "run_config.json"),
+            build_run_config(
+                vars(args),
+                run_context,
+                extra={
+                    "experiment_type": "lora_sequential",
+                    "rounds": rounds,
+                    "world_size": world_size,
+                    "data_dir": os.path.abspath(args.data_dir),
+                    "artifacts": {
+                        "evaluation_log": evaluation_log_file,
+                        "checkpoint_dir": checkpoint_dir,
+                    },
                 },
-            },
-        ),
-    )
+            ),
+        )
     
     # Training loop for each round
     for round_idx, round_spec in enumerate(rounds):
@@ -923,16 +1076,16 @@ def main():
         tools_range = round_spec['tools']
         epochs = round_spec['epochs']
         
-        print("\n" + "="*60)
-        print(f"ROUND {round_num}/{len(rounds)}: Training on tools {tools_range}")
-        print("="*60 + "\n")
+        if should_log:
+            print("\n" + "="*60)
+            print(f"ROUND {round_num}/{len(rounds)}: Training on tools {tools_range}")
+            print("="*60 + "\n")
         
         # Initialize or reinitialize LoRA for this round
         if round_idx == 0 or args.reinit_lora_after_each_round:
-            if round_idx > 0:
+            if round_idx > 0 and should_log:
                 print("Reinitializing LoRA parameters for new round...")
-                # Get the base model for reinitialization
-                base_model = model.get_base_model()
+            base_model = load_base_model()
             
             # Configure LoRA
             lora_config = LoraConfig(
@@ -946,8 +1099,11 @@ def main():
             
             # Apply LoRA to base model
             model = get_peft_model(base_model, lora_config)
-            print("LoRA configuration applied!")
-            model.print_trainable_parameters()
+            _cast_trainable_params_to_model_dtype(model)
+            model_prepared = False
+            if should_log:
+                print("LoRA configuration applied!")
+                model.print_trainable_parameters()
         
         # Construct data file names based on tool range
         train_max_calls = train_max_calls_by_round[round_idx]
@@ -963,21 +1119,30 @@ def main():
         
         # Check if data files exist
         if not os.path.exists(train_data_file):
-            print(f"Warning: Training data file not found: {train_data_file}")
-            print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
+            if should_log:
+                print(f"Warning: Training data file not found: {train_data_file}")
+                print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
             continue
         if not os.path.exists(test_data_file):
-            print(f"Warning: Test data file not found: {test_data_file}")
-            print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
+            if should_log:
+                print(f"Warning: Test data file not found: {test_data_file}")
+                print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
             continue
         
         # Discover tools for this round
-        print(f"Discovering tools from round {round_num} dataset...")
+        if should_log:
+            print(f"Discovering tools from round {round_num} dataset...")
         round_tools = discover_available_tools(train_data_file, test_data_file)
-        print(f"Found {len(round_tools)} tools for round {round_num}: {round_tools[:5]}..." if len(round_tools) > 5 else f"Found {len(round_tools)} tools: {round_tools}")
+        if should_log:
+            print(
+                f"Found {len(round_tools)} tools for round {round_num}: {round_tools[:5]}..."
+                if len(round_tools) > 5
+                else f"Found {len(round_tools)} tools: {round_tools}"
+            )
         
         # Create datasets for this round
-        print(f"Creating round {round_num} dataset...")
+        if should_log:
+            print(f"Creating round {round_num} dataset...")
         train_dataloader, test_dataloader = create_lora_dataloader(
             train_data_path=train_data_file,
             test_data_path=test_data_file,
@@ -989,7 +1154,8 @@ def main():
         
         # Create mixed dataloader with replay buffer if enabled
         if args.use_replay_buffer and replay_buffer is not None:
-            print(f"Creating mixed dataloader with {replay_buffer.size()} replay samples (ratio: {args.replay_ratio})")
+            if should_log:
+                print(f"Creating mixed dataloader with {replay_buffer.size()} replay samples (ratio: {args.replay_ratio})")
             # Get the train dataset from the dataloader
             train_dataset = train_dataloader.dataset
             train_dataloader = create_mixed_dataloader_with_replay(
@@ -998,24 +1164,34 @@ def main():
                 args.batch_size,
                 args.replay_ratio,
             )
+
+        if not model_prepared:
+            model, train_dataloader, test_dataloader = accelerator.prepare(model, train_dataloader, test_dataloader)
+            model_prepared = True
+        else:
+            train_dataloader, test_dataloader = accelerator.prepare(train_dataloader, test_dataloader)
         
         # Store test dataloader for cumulative evaluation
         all_test_dataloaders.append((tools_range, test_dataloader))
         
         # Train this round
-        print(f"\nTraining round {round_num} for {epochs} epochs...")
-        print("Training: LoRA fine-tuning")
+        if should_log:
+            print(f"\nTraining round {round_num} for {epochs} epochs...")
+            print("Training: LoRA fine-tuning")
         
         round_results = train_lora_model(
             model=model,
             train_dataloader=train_dataloader,
             num_epochs=epochs,
             lr=args.lr,
-            device=args.device
+            device=str(accelerator.device),
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            accelerator=accelerator,
         )
         
-        print(f"Round {round_num} training completed! Average loss: {round_results['avg_loss']:.4f}")
-        logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_loss']:.4f}")
+        if should_log:
+            print(f"Round {round_num} training completed! Average loss: {round_results['avg_loss']:.4f}")
+            logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_loss']:.4f}")
         
         # Add samples to replay buffer after training
         if args.use_replay_buffer and replay_buffer is not None:
@@ -1028,7 +1204,8 @@ def main():
             samples_to_add = random.sample(training_data, max_samples_to_add)
             
             replay_buffer.add(samples_to_add)
-            print(f"Added {len(samples_to_add)} samples to replay buffer. Buffer size: {replay_buffer.size()}")
+            if should_log:
+                print(f"Added {len(samples_to_add)} samples to replay buffer. Buffer size: {replay_buffer.size()}")
         
         # Store results
         all_results.append({
@@ -1046,97 +1223,105 @@ def main():
         
         # Evaluate this round
         if args.eval_after_each_round:
-            print(f"\nEvaluating round {round_num} model...")
-            
-            # Capture stdout to get the formatted evaluation results
-            captured_output = io.StringIO()
-            with redirect_stdout(captured_output):
-                eval_results = eval_lora_model(
+            if should_log:
+                print(f"\nEvaluating round {round_num} model...")
+                captured_output = io.StringIO()
+                with redirect_stdout(captured_output):
+                    eval_results = eval_lora_model(
+                        model=model,
+                        tokenizer=tokenizer,
+                        test_dataloader=test_dataloader,
+                        device=str(accelerator.device),
+                        accelerator=accelerator,
+                    )
+                formatted_eval_output = captured_output.getvalue()
+                print(formatted_eval_output)
+                all_results[-1]['eval_results'] = eval_results
+                with open(evaluation_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"ROUND {round_num} EVALUATION - Tools: {tools_range}, Epochs: {epochs}\n")
+                    f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                    f.write(f"{'='*60}\n")
+                    f.write(formatted_eval_output)
+                    f.write(f"\n{'='*60}\n\n")
+            else:
+                eval_lora_model(
                     model=model,
                     tokenizer=tokenizer,
                     test_dataloader=test_dataloader,
-                    device=args.device
+                    device=str(accelerator.device),
+                    accelerator=accelerator,
                 )
-            
-            # Get the captured formatted output
-            formatted_eval_output = captured_output.getvalue()
-            
-            # Print the formatted output to console as well
-            print(formatted_eval_output)
-            
-            all_results[-1]['eval_results'] = eval_results
-            
-            # Log the formatted evaluation results to file
-            with open(evaluation_log_file, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*60}\n")
-                f.write(f"ROUND {round_num} EVALUATION - Tools: {tools_range}, Epochs: {epochs}\n")
-                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-                f.write(f"{'='*60}\n")
-                f.write(formatted_eval_output)
-                f.write(f"\n{'='*60}\n\n")
             
             # Evaluate on all previous test sets if requested
             if args.eval_all_previous and round_num > 1:
-                print(f"\nEvaluating on all previous test sets...")
+                if should_log:
+                    print(f"\nEvaluating on all previous test sets...")
                 cumulative_results = {}
                 # Evaluate on all previous rounds (current round is at the end, so [:-1] gives us all previous)
                 for prev_tools, prev_test_dataloader in all_test_dataloaders[:-1]:
-                    print(f"  Evaluating on tools {prev_tools}...")
-                    
-                    # Capture formatted output for previous evaluation
-                    prev_captured_output = io.StringIO()
-                    with redirect_stdout(prev_captured_output):
-                        prev_eval_results = eval_lora_model(
+                    if should_log:
+                        print(f"  Evaluating on tools {prev_tools}...")
+                        prev_captured_output = io.StringIO()
+                        with redirect_stdout(prev_captured_output):
+                            prev_eval_results = eval_lora_model(
+                                model=model,
+                                tokenizer=tokenizer,
+                                test_dataloader=prev_test_dataloader,
+                                device=str(accelerator.device),
+                                accelerator=accelerator,
+                            )
+                        prev_formatted_eval_output = prev_captured_output.getvalue()
+                        print(prev_formatted_eval_output)
+                        cumulative_results[f"tools_{prev_tools}"] = prev_eval_results
+                        with open(evaluation_log_file, 'a', encoding='utf-8') as f:
+                            f.write(f"\n{'='*60}\n")
+                            f.write(f"ROUND {round_num} EVAL on tools {prev_tools}\n")
+                            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                            f.write(f"{'='*60}\n")
+                            f.write(prev_formatted_eval_output)
+                            f.write(f"\n{'='*60}\n\n")
+                    else:
+                        eval_lora_model(
                             model=model,
                             tokenizer=tokenizer,
                             test_dataloader=prev_test_dataloader,
-                            device=args.device
+                            device=str(accelerator.device),
+                            accelerator=accelerator,
                         )
-                    
-                    # Get the captured formatted output
-                    prev_formatted_eval_output = prev_captured_output.getvalue()
-                    
-                    # Print the formatted output to console as well
-                    print(prev_formatted_eval_output)
-                    
-                    cumulative_results[f"tools_{prev_tools}"] = prev_eval_results
-                    
-                    # Also log cumulative results to eval file
-                    with open(evaluation_log_file, 'a', encoding='utf-8') as f:
-                        f.write(f"\n{'='*60}\n")
-                        f.write(f"ROUND {round_num} EVAL on tools {prev_tools}\n")
-                        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-                        f.write(f"{'='*60}\n")
-                        f.write(prev_formatted_eval_output)
-                        f.write(f"\n{'='*60}\n\n")
-                        
-                all_results[-1]['cumulative_eval_results'] = cumulative_results
+                if should_log:
+                    all_results[-1]['cumulative_eval_results'] = cumulative_results
         
         # Save checkpoint if requested
         if args.save_checkpoints:
             checkpoint_path = os.path.join(checkpoint_dir, f"round_{round_num}_tools_{tools_range.replace('-', '_')}")
-            print(f"Saving checkpoint to {checkpoint_path}")
-            model.save_pretrained(checkpoint_path)
-            all_results[-1]["checkpoint_path"] = checkpoint_path
+            if should_log:
+                print(f"Saving checkpoint to {checkpoint_path}")
+            _save_lora_checkpoint(model, checkpoint_path, accelerator=accelerator)
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+            if should_log:
+                all_results[-1]["checkpoint_path"] = checkpoint_path
     
     # Final summary
-    print("\n" + "="*60)
-    print("LORA TRAINING SUMMARY")
-    print("="*60)
-    for result in all_results:
-        print(f"Round {result['round']} (tools {result['tools']}): "
-              f"{result['epochs']} epochs, avg loss: {result['avg_loss']:.4f}")
-        if 'eval_results' in result and result['eval_results']:
-            print(f"  Evaluation accuracy: {result['eval_results'].get('exact_accuracy', 'N/A'):.3f}")
-    
-    print("\n" + "="*60)
-    print("LoRA sequential training completed!")
-    print(f"Trained {len(rounds)} rounds with different tool sets")
-    if args.reinit_lora_after_each_round:
-        print("Method: Standard LoRA fine-tuning with reinitialization after each round")
-    else:
-        print("Method: Standard LoRA fine-tuning")
-    print("="*60)
+    if should_log:
+        print("\n" + "="*60)
+        print("LORA TRAINING SUMMARY")
+        print("="*60)
+        for result in all_results:
+            print(f"Round {result['round']} (tools {result['tools']}): "
+                  f"{result['epochs']} epochs, avg loss: {result['avg_loss']:.4f}")
+            if 'eval_results' in result and result['eval_results']:
+                print(f"  Evaluation accuracy: {result['eval_results'].get('exact_accuracy', 'N/A'):.3f}")
+
+        print("\n" + "="*60)
+        print("LoRA sequential training completed!")
+        print(f"Trained {len(rounds)} rounds with different tool sets")
+        if args.reinit_lora_after_each_round:
+            print("Method: Standard LoRA fine-tuning with reinitialization after each round")
+        else:
+            print("Method: Standard LoRA fine-tuning")
+        print("="*60)
     
     evaluation_results_payload = {
         "experiment_type": "lora_sequential",
@@ -1154,21 +1339,23 @@ def main():
             if result.get("eval_results") is not None or result.get("cumulative_eval_results") is not None
         ],
     }
-    write_json(
-        artifact_path(run_context, "evaluation_results.json"),
-        strip_call_count_breakdown(evaluation_results_payload),
-    )
-    write_json(
-        artifact_path(run_context, "training_summary.json"),
-        build_training_summary_payload(
-            run_name=run_context["run_name"],
-            all_results=all_results,
-            experiment_type="lora_sequential",
-        ),
-    )
+    if should_log:
+        write_json(
+            artifact_path(run_context, "evaluation_results.json"),
+            strip_call_count_breakdown(evaluation_results_payload),
+        )
+        write_json(
+            artifact_path(run_context, "training_summary.json"),
+            build_training_summary_payload(
+                run_name=run_context["run_name"],
+                all_results=all_results,
+                experiment_type="lora_sequential",
+            ),
+        )
     
     # Log completion
-    logger.info(f"=== LoRA Sequential Training Completed at {datetime.now()} ===")
+    if should_log:
+        logger.info(f"=== LoRA Sequential Training Completed at {datetime.now()} ===")
 
 
 if __name__ == "__main__":

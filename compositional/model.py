@@ -1,9 +1,18 @@
 import math
+import os
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import (
+    LoraConfig,
+    TaskType,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+)
 import json
+
+from fsdp_utils import is_rank_zero
 
 def build_logit_bias_head(hidden_size, num_tools, network_type):
     """Build the external prior head used to bias tool-token logits."""
@@ -48,6 +57,39 @@ def print_model_info(model, model_name):
     print(f"    Trainable parameters: {trainable_params:,}")
     print(f"    Total parameters: {total_params:,}")
     print(f"    Trainable ratio: {trainable_params/total_params*100:.4f}%")
+
+
+class ToolTokenModule(nn.Module):
+    """Keep token-memory parameters in a small module that can stay replicated under FSDP."""
+
+    def __init__(
+        self,
+        original_embeddings,
+        reserved_token_indices,
+        hidden_size,
+        num_tools,
+        decouple_embeddings=False,
+        use_logit_bias=False,
+        logit_bias_network="linear",
+    ):
+        super().__init__()
+        selected_embeddings = original_embeddings[reserved_token_indices].clone()
+        if decouple_embeddings:
+            self.input_embeddings = nn.Parameter(selected_embeddings.clone())
+            self.output_embeddings = nn.Parameter(selected_embeddings.clone())
+        else:
+            shared_embeddings = nn.Parameter(selected_embeddings.clone())
+            self.input_embeddings = shared_embeddings
+            self.output_embeddings = shared_embeddings
+
+        if use_logit_bias:
+            self.logit_bias_head = build_logit_bias_head(
+                hidden_size,
+                num_tools,
+                logit_bias_network,
+            ).to(dtype=original_embeddings.dtype, device=original_embeddings.device)
+        else:
+            self.logit_bias_head = None
 
 class FunctionCallingModel(nn.Module):
     """
@@ -163,6 +205,10 @@ class FunctionCallingModel(nn.Module):
                 bias="none"
             )
             self.model = get_peft_model(self.model, lora_peft_config)
+            target_dtype = next(self.model.parameters()).dtype
+            for param in self.model.parameters():
+                if param.requires_grad and param.dtype != target_dtype:
+                    param.data = param.data.to(dtype=target_dtype)
             print("LoRA applied successfully")
         else:
             # Freeze all base model parameters (original tokenized memory approach)
@@ -177,35 +223,16 @@ class FunctionCallingModel(nn.Module):
             # Direct access for non-LoRA model
             original_embeddings = self.model.model.embed_tokens.weight.data
         
-        # Create trainable parameters for tool tokens (coupled or decoupled)
-        # Clone the embeddings for the trainable reserved tokens and make them parameters
         reserved_token_indices = torch.tensor(self.trainable_reserved_token_ids, device=device)
-        
-        if self.decouple_embeddings:
-            # Separate parameters for input and output layers
-            self.trainable_tool_input_embeddings = nn.Parameter(
-                original_embeddings[reserved_token_indices].clone()
-            )
-            self.trainable_tool_output_embeddings = nn.Parameter(
-                original_embeddings[reserved_token_indices].clone()
-            )
-        else:
-            # Shared parameter for both input and output layers
-            self.trainable_tool_embeddings = nn.Parameter(
-                original_embeddings[reserved_token_indices].clone()
-            )
-            # Create aliases for backward compatibility
-            self.trainable_tool_input_embeddings = self.trainable_tool_embeddings
-            self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
-
-        if self.use_logit_bias:
-            self.logit_bias_head = build_logit_bias_head(
-                self.config.hidden_size,
-                self.num_tools,
-                self.logit_bias_network,
-            ).to(device=device, dtype=original_embeddings.dtype)
-        else:
-            self.logit_bias_head = None
+        self.tool_token_module = ToolTokenModule(
+            original_embeddings=original_embeddings,
+            reserved_token_indices=reserved_token_indices,
+            hidden_size=self.config.hidden_size,
+            num_tools=self.num_tools,
+            decouple_embeddings=self.decouple_embeddings,
+            use_logit_bias=self.use_logit_bias,
+            logit_bias_network=self.logit_bias_network,
+        )
         
         # Tool name mapping
         provided_tool_names = tool_names or [f"tool_{i}" for i in range(self.num_tools)]
@@ -222,81 +249,37 @@ class FunctionCallingModel(nn.Module):
         
         # Print parameter breakdown after everything is initialized
         self._print_parameter_breakdown()
+
+    @property
+    def trainable_tool_input_embeddings(self):
+        return self.tool_token_module.input_embeddings
+
+    @property
+    def trainable_tool_output_embeddings(self):
+        return self.tool_token_module.output_embeddings
+
+    @property
+    def trainable_tool_embeddings(self):
+        return self.tool_token_module.input_embeddings
+
+    @property
+    def logit_bias_head(self):
+        return self.tool_token_module.logit_bias_head
+
+    def _get_backbone_model(self):
+        return self.model.get_base_model() if self.lora_config else self.model
+
+    def _get_embed_module(self):
+        return self._get_backbone_model().model.embed_tokens
     
     def _setup_model_override(self):
-        """Set up model override to make embedding/logit modifications transparent"""
-        # Store original methods (handle LoRA vs non-LoRA)
-        if self.lora_config:
-            # When LoRA is applied, access base model methods
-            base_model = self.model.get_base_model()
-            self.original_embed_forward = base_model.model.embed_tokens.forward
-            self.original_lm_head_forward = base_model.lm_head.forward
-        else:
-            # Direct access for non-LoRA model
-            self.original_embed_forward = self.model.model.embed_tokens.forward
-            self.original_lm_head_forward = self.model.lm_head.forward
-        
-        # Override embedding layer
-        def custom_embed_forward(input_ids):
-            # Get standard embeddings
-            embeddings = self.original_embed_forward(input_ids)
-
-            reserved_token_ids = torch.as_tensor(
-                self.trainable_reserved_token_ids,
-                device=input_ids.device,
-            )
-            flattened_input_ids = input_ids.reshape(-1)
-            reserved_matches = (flattened_input_ids[:, None] == reserved_token_ids[None, :]).nonzero(as_tuple=False)
-            if reserved_matches.numel() > 0:
-                flattened_embeddings = embeddings.reshape(-1, embeddings.size(-1))
-                flattened_embeddings[reserved_matches[:, 0]] = self.trainable_tool_input_embeddings[
-                    reserved_matches[:, 1]
-                ]
-            
-            return embeddings
-        
-        # Override lm_head
-        def custom_lm_head_forward(hidden_states):
-            # Get standard logits
-            logits = self.original_lm_head_forward(hidden_states)
-
-            reserved_token_ids = torch.as_tensor(
-                self.trainable_reserved_token_ids,
-                device=logits.device,
-            )
-            reserved_token_logits = torch.matmul(
-                hidden_states,
-                self.trainable_tool_output_embeddings.transpose(0, 1),
-            )
-            logits[..., reserved_token_ids] = reserved_token_logits
-            
-            return logits
-        
-        # Apply overrides (handle LoRA vs non-LoRA)
-        if self.lora_config:
-            # When LoRA is applied, override base model methods
-            base_model = self.model.get_base_model()
-            base_model.model.embed_tokens.forward = custom_embed_forward
-            base_model.lm_head.forward = custom_lm_head_forward
-        else:
-            # Direct override for non-LoRA model
-            self.model.model.embed_tokens.forward = custom_embed_forward
-            self.model.lm_head.forward = custom_lm_head_forward
+        """Keep initialization flow stable; FSDP-safe custom logic runs in this wrapper."""
+        self.original_embed_forward = self._get_embed_module().forward
+        self.original_lm_head_forward = self._get_lm_head_module().forward
     
     def restore_original_model(self):
-        """Restore the original model methods (useful for cleanup or debugging)"""
-        if hasattr(self, 'original_embed_forward'):
-            if self.lora_config:
-                base_model = self.model.get_base_model()
-                base_model.model.embed_tokens.forward = self.original_embed_forward
-            else:
-                self.model.model.embed_tokens.forward = self.original_embed_forward
-        if hasattr(self, 'original_lm_head_forward'):
-            if self.lora_config:
-                base_model = self.model.get_base_model()
-                base_model.lm_head.forward = self.original_lm_head_forward
-            else:
-                self.model.lm_head.forward = self.original_lm_head_forward
+        """No-op: the FSDP-safe path does not override submodule forwards."""
+        return
 
     def _setup_reserved_tokens(self):
         """Extract reserved special token IDs from tokenizer"""
@@ -380,15 +363,16 @@ class FunctionCallingModel(nn.Module):
         
         Sequence: [User] [Reserved_Tool_Token] [Function_Call] <|eot_id|>
         """
-        # Use the model's forward method directly (our overrides handle the custom embeddings/logits)
-        outputs = self.model(
+        outputs, final_hidden_states, hidden_states = self._forward_with_captured_final_hidden_states(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=return_hidden_states,
-            return_dict=True
+            use_cache=False,
+            capture_all_hidden_states=return_hidden_states,
         )
         if return_hidden_states:
-            return outputs.logits, outputs.hidden_states[-1]
+            if hidden_states is not None:
+                return outputs.logits, hidden_states[-1]
+            return outputs.logits, final_hidden_states
         return outputs.logits
 
     def get_eoc_token_id(self):
@@ -435,9 +419,7 @@ class FunctionCallingModel(nn.Module):
 
     def _get_js_core_model(self):
         """Return the underlying causal LM used for JS-style logit lens scoring."""
-        if hasattr(self.model, "get_base_model"):
-            return self.model.get_base_model()
-        return self.model
+        return self._get_backbone_model()
 
     def _get_final_norm_module(self):
         """Locate the model's final norm module."""
@@ -456,6 +438,44 @@ class FunctionCallingModel(nn.Module):
             if output_embeddings is not None:
                 return output_embeddings
         raise ValueError("Unable to locate lm_head / output embeddings on the model")
+
+    def _compute_input_embeddings(self, input_ids):
+        """Build input embeddings with token-memory rows swapped in for reserved tool tokens."""
+        embeddings = self._get_embed_module()(input_ids)
+        reserved_token_ids = torch.as_tensor(
+            self.trainable_reserved_token_ids,
+            device=input_ids.device,
+        )
+        flattened_input_ids = input_ids.reshape(-1)
+        reserved_matches = (flattened_input_ids[:, None] == reserved_token_ids[None, :]).nonzero(as_tuple=False)
+        if reserved_matches.numel() > 0:
+            flattened_embeddings = embeddings.reshape(-1, embeddings.size(-1))
+            replacement_rows = self.trainable_tool_input_embeddings[
+                reserved_matches[:, 1]
+            ].to(
+                device=flattened_embeddings.device,
+                dtype=flattened_embeddings.dtype,
+            )
+            flattened_embeddings[reserved_matches[:, 0]] = replacement_rows
+        return embeddings
+
+    def _compute_logits_from_hidden_states(self, hidden_states):
+        """Project hidden states to vocab logits and overwrite tool-token columns."""
+        logits = self._get_lm_head_module()(hidden_states)
+        reserved_token_ids = torch.as_tensor(
+            self.trainable_reserved_token_ids,
+            device=logits.device,
+        )
+        reserved_token_logits = torch.matmul(
+            hidden_states,
+            self.trainable_tool_output_embeddings.to(
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ).transpose(0, 1),
+        )
+        logits = logits.clone()
+        logits[..., reserved_token_ids] = reserved_token_logits
+        return logits
 
     def _prepare_js_layer_hidden_states(self, hidden_states, final_norm_module):
         """Stack per-layer last-token states with js_explore's final-norm semantics."""
@@ -477,9 +497,8 @@ class FunctionCallingModel(nn.Module):
     def _compute_js_curve_from_hidden_states(self, hidden_states):
         """Compute the layer-to-final JS curve for the last generated position."""
         final_norm_module = self._get_final_norm_module()
-        lm_head_module = self._get_lm_head_module()
         layer_hidden_states = self._prepare_js_layer_hidden_states(hidden_states, final_norm_module)
-        logits_by_layer = lm_head_module(layer_hidden_states)
+        logits_by_layer = self._compute_logits_from_hidden_states(layer_hidden_states)
         return compute_js_divergence_against_final(logits_by_layer)
 
     def _compute_js_mean_from_hidden_states(self, hidden_states):
@@ -519,9 +538,10 @@ class FunctionCallingModel(nn.Module):
         capture_all_hidden_states=False,
     ):
         """Run the LM and capture final-layer hidden states without returning every layer unless requested."""
+        inputs_embeds = self._compute_input_embeddings(input_ids)
         if capture_all_hidden_states:
             outputs = self.model(
-                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
@@ -529,6 +549,7 @@ class FunctionCallingModel(nn.Module):
                 return_dict=True,
             )
             final_hidden_states = outputs.hidden_states[-1]
+            outputs.logits = self._compute_logits_from_hidden_states(final_hidden_states)
             return outputs, final_hidden_states, outputs.hidden_states
 
         lm_head_module = self._get_lm_head_module()
@@ -541,7 +562,7 @@ class FunctionCallingModel(nn.Module):
         handle = lm_head_module.register_forward_pre_hook(_capture_hidden_states)
         try:
             outputs = self.model(
-                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
@@ -552,6 +573,7 @@ class FunctionCallingModel(nn.Module):
             handle.remove()
 
         final_hidden_states = captured.get("final_hidden_states")
+        outputs.logits = self._compute_logits_from_hidden_states(final_hidden_states)
         return outputs, final_hidden_states, None
 
     def forward_with_final_hidden_states(self, input_ids, attention_mask):
@@ -615,20 +637,6 @@ class FunctionCallingModel(nn.Module):
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         with torch.no_grad():
-            if not (self.use_js_trunc or resolved_use_logit_bias):
-                # Use native generation - our overrides make the custom embeddings/logits transparent
-                generated = self.model.generate(
-                    input_ids=user_tokens,
-                    attention_mask=user_mask,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                    pad_token_id=tokenizer.eos_token_id,
-                    use_cache=True
-                )
-                return self._parse_generated_sequences(generated, user_tokens, tokenizer)
-
             batch_size = user_tokens.shape[0]
             device = user_tokens.device
             input_ids = user_tokens.clone()
@@ -952,6 +960,84 @@ class FunctionCallingModel(nn.Module):
             tool_id = self.token_id_to_tool_id[token_id]
             return self.tool_id_to_name[tool_id]
         return None
+
+    def get_fsdp_trainable_modules(self):
+        """Return small helper modules that should stay replicated under FSDP."""
+        return [self.tool_token_module]
+
+    def build_trainable_state_payload(self):
+        """Build a compact checkpoint payload for token-memory state and optional LoRA adapters."""
+        payload = {
+            "tool_names": self.tool_names,
+            "num_tools": self.num_tools,
+            "decouple_embeddings": self.decouple_embeddings,
+            "tool_name_to_id": self.tool_name_to_id,
+            "reserved_token_ids": self.reserved_token_ids,
+            "tool_reserved_token_ids": self.tool_reserved_token_ids,
+            "trainable_reserved_token_ids": self.trainable_reserved_token_ids,
+            "use_eoc": self.use_eoc,
+            "eoc_token_id": self.eoc_token_id,
+            "use_logit_bias": self.use_logit_bias,
+            "logit_bias_network": self.logit_bias_network,
+            "logit_bias_scale": self.logit_bias_scale,
+            "lora_config": self.lora_config,
+        }
+
+        if self.decouple_embeddings:
+            payload["input_embeddings"] = self.trainable_tool_input_embeddings.detach().cpu().clone()
+            payload["output_embeddings"] = self.trainable_tool_output_embeddings.detach().cpu().clone()
+        else:
+            payload["embeddings"] = self.trainable_tool_embeddings.detach().cpu().clone()
+
+        if self.logit_bias_head is not None:
+            payload["logit_bias_head"] = {
+                key: value.detach().cpu().clone()
+                for key, value in self.logit_bias_head.state_dict().items()
+            }
+
+        if self.lora_config:
+            payload["lora_state_dict"] = {
+                key: value.detach().cpu().clone()
+                for key, value in get_peft_model_state_dict(self.model).items()
+            }
+
+        return payload
+
+    def save_trainable_state(self, filepath):
+        """Save token-memory state and optional LoRA adapter weights."""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        torch.save(self.build_trainable_state_payload(), filepath)
+        if is_rank_zero():
+            print(f"Saved trainable state to {filepath}")
+
+    def load_trainable_state(self, filepath):
+        """Load token-memory state and optional LoRA adapter weights."""
+        payload = torch.load(filepath, map_location="cpu")
+
+        if payload["tool_names"] != self.tool_names:
+            raise ValueError("Tool names do not match the saved trainable state")
+        if payload["decouple_embeddings"] != self.decouple_embeddings:
+            raise ValueError("Embedding coupling mode does not match the saved trainable state")
+
+        if self.decouple_embeddings:
+            self.trainable_tool_input_embeddings.data.copy_(
+                payload["input_embeddings"].to(self.trainable_tool_input_embeddings.device)
+            )
+            self.trainable_tool_output_embeddings.data.copy_(
+                payload["output_embeddings"].to(self.trainable_tool_output_embeddings.device)
+            )
+        else:
+            self.trainable_tool_embeddings.data.copy_(
+                payload["embeddings"].to(self.trainable_tool_embeddings.device)
+            )
+
+        saved_logit_bias_head = payload.get("logit_bias_head")
+        if self.use_logit_bias and self.logit_bias_head is not None and saved_logit_bias_head is not None:
+            self.logit_bias_head.load_state_dict(saved_logit_bias_head)
+
+        saved_lora_state = payload.get("lora_state_dict")
+        if self.lora_config and saved_lora_state is not None:
+            set_peft_model_state_dict(self.model, saved_lora_state)
     
     def get_trainable_parameters(self, separate_lora=False):
         """Get trainable parameters for optimizer initialization

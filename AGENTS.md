@@ -20,18 +20,19 @@ Unless the user explicitly says otherwise, treat the current working scope as:
 
 - prioritize `compositional/` work, scripts, experiments, and code changes by default
 - start from `compositional/` entrypoints and datasets unless the task is clearly about another track
-- for `compositional/`, treat the maintained method surface as the `use_eoc`, `use_js_trunc`, and `use_logit_bias` family
-- frame tool use around explicit `eoc` boundary decisions, optional JS-based tool-only truncation, and optional detached logit-bias reweighting over tool tokens
-- prefer experiments, analyses, and docs that stay inside the maintained `eoc/js_trunc/logit_bias` path unless the user explicitly asks for archived method families
+- for `compositional/`, treat the maintained method surface as the `use_eoc` and `use_logit_bias` family
+- treat JS-related methods, analyses, and utilities in `compositional/` as archived for now and outside the default future-support scope unless the user explicitly asks for them
+- frame tool use around explicit `eoc` boundary decisions and optional detached logit-bias reweighting over tool tokens
+- prefer experiments, analyses, and docs that stay inside the maintained `eoc/logit_bias` path unless the user explicitly asks for archived method families
 - keep `atomic/` workflows and documentation available; they still apply when the user explicitly asks for `atomic/` work
 - the main metrics of interest are `routing acc` (`Task Prediction Accuracy`) and `Rouge-L`
 
 More specifically, when working on `compositional/` by default:
 
-- favor the maintained boundary-time formulation where `eoc` defines the decision sites, `js_trunc` decides tool-only truncation at those sites, and `logit_bias` softly reweights tool-token logits at those same sites
+- favor the maintained boundary-time formulation where `eoc` defines the decision sites and `logit_bias` softly reweights tool-token logits at those same sites
 - when referring to the `baseline` in `compositional/`, interpret it as the TokMem setting without the adaptation stage; do not treat `baseline` as a non-TokMem method unless the user explicitly says so
-- treat gate, `eoc loss`, `tool loss`, and `toolmix` as archived method families that may appear in older runs or git history
-- when adding experiments, analyses, or documentation, make the maintained `eoc/js_trunc/logit_bias` assumptions explicit
+- treat JS-related methods, gate, `eoc loss`, `tool loss`, and `toolmix` as archived method families that may appear in older runs or git history
+- when adding experiments, analyses, or documentation, make the maintained `eoc/logit_bias` assumptions explicit
 
 ## Result Analysis Workflow
 

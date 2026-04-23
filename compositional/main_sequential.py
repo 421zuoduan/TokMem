@@ -10,15 +10,19 @@ import random
 import os
 import numpy as np
 import torch
+from accelerate.utils import disable_fsdp_ram_efficient_loading, enable_fsdp_ram_efficient_loading
 from transformers import AutoTokenizer
 import json
 import logging
 
+from fsdp_utils import build_accelerator, configure_fsdp_ignored_modules
 from model import FunctionCallingModel, print_model_info
 from dataset import create_native_dataloader, discover_available_tools
 from training import (
+    create_native_optimizer,
     demo_native_function_calling,
     eval_native_function_calling,
+    save_native_checkpoint,
     save_training_plot_images,
     train_native_function_calling_model,
 )
@@ -278,6 +282,19 @@ def build_parser():
                         help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         help="Model dtype")
+    parser.add_argument("--use_fsdp", action="store_true",
+                        help="Wrap the backbone with Accelerate FSDP for multi-GPU training")
+    parser.add_argument("--mixed_precision", type=str, default="bf16",
+                        choices=["no", "fp16", "bf16"],
+                        help="Accelerate mixed precision mode")
+    parser.add_argument("--fsdp_sharding_strategy", type=str, default="NO_SHARD",
+                        choices=["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2"],
+                        help="FSDP sharding strategy")
+    parser.add_argument("--fsdp_backward_prefetch", type=str, default="BACKWARD_PRE",
+                        choices=["BACKWARD_PRE", "BACKWARD_POST", "none"],
+                        help="FSDP backward prefetch mode")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Gradient accumulation steps")
     parser.add_argument("--max_length", type=int, default=1024,
                         help="Maximum sequence length")
     parser.add_argument("--decouple_embeddings", action="store_true",
@@ -312,6 +329,12 @@ def build_parser():
                         help="Comma-separated max function call limits per round for evaluation (overrides --test_max_function_calls)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
+    parser.add_argument("--shuffle_train", action=argparse.BooleanOptionalAction, default=True,
+                        help="Shuffle the training dataloader")
+    parser.add_argument("--num_workers", type=int, default=0,
+                        help="Number of dataloader worker processes")
+    parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=True,
+                        help="Pin dataloader host memory")
     
     parser.add_argument("--save_checkpoints", action="store_true",
                         help="Save model checkpoints after each round")
@@ -344,6 +367,8 @@ def validate_args(args, parser):
         parser.error("--max_new_tokens must be positive")
     if args.epochs is not None and args.epochs <= 0:
         parser.error("--epochs must be positive")
+    if args.gradient_accumulation_steps <= 0:
+        parser.error("--gradient_accumulation_steps must be positive")
     if args.logit_bias_loss_weight < 0:
         parser.error("--logit_bias_loss_weight must be non-negative")
 
@@ -352,6 +377,10 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     validate_args(args, parser)
+
+    accelerator = build_accelerator(args, args.model_name, use_seedable_sampler=args.shuffle_train)
+    should_log = accelerator.is_main_process
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -386,7 +415,8 @@ def main():
             if os.path.isabs(args.checkpoint_dir)
             else artifact_path(run_context, os.path.basename(args.checkpoint_dir.rstrip("/")))
         )
-    open(evaluation_log_file, "a", encoding="utf-8").close()
+    if should_log:
+        open(evaluation_log_file, "a", encoding="utf-8").close()
     if args.tensorboard:
         try:
             import matplotlib  # noqa: F401
@@ -396,20 +426,17 @@ def main():
                 "in the active environment. Run `pip install -r requirements.txt` inside the tokmem environment."
             )
 
-    log_handlers = [logging.StreamHandler(sys.stdout)]
-    log_handlers.append(logging.FileHandler(evaluation_log_file, mode='a'))
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        handlers=log_handlers
-    )
+    log_handlers = []
+    if should_log:
+        log_handlers = [logging.StreamHandler(sys.stdout), logging.FileHandler(evaluation_log_file, mode="a")]
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s", handlers=log_handlers)
     logger = logging.getLogger(__name__)
     
     # Log start time and configuration
-    logger.info(f"=== Sequential Training Started at {datetime.now()} ===")
-    logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
-    logger.info(f"Run directory: {run_context['run_dir']}")
+    if should_log:
+        logger.info(f"=== Sequential Training Started at {datetime.now()} ===")
+        logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
+        logger.info(f"Run directory: {run_context['run_dir']}")
     
     # Parse training rounds
     try:
@@ -418,9 +445,10 @@ def main():
             if len(rounds) != 1:
                 parser.error("--epochs only supports single-round no-adaptation runs")
             rounds[0]["epochs"] = args.epochs
-        print(f"Parsed {len(rounds)} training rounds:")
-        for i, round_spec in enumerate(rounds, 1):
-            print(f"  Round {i}: Tools {round_spec['tools']}, {round_spec['epochs']} epochs")
+        if should_log:
+            print(f"Parsed {len(rounds)} training rounds:")
+            for i, round_spec in enumerate(rounds, 1):
+                print(f"  Round {i}: Tools {round_spec['tools']}, {round_spec['epochs']} epochs")
     except ValueError as e:
         parser.error(str(e))
 
@@ -446,7 +474,8 @@ def main():
         if len(parsed_values) < num_rounds:
             parsed_values.extend([parsed_values[-1]] * (num_rounds - len(parsed_values)))
         elif len(parsed_values) > num_rounds:
-            print(f"Warning: {arg_label} specified {len(parsed_values)} values; using first {num_rounds}.")
+            if should_log:
+                print(f"Warning: {arg_label} specified {len(parsed_values)} values; using first {num_rounds}.")
             parsed_values = parsed_values[:num_rounds]
 
         return parsed_values
@@ -471,23 +500,27 @@ def main():
     else:
         dtype = torch.float32
     
-    print("\n=== Sequential Function Calling Training ===")
-    print(f"Model: {args.model_name}")
-    print(f"Training rounds: {len(rounds)}")
-    print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
-    print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
-    print(f"JS truncation: {'Enabled' if args.use_js_trunc else 'Disabled'}")
-    print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
-    if args.use_logit_bias:
-        print(f"Logit bias network: {args.logit_bias_network}")
-        print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
-        print(f"Logit bias scale: {args.logit_bias_scale}")
-    print(f"Max length: {args.max_length}")
-    print(f"Max new tokens: {args.max_new_tokens}")
-    print(f"Run directory: {run_context['run_dir']}")
-    if args.use_lora and args.freeze_lora_after_first:
-        print("LoRA will be frozen after first round")
-    print()
+    if should_log:
+        print("\n=== Sequential Function Calling Training ===")
+        print(f"Model: {args.model_name}")
+        print(f"Training rounds: {len(rounds)}")
+        print(f"World size: {world_size}")
+        print(f"Use FSDP: {args.use_fsdp}")
+        print(f"Mixed precision: {args.mixed_precision}")
+        print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
+        print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
+        print(f"JS truncation: {'Enabled' if args.use_js_trunc else 'Disabled'}")
+        print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
+        if args.use_logit_bias:
+            print(f"Logit bias network: {args.logit_bias_network}")
+            print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
+            print(f"Logit bias scale: {args.logit_bias_scale}")
+        print(f"Max length: {args.max_length}")
+        print(f"Max new tokens: {args.max_new_tokens}")
+        print(f"Run directory: {run_context['run_dir']}")
+        if args.use_lora and args.freeze_lora_after_first:
+            print("LoRA will be frozen after first round")
+        print()
     
     # Create tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -535,35 +568,39 @@ def main():
         parser.error("No tools discovered from the round datasets. Check --data_dir and the generated split files.")
 
     total_tools = len(all_tool_names)
-    print(f"Total tools to be learned: {total_tools}")
+    if should_log:
+        print(f"Total tools to be learned: {total_tools}")
 
-    write_json(
-        artifact_path(run_context, "run_config.json"),
-        build_run_config(
-            vars(args),
-            run_context,
-            extra={
-                "experiment_type": "tokmem_sequential",
-                "rounds": rounds,
-                "total_tools": total_tools,
-                "discovered_tool_count": len(all_tool_names),
-                "data_dir": os.path.abspath(args.data_dir),
-                "artifacts": {
-                    "evaluation_log": evaluation_log_file,
-                    "checkpoint_dir": checkpoint_dir,
-                    "loss_plot": loss_plot_path,
-                    "lr_plot": lr_plot_path,
+    if should_log:
+        write_json(
+            artifact_path(run_context, "run_config.json"),
+            build_run_config(
+                vars(args),
+                run_context,
+                extra={
+                    "experiment_type": "tokmem_sequential",
+                    "rounds": rounds,
+                    "total_tools": total_tools,
+                    "discovered_tool_count": len(all_tool_names),
+                    "world_size": world_size,
+                    "data_dir": os.path.abspath(args.data_dir),
+                    "artifacts": {
+                        "evaluation_log": evaluation_log_file,
+                        "checkpoint_dir": checkpoint_dir,
+                        "loss_plot": loss_plot_path,
+                        "lr_plot": lr_plot_path,
+                    },
                 },
-            },
-        ),
-    )
+            ),
+        )
     
     # Store results for all rounds
     all_results = []
     # Store test dataloaders for cumulative evaluation
     all_test_dataloaders = []
-    plot_history = {"loss_steps": [], "lr_steps": [], "round_boundaries": []} if args.tensorboard else None
+    plot_history = {"loss_steps": [], "lr_steps": [], "round_boundaries": []} if (args.tensorboard and should_log) else None
     plot_step_offset = 0
+    model_prepared = False
     
     # Training loop for each round
     for round_idx, round_spec in enumerate(rounds):
@@ -571,9 +608,10 @@ def main():
         tools_range = round_spec['tools']
         epochs = round_spec['epochs']
         
-        print("\n" + "="*60)
-        print(f"ROUND {round_num}/{len(rounds)}: Training on tools {tools_range}")
-        print("="*60 + "\n")
+        if should_log:
+            print("\n" + "="*60)
+            print(f"ROUND {round_num}/{len(rounds)}: Training on tools {tools_range}")
+            print("="*60 + "\n")
         
         # Construct data file names based on tool range
         train_data_file = os.path.join(
@@ -587,30 +625,40 @@ def main():
         
         # Check if data files exist
         if not os.path.exists(train_data_file):
-            print(f"Warning: Training data file not found: {train_data_file}")
-            print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
+            if should_log:
+                print(f"Warning: Training data file not found: {train_data_file}")
+                print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
             continue
         if not os.path.exists(test_data_file):
-            print(f"Warning: Test data file not found: {test_data_file}")
-            print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
+            if should_log:
+                print(f"Warning: Test data file not found: {test_data_file}")
+                print(f"Please generate it using: python xlam_datasets.py --top_k {tools_range}")
             continue
         
         # Discover tools for this round
-        print(f"Discovering tools from round {round_num} dataset...")
+        if should_log:
+            print(f"Discovering tools from round {round_num} dataset...")
         round_tools = discover_available_tools(train_data_file, test_data_file)
-        print(f"Found {len(round_tools)} tools for round {round_num}: {round_tools[:5]}..." if len(round_tools) > 5 else f"Found {len(round_tools)} tools: {round_tools}")
+        if should_log:
+            print(
+                f"Found {len(round_tools)} tools for round {round_num}: {round_tools[:5]}..."
+                if len(round_tools) > 5
+                else f"Found {len(round_tools)} tools: {round_tools}"
+            )
         
         # Create or update model
         if model is None:
             # First round - create new model with ALL tool slots and actual tool names
-            print(f"Initializing model with {total_tools} total tool slots...")
+            if should_log:
+                print(f"Initializing model with {total_tools} total tool slots...")
+            model_device = "cpu" if args.use_fsdp else (str(accelerator.device) if args.device == "cuda" else args.device)
             model_kwargs = filter_supported_kwargs(
                 FunctionCallingModel,
                 model_name=args.model_name,
                 num_tools=total_tools,  # Initialize with ALL tools
                 tool_names=all_tool_names,  # Use actual discovered tool names
                 tokenizer=tokenizer,
-                device=args.device,
+                device=model_device,
                 dtype=dtype,
                 decouple_embeddings=args.decouple_embeddings,
                 lora_config=lora_config,
@@ -620,26 +668,37 @@ def main():
                 logit_bias_network=args.logit_bias_network,
                 logit_bias_scale=args.logit_bias_scale,
             )
-            model = FunctionCallingModel(**model_kwargs)
-            print_model_info(model, f"Model with {total_tools} tool slots")
-            print(f"Model initialized with all tool names: {model.tool_names[:5]}...{model.tool_names[-5:]}")
+            if args.use_fsdp:
+                enable_fsdp_ram_efficient_loading()
+            try:
+                model = FunctionCallingModel(**model_kwargs)
+            finally:
+                if args.use_fsdp:
+                    disable_fsdp_ram_efficient_loading()
+            configure_fsdp_ignored_modules(model, accelerator)
+            if should_log:
+                print_model_info(model, f"Model with {total_tools} tool slots")
+                print(f"Model initialized with all tool names: {model.tool_names[:5]}...{model.tool_names[-5:]}")
             
             # Apply orthogonal initialization to ALL tool embeddings once at the beginning
             apply_orthogonal_init_all_tools(model, total_tools)
         else:
             # Subsequent rounds - just check LoRA freezing
             if args.use_lora and args.freeze_lora_after_first and round_num == 2:
-                print("\nFreezing LoRA parameters after first round...")
-                freeze_lora_parameters(model)
+                if should_log:
+                    print("\nFreezing LoRA parameters after first round...")
+                freeze_lora_parameters(accelerator.unwrap_model(model) if model_prepared else model)
         
-        print(f"Round {round_num}: Training will focus on tools {tools_range}")
-        print(f"Dataset will provide labels only for: {round_tools[:3]}...{round_tools[-3:]}")
+        if should_log:
+            print(f"Round {round_num}: Training will focus on tools {tools_range}")
+            print(f"Dataset will provide labels only for: {round_tools[:3]}...{round_tools[-3:]}")
         
         # Create datasets for this round
-        print(f"Creating round {round_num} dataset...")
+        if should_log:
+            print(f"Creating round {round_num} dataset...")
         dataloader_kwargs = filter_supported_kwargs(
             create_native_dataloader,
-            model=model,
+            model=accelerator.unwrap_model(model) if model_prepared else model,
             train_data_path=train_data_file,
             test_data_path=test_data_file,
             tokenizer=tokenizer,
@@ -650,8 +709,20 @@ def main():
             validation_split=0,
             random_seed=args.seed,  # Use consistent seed across all rounds
             use_eoc=args.use_eoc,
+            shuffle_train=args.shuffle_train,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
         )
         train_dataloader, _, test_dataloader, _, test_examples = create_native_dataloader(**dataloader_kwargs)
+        if not model_prepared:
+            model, train_dataloader, test_dataloader = accelerator.prepare(
+                model,
+                train_dataloader,
+                test_dataloader,
+            )
+            model_prepared = True
+        else:
+            train_dataloader, test_dataloader = accelerator.prepare(train_dataloader, test_dataloader)
         
         # Store test dataloader for cumulative evaluation
         all_test_dataloaders.append((tools_range, test_dataloader))
@@ -660,15 +731,17 @@ def main():
         train_lora = args.use_lora and (round_num == 1 or not args.freeze_lora_after_first)
         
         # Train this round
-        print(f"\nTraining round {round_num} for {epochs} epochs...")
-        if train_lora:
-            print("Training: Embeddings + LoRA")
-        else:
-            print("Training: Embeddings only (LoRA frozen)" if args.use_lora else "Training: Embeddings only")
+        if should_log:
+            print(f"\nTraining round {round_num} for {epochs} epochs...")
+            if train_lora:
+                print("Training: Embeddings + LoRA")
+            else:
+                print("Training: Embeddings only (LoRA frozen)" if args.use_lora else "Training: Embeddings only")
         
         # Determine active tool IDs (freeze others via grad mask in training)
         try:
-            active_tool_ids = [model.tool_name_to_id[name] for name in round_tools if name in model.tool_name_to_id]
+            base_model = accelerator.unwrap_model(model)
+            active_tool_ids = [base_model.tool_name_to_id[name] for name in round_tools if name in base_model.tool_name_to_id]
         except Exception:
             active_tool_ids = None
 
@@ -679,7 +752,8 @@ def main():
             num_epochs=epochs,
             lr=args.lr,
             lora_lr=args.lora_lr if train_lora else None,
-            device=args.device,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            device=str(accelerator.device),
             active_tool_ids=active_tool_ids,
             renorm_active_rows=(args.renorm_active_tools and round_num > 2),
             use_eoc=args.use_eoc,
@@ -689,6 +763,7 @@ def main():
             plot_history=plot_history,
             plot_step_offset=plot_step_offset,
             plot_round=round_num,
+            accelerator=accelerator,
         )
         round_results = train_native_function_calling_model(**training_kwargs)
         plot_step_offset = round_results.get("plot_next_step", plot_step_offset)
@@ -701,8 +776,9 @@ def main():
                 }
             )
         
-        print(f"Round {round_num} training completed! Average loss: {round_results['avg_total_loss']:.4f}")
-        logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_total_loss']:.4f}")
+        if should_log:
+            print(f"Round {round_num} training completed! Average loss: {round_results['avg_total_loss']:.4f}")
+            logger.info(f"\n[ROUND {round_num} RESULTS] Tools: {tools_range}, Epochs: {epochs}, Loss: {round_results['avg_total_loss']:.4f}")
         
         # Store results
         all_results.append({
@@ -715,152 +791,185 @@ def main():
         
         # Evaluate this round
         if args.eval_after_each_round:
-            print(f"\nEvaluating round {round_num} model...")
+            if should_log:
+                print(f"\nEvaluating round {round_num} model...")
             
             # Capture the formatted evaluation output
             import io
             import sys
             from contextlib import redirect_stdout
             
-            # Capture stdout to get the formatted evaluation results
-            captured_output = io.StringIO()
-            with redirect_stdout(captured_output):
-                eval_results = eval_native_function_calling(
+            if should_log:
+                captured_output = io.StringIO()
+                with redirect_stdout(captured_output):
+                    eval_results = eval_native_function_calling(
+                        **filter_supported_kwargs(
+                            eval_native_function_calling,
+                            model=model,
+                            tokenizer=tokenizer,
+                            test_dataloader=test_dataloader,
+                            device=str(accelerator.device),
+                            max_new_tokens=args.max_new_tokens,
+                            use_ground_truth_tools=args.use_ground_truth_tools,
+                            use_eoc=args.use_eoc,
+                            use_js_trunc=args.use_js_trunc,
+                            use_logit_bias=args.use_logit_bias,
+                            accelerator=accelerator,
+                        )
+                    )
+                formatted_eval_output = captured_output.getvalue()
+                print(formatted_eval_output)
+                all_results[-1]['eval_results'] = eval_results
+                with open(evaluation_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"ROUND {round_num} EVALUATION - Tools: {tools_range}, Epochs: {epochs}\n")
+                    f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                    f.write(f"{'='*60}\n")
+                    f.write(formatted_eval_output)
+                    f.write(f"\n{'='*60}\n\n")
+            else:
+                eval_native_function_calling(
                     **filter_supported_kwargs(
                         eval_native_function_calling,
                         model=model,
                         tokenizer=tokenizer,
                         test_dataloader=test_dataloader,
-                        device=args.device,
+                        device=str(accelerator.device),
                         max_new_tokens=args.max_new_tokens,
                         use_ground_truth_tools=args.use_ground_truth_tools,
                         use_eoc=args.use_eoc,
                         use_js_trunc=args.use_js_trunc,
                         use_logit_bias=args.use_logit_bias,
+                        accelerator=accelerator,
                     )
                 )
             
-            # Get the captured formatted output
-            formatted_eval_output = captured_output.getvalue()
-            
-            # Print the formatted output to console as well
-            print(formatted_eval_output)
-            
-            all_results[-1]['eval_results'] = eval_results
-            
-            # Log the formatted evaluation results to file
-            with open(evaluation_log_file, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*60}\n")
-                f.write(f"ROUND {round_num} EVALUATION - Tools: {tools_range}, Epochs: {epochs}\n")
-                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-                f.write(f"{'='*60}\n")
-                f.write(formatted_eval_output)
-                f.write(f"\n{'='*60}\n\n")
-            
             # Evaluate on all previous test sets if requested
             if args.eval_all_previous and round_num > 1:
-                print(f"\nEvaluating on all previous test sets...")
+                if should_log:
+                    print(f"\nEvaluating on all previous test sets...")
                 cumulative_results = {}
                 # Evaluate on all previous rounds (current round is at the end, so [:-1] gives us all previous)
                 for prev_tools, prev_test_dataloader in all_test_dataloaders[:-1]:
-                    print(f"\nEvaluating on tools {prev_tools}...")
-                    
-                    # Capture the formatted evaluation output
-                    captured_output = io.StringIO()
-                    with redirect_stdout(captured_output):
-                        prev_eval_results = eval_native_function_calling(
+                    if should_log:
+                        print(f"\nEvaluating on tools {prev_tools}...")
+                        captured_output = io.StringIO()
+                        with redirect_stdout(captured_output):
+                            prev_eval_results = eval_native_function_calling(
+                                **filter_supported_kwargs(
+                                    eval_native_function_calling,
+                                    model=model,
+                                    tokenizer=tokenizer,
+                                    test_dataloader=prev_test_dataloader,
+                                    device=str(accelerator.device),
+                                    max_new_tokens=args.max_new_tokens,
+                                    use_ground_truth_tools=args.use_ground_truth_tools,
+                                    use_eoc=args.use_eoc,
+                                    use_js_trunc=args.use_js_trunc,
+                                    use_logit_bias=args.use_logit_bias,
+                                    accelerator=accelerator,
+                                )
+                            )
+                        prev_formatted_eval_output = captured_output.getvalue()
+                        print(prev_formatted_eval_output)
+                        cumulative_results[f"tools_{prev_tools}"] = prev_eval_results
+                        with open(evaluation_log_file, 'a', encoding='utf-8') as f:
+                            f.write(f"\n{'='*60}\n")
+                            f.write(f"ROUND {round_num} CUMULATIVE EVALUATION - Previous Tools: {prev_tools}\n")
+                            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                            f.write(f"{'='*60}\n")
+                            f.write(prev_formatted_eval_output)
+                            f.write(f"\n{'='*60}\n\n")
+                    else:
+                        eval_native_function_calling(
                             **filter_supported_kwargs(
                                 eval_native_function_calling,
                                 model=model,
                                 tokenizer=tokenizer,
                                 test_dataloader=prev_test_dataloader,
-                                device=args.device,
+                                device=str(accelerator.device),
                                 max_new_tokens=args.max_new_tokens,
                                 use_ground_truth_tools=args.use_ground_truth_tools,
                                 use_eoc=args.use_eoc,
                                 use_js_trunc=args.use_js_trunc,
                                 use_logit_bias=args.use_logit_bias,
+                                accelerator=accelerator,
                             )
                         )
-                    
-                    # Get the captured formatted output
-                    prev_formatted_eval_output = captured_output.getvalue()
-                    
-                    # Print the formatted output to console as well
-                    print(prev_formatted_eval_output)
-                    
-                    cumulative_results[f"tools_{prev_tools}"] = prev_eval_results
-                    
-                    # Also log cumulative results to eval file
-                    with open(evaluation_log_file, 'a', encoding='utf-8') as f:
-                        f.write(f"\n{'='*60}\n")
-                        f.write(f"ROUND {round_num} CUMULATIVE EVALUATION - Previous Tools: {prev_tools}\n")
-                        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-                        f.write(f"{'='*60}\n")
-                        f.write(prev_formatted_eval_output)
-                        f.write(f"\n{'='*60}\n\n")
-                        
-                all_results[-1]['cumulative_eval_results'] = cumulative_results
+                if should_log:
+                    all_results[-1]['cumulative_eval_results'] = cumulative_results
         
         # Save checkpoint if requested
         if args.save_checkpoints:
             checkpoint_path = os.path.join(checkpoint_dir, f"round_{round_num}_tools_{tools_range.replace('-', '_')}.pt")
-            print(f"Saving checkpoint to {checkpoint_path}")
-            torch.save({
-                'round': round_num,
-                'tools': round_tools,
-                'model_state_dict': model.state_dict(),
-                'results': round_results,
-            }, checkpoint_path)
-            all_results[-1]["checkpoint_path"] = checkpoint_path
+            if should_log:
+                print(f"Saving checkpoint to {checkpoint_path}")
+            save_native_checkpoint(
+                model,
+                checkpoint_path,
+                payload={
+                    'round': round_num,
+                    'tools': round_tools,
+                    'results': round_results,
+                },
+                accelerator=accelerator,
+            )
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+            if should_log:
+                all_results[-1]["checkpoint_path"] = checkpoint_path
     
     # Final summary
-    print("\n" + "="*60)
-    print("TRAINING SUMMARY")
-    print("="*60)
-    for result in all_results:
-        print(f"Round {result['round']} (tools {result['tools']}): "
-              f"{result['epochs']} epochs, avg loss: {result['avg_loss']:.4f}")
-        if 'eval_results' in result and result['eval_results']:
-            print(f"  Evaluation accuracy: {result['eval_results'].get('exact_accuracy', 'N/A'):.3f}")
+    if should_log:
+        print("\n" + "="*60)
+        print("TRAINING SUMMARY")
+        print("="*60)
+        for result in all_results:
+            print(f"Round {result['round']} (tools {result['tools']}): "
+                  f"{result['epochs']} epochs, avg loss: {result['avg_loss']:.4f}")
+            if 'eval_results' in result and result['eval_results']:
+                print(f"  Evaluation accuracy: {result['eval_results'].get('exact_accuracy', 'N/A'):.3f}")
     
     # Run demo on last round if requested
     if args.demo is not None and test_examples is not None:
-        print("\n" + "="*60)
-        print(f"DEMO: Testing on final round examples")
-        print("="*60 + "\n")
+        if should_log:
+            print("\n" + "="*60)
+            print(f"DEMO: Testing on final round examples")
+            print("="*60 + "\n")
         demo_native_function_calling(
             **filter_supported_kwargs(
                 demo_native_function_calling,
                 model=model,
                 tokenizer=tokenizer,
                 test_examples=test_examples[:args.demo],
-                device=args.device,
+                device=str(accelerator.device),
                 max_new_tokens=args.max_new_tokens,
                 use_ground_truth_tools=args.use_ground_truth_tools,
                 use_eoc=args.use_eoc,
                 use_js_trunc=args.use_js_trunc,
                 use_logit_bias=args.use_logit_bias,
+                accelerator=accelerator,
             )
         )
     
-    print("\n" + "="*60)
-    print("Sequential training completed!")
-    print(f"Trained {len(rounds)} rounds with different tool sets")
-    if args.use_lora and args.freeze_lora_after_first:
-        print("LoRA was frozen after first round")
-    if args.tensorboard:
-        saved_plot_paths = save_training_plot_images(
-            plot_history,
-            loss_plot_path,
-            lr_plot_path,
-            run_context["run_name"],
-        )
-        if saved_plot_paths:
-            print("Saved training plots:")
-            for saved_plot_path in saved_plot_paths:
-                print(f"  {saved_plot_path}")
-    print("="*60)
+    if should_log:
+        print("\n" + "="*60)
+        print("Sequential training completed!")
+        print(f"Trained {len(rounds)} rounds with different tool sets")
+        if args.use_lora and args.freeze_lora_after_first:
+            print("LoRA was frozen after first round")
+        if args.tensorboard:
+            saved_plot_paths = save_training_plot_images(
+                plot_history,
+                loss_plot_path,
+                lr_plot_path,
+                run_context["run_name"],
+            )
+            if saved_plot_paths:
+                print("Saved training plots:")
+                for saved_plot_path in saved_plot_paths:
+                    print(f"  {saved_plot_path}")
+        print("="*60)
     
     evaluation_results_payload = {
         "experiment_type": "tokmem_sequential",
@@ -878,21 +987,23 @@ def main():
             if result.get("eval_results") is not None or result.get("cumulative_eval_results") is not None
         ],
     }
-    write_json(
-        artifact_path(run_context, "evaluation_results.json"),
-        strip_call_count_breakdown(evaluation_results_payload),
-    )
-    write_json(
-        artifact_path(run_context, "training_summary.json"),
-        build_training_summary_payload(
-            run_name=run_context["run_name"],
-            all_results=all_results,
-            experiment_type="tokmem_sequential",
-        ),
-    )
+    if should_log:
+        write_json(
+            artifact_path(run_context, "evaluation_results.json"),
+            strip_call_count_breakdown(evaluation_results_payload),
+        )
+        write_json(
+            artifact_path(run_context, "training_summary.json"),
+            build_training_summary_payload(
+                run_name=run_context["run_name"],
+                all_results=all_results,
+                experiment_type="tokmem_sequential",
+            ),
+        )
     
     # Log completion
-    logger.info(f"=== Sequential Training Completed at {datetime.now()} ===")
+    if should_log:
+        logger.info(f"=== Sequential Training Completed at {datetime.now()} ===")
 
 
 if __name__ == "__main__":

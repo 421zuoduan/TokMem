@@ -214,7 +214,8 @@ def collate_fn(batch, tokenizer):
 
 def create_native_dataloader(model, train_data_path=None, test_data_path=None, tokenizer=None, 
                            batch_size=4, max_length=1024, eval_batch_size=32, curriculum_learning=False,
-                           validation_split=0.05, random_seed=42, use_eoc=False):
+                           validation_split=0.05, random_seed=42, use_eoc=False, shuffle_train=True,
+                           num_workers=0, pin_memory=True):
     """Create separate DataLoaders for training, validation and testing using pre-split data files
     
     Args:
@@ -319,7 +320,9 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=False if curriculum_learning else True,  # Don't shuffle if using curriculum learning
+            shuffle=False if curriculum_learning else shuffle_train,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )
         
@@ -329,6 +332,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
                 val_dataset,
                 batch_size=eval_batch_size,  # Use eval batch size for validation
                 shuffle=False,  # Don't shuffle validation data
+                num_workers=num_workers,
+                pin_memory=pin_memory,
                 collate_fn=lambda batch: collate_fn(batch, tokenizer)
             )
         
@@ -356,6 +361,8 @@ def create_native_dataloader(model, train_data_path=None, test_data_path=None, t
             test_dataset,
             batch_size=eval_batch_size,  # Use specified eval batch size
             shuffle=False,  # Don't shuffle test data for consistent evaluation
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             collate_fn=lambda batch: collate_fn(batch, tokenizer)
         )
         

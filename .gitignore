@@ -42,6 +42,7 @@ datasets/
 models/
 results/
 logs/
+tmp/
 atomic/saved_models
 atomic/cached_splits
 atomic/runs

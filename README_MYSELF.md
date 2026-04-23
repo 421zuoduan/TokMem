@@ -73,11 +73,12 @@
 脚注：
  
 - `use_eoc` 是添加 eoc token, `use_eoc_loss` 是添加 eoc loss, `use_gate` 是添加 gate 方法（这批均值实验使用 linear gate）, `use_task_loss` 是添加 task loss，`use_toolmix` 是在 loss 上使用 toolmix；其中 task loss 是 tool token 的位置拿词表中的所有 tool token 重新做 softmax，与真实结果做的 ce loss
-- `Tool F1` 和 `Args F1` 对标论文给的评价指标，Tool 表示 tool token 的选择，Args 表示 args token 的选择。args token 指的是选定 tool token 后，tool token 后面继续生成的 tokens，用于表示执行工具完成任务所需的具体参数。
+- `Tool F1` 对应 `avg_tool_f1_score`，衡量工具集合预测的 F1。
+- `Arguments F1` 对应 `avg_f1_score` / `Average F1 Score (Function Calls)`，当前衡量整条 function call 的 F1；它和单独统计 `(tool_name, normalized_args)` 命中率的 `arguments_accuracy` 不是同一个指标。
 - `Tool Acc` 是按每个样本 x 每个候选工具计算的 binary accuracy，`Tool Exact Match Acc` 是整组工具完全预测一致的样本占比。
 - 2026-04-19 之前的 archived run 没有保存新的工具级 `Tool Acc`。读取这批旧结果时，`Tool Exact Match Acc` 可以从旧字段恢复，新的 `Tool Acc` 需要按新定义重新评测后才会出现。
 - `Exact Match Acc` 更接近端到端函数调用是否“完全正确”，通常比单独的 `Tool Acc` 更适合作为综合效果判断。
-- `Parse Error Rate` 是越低越好；它高时表示结构化输出本身已经损坏，即使 `Tool F1` 或 `Arguments F1` 不算太低，最终 `Exact Match Acc` 也可能上不去。
+- `Parse Error Rate` 是平均每个样本的输出 parse error 次数，越低越好；它高时往往表示结构化输出本身已经损坏，所以 `Exact Match Acc` 会被直接拖低。
 - 当前 `gate` 在训练时主要作为额外监督项存在，并不会直接改变 teacher-forcing 下的 token 选择；但在推理时会影响 `eoc` 之后；默认使用 linear 结构
 
 
@@ -166,10 +167,23 @@
 | `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.988 | 0.882 | 0.722 | 0.470 | 0.221 | 1.552 |
 <!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:END -->
 
-- `Tool F1` 和 `Args F1` 对标论文给的评价指标，Tool 表示 tool token 的选择，Args 表示 args token 的选择。args token 指的是选定 tool token 后，tool token 后面继续生成的 tokens，用于表示执行工具完成任务所需的具体参数。
-- `Tool Exact Match Acc` 是所有工具都预测正确的样本比例，`Exact Match Acc` 是所有工具和参数都预测正确的样本比例
-- `Tool Acc` 是所有参数
-- `Parse Error Rate` 表示解析参数时有错误的工具比例，越低越好；它高时表示结构化输出本身已经损坏，即使 `Tool F1` 或 `Arguments F1` 不算太低，最终 `Exact Match Acc` 也可能上不去。
+- `Tool F1` 对应 `avg_tool_f1_score`，衡量工具集合预测的 F1。
+- `Arguments F1` 对应 `avg_f1_score` / `Average F1 Score (Function Calls)`，当前衡量整条 function call 的 F1；它和 `arguments_accuracy` 不是同一个指标。
+- `Tool Acc` 是按每个样本 x 每个候选工具计算的 binary accuracy，`Tool Exact Match Acc` 是整组工具完全预测一致的样本占比。
+- `Exact Match Acc` 是所有工具和参数都预测正确的样本比例。
+- `Parse Error Rate` 是平均每个样本的输出 parse error 次数，越低越好；它高时往往表示结构化输出本身已经损坏，所以 `Exact Match Acc` 会被直接拖低。
+- `tmp/compositional_table3_1b.md` 当前和 `Compositional maintained methods（5 次重复均值）` 使用同一组 `readme_myself_allmethods_llama_1b_20260418_185507` 结果；其中 `Tool Sel. Avg.` 对应这里的 `Tool F1`，`Arg. Avg.` 对应这里的 `Arguments F1`。
 
+<!-- README_MYSELF_3METHODS_LLAMA_3B_TABLE:BEGIN -->
+## Compositional baseline / eoc / logit bias（Llama-3.2-3B-Instruct / top51-100 / max 4 calls，5 次重复均值）
 
-是按每个样本 x 每个候选工具计算的 binary accuracy，
+- run: `readme_myself_3methods_llama_3b_20260422_212142`
+- 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。
+- 默认 `batch_size=2`、`logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。
+
+| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | baseline | 3 | 0.005 | × | × | × | 0.966 | 0.657 | 0.373 | 0.260 | 0.150 | 35.826 |
+| `2` | eoc-only | 3 | 0.005 | √ | × | × | 0.973 | 0.732 | 0.483 | 0.332 | 0.208 | 14.751 |
+| `3` | eoc+logit_bias | 3 | 0.005 | √ | × | √ | 0.978 | 0.786 | 0.529 | 0.430 | 0.257 | 12.299 |
+<!-- README_MYSELF_3METHODS_LLAMA_3B_TABLE:END -->

@@ -13,7 +13,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2
 
 cd "$ROOT_DIR/compositional"
 
@@ -39,10 +39,17 @@ python xlam_datasets.py \
     --test_multi_tool_ratios "0.5,0.5" \
     --output_dir "$ROOT_DIR/compositional/data"
 
-python -u lora_sequential.py \
+accelerate launch \
+    --num_processes 3 \
+    --num_machines 1 \
+    --multi_gpu \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    lora_sequential.py \
     --training_rounds "1-50:1,51-100:1" \
     --batch_size 2 \
     --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \
+    --use_fsdp \
     --lora_r 8 \
     --lora_alpha 32 \
     --lora_dropout 0.1 \

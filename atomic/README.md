@@ -82,6 +82,13 @@ bash main_tokmem_fixed_split.sh
 
 The maintained fixed-split launcher stays on the single-process Accelerate path by default. Copy its command and add an Accelerate FSDP config when you move to a distributed-aware atomic launch. In that FSDP launch shape, both validation and final evaluation batch sizes are interpreted per process. The multi-GPU baseline launchers under `scripts/atomic/qwen_0_5b/` and `scripts/atomic/llama_3b/` reuse the cached fixed split and run `main_in_domain.py` through a 3-process Accelerate FSDP launch.
 
+Standalone `700-task / Qwen2.5-0.5B / seed=42` launchers:
+
+```bash
+bash ../scripts/atomic/qwen_0_5b/baseline_qwen_0_5b_700task.sh
+bash ../scripts/atomic/qwen_0_5b/logit_bias_qwen_0_5b_700task.sh
+```
+
 ### 700-task mean comparison
 This launcher runs the `700-task / Qwen2.5-0.5B / seed=42` baseline and `logit_bias` settings three times each, then appends the mean `Task Prediction Accuracy` and `ROUGE-L` to `results/atomic_mean_results.md`:
 
@@ -90,6 +97,15 @@ bash ../scripts/atomic/qwen_0_5b/mean_baseline_logit_bias_qwen_0_5b_700task.sh
 ```
 
 Each run writes `run_config.json`, `train_results.json`, `evaluation_results.json`, `stdout.log`, `gpu_monitor.log`, and `exit_code.txt` into its own folder under `atomic/runs/`.
+
+### 700-task mean comparison on GPUs 3/4/5
+This launcher runs all six `700-task / Qwen2.5-0.5B / seed=42` jobs sequentially. Every run uses `GPU 3,4,5` for 3-card joint training with `batch_size=8`. The launcher writes its own aggregate log to `results/atomic_mean_results_3gpu_345_bs8_<timestamp>.log` and appends the mean metrics to `results/atomic_mean_results_3gpu_345_bs8.md`.
+
+Launch it with `nohup`:
+
+```bash
+nohup bash ../scripts/atomic/qwen_0_5b/mean_baseline_logit_bias_qwen_0_5b_700task_3gpu.sh > /dev/null 2>&1 &
+```
 
 ### Older local atomic path
 Archived local experiments, scripts, and docs live under `atomic/archive/current_local/`.

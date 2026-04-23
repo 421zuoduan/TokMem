@@ -37,7 +37,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=0,1,2
 export HF_HOME="$HF_CACHE_DIR"
 export HF_DATASETS_CACHE="$HF_CACHE_DIR/datasets"
 export HUGGINGFACE_HUB_CACHE="$HF_CACHE_DIR/hub"
@@ -77,13 +77,14 @@ for setting_entry in "${SETTINGS[@]}"; do
         mkdir -p "$trial_dir"
 
         cmd=(
-            python -u main_sequential.py
+            accelerate launch --num_processes 3 --num_machines 1 --multi_gpu --mixed_precision bf16 --dynamo_backend no main_sequential.py
             --training_rounds "$TRAINING_ROUNDS"
             --epochs "$EPOCHS"
             --batch_size "$BATCH_SIZE"
             --train_max_function_calls "$TRAIN_MAX_CALLS"
             --test_max_function_calls "$TEST_MAX_CALLS"
             --model_name "$MODEL_DIR"
+            --use_fsdp
             --eval_after_each_round
             --save_checkpoints
             --data_dir "$DATA_DIR"

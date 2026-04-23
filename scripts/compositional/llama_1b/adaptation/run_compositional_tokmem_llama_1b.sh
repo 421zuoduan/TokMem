@@ -36,12 +36,19 @@ python xlam_datasets.py \
     --test_multi_tool_ratios "0.5,0.5" \
     --output_dir "$ROOT_DIR/compositional/data"
 
-python -u main_sequential.py \
+accelerate launch \
+    --num_processes 3 \
+    --num_machines 1 \
+    --multi_gpu \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    main_sequential.py \
     --training_rounds "1-50:1,51-100:3" \
     --batch_size 2 \
     --train_max_function_calls_per_round "4,4" \
     --test_max_function_calls_per_round "4,4" \
     --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \
+    --use_fsdp \
     --use_lora \
     --lora_r 8 \
     --lora_alpha 32 \

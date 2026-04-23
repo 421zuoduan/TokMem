@@ -1,12 +1,20 @@
 import inspect
+import math
 import os
 import tempfile
 from pathlib import Path
 from collections import defaultdict
+from contextlib import nullcontext
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
+
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+except ImportError:
+    FSDP = None
 
 
 LOSS_METRIC_ORDER = (
@@ -40,6 +48,115 @@ def _metric_value_to_float(value):
     if isinstance(value, torch.Tensor):
         return float(value.detach().item())
     return float(value)
+
+
+def _unwrap_model(model, accelerator=None):
+    return accelerator.unwrap_model(model) if accelerator is not None else model
+
+
+def _maybe_move_batch(batch, device, accelerator=None):
+    if accelerator is not None:
+        return batch["input_ids"], batch["attention_mask"], batch.get("labels")
+    labels = batch.get("labels")
+    if labels is None:
+        return batch["input_ids"].to(device), batch["attention_mask"].to(device), None
+    return (
+        batch["input_ids"].to(device),
+        batch["attention_mask"].to(device),
+        labels.to(device),
+    )
+
+
+def _fsdp_generation_context(model, accelerator=None):
+    if FSDP is None:
+        return nullcontext()
+    if not isinstance(model, FSDP):
+        return nullcontext()
+    if accelerator is not None and getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return nullcontext()
+    fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None) if accelerator is not None else None
+    sharding_strategy = getattr(fsdp_plugin, "sharding_strategy", None)
+    strategy_name = getattr(sharding_strategy, "name", str(sharding_strategy))
+    if strategy_name == "NO_SHARD":
+        return nullcontext()
+    return FSDP.summon_full_params(model, recurse=True, writeback=False)
+
+
+def _is_sharded_fsdp_model(model, accelerator=None):
+    if FSDP is None:
+        return False
+    if not isinstance(model, FSDP):
+        return False
+    if accelerator is not None and getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return False
+
+    fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None) if accelerator is not None else None
+    sharding_strategy = getattr(fsdp_plugin, "sharding_strategy", None)
+    if sharding_strategy is None:
+        sharding_strategy = getattr(model, "sharding_strategy", None)
+
+    strategy_name = getattr(sharding_strategy, "name", str(sharding_strategy))
+    return strategy_name not in {None, "None", "NO_SHARD"}
+
+
+def _distributed_any(local_flag, accelerator=None, device=None):
+    if not local_flag and not (dist.is_available() and dist.is_initialized()):
+        return False
+    if not dist.is_available() or not dist.is_initialized():
+        return bool(local_flag)
+
+    if device is None:
+        device = accelerator.device if accelerator is not None else None
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    flag_tensor = torch.tensor([1 if local_flag else 0], device=device, dtype=torch.int32)
+    dist.all_reduce(flag_tensor, op=dist.ReduceOp.MAX)
+    return bool(flag_tensor.item())
+
+
+def _sync_fsdp_ignored_module_gradients(model, accelerator=None):
+    if accelerator is None:
+        return
+    if getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return
+    if not dist.is_available() or not dist.is_initialized():
+        return
+
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    if not hasattr(base_model, "get_fsdp_trainable_modules"):
+        return
+
+    world_size = dist.get_world_size()
+    if world_size <= 1:
+        return
+
+    for module in base_model.get_fsdp_trainable_modules():
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad.div_(world_size)
+
+
+def _sync_skip_flags(local_flags, accelerator=None, device=None):
+    resolved_flags = {name: bool(value) for name, value in local_flags.items()}
+    if accelerator is None or not resolved_flags:
+        return resolved_flags
+
+    if device is None:
+        device = accelerator.device
+
+    flag_names = list(resolved_flags.keys())
+    flag_tensor = torch.tensor(
+        [1.0 if resolved_flags[name] else 0.0 for name in flag_names],
+        device=device,
+    )
+    reduced_flags = accelerator.reduce(flag_tensor, reduction="sum")
+    return {
+        name: bool(reduced_flags[idx].item() > 0)
+        for idx, name in enumerate(flag_names)
+    }
 
 
 
@@ -426,21 +543,41 @@ def _forward_with_optional_hidden_states(
     attention_mask,
     output_hidden_states=False,
     final_hidden_state_only=False,
+    accelerator=None,
 ):
-    if output_hidden_states and final_hidden_state_only and hasattr(model, "forward_with_final_hidden_states"):
-        logits, final_hidden_states = model.forward_with_final_hidden_states(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    if (
+        output_hidden_states
+        and final_hidden_state_only
+        and hasattr(base_model, "forward_with_final_hidden_states")
+    ):
+        with _fsdp_generation_context(model, accelerator=accelerator):
+            logits, final_hidden_states = base_model.forward_with_final_hidden_states(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
         return logits, final_hidden_states
 
+    if hasattr(base_model, "forward_with_final_hidden_states"):
+        with _fsdp_generation_context(model, accelerator=accelerator):
+            outputs = base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_hidden_states=output_hidden_states,
+            )
+        if output_hidden_states:
+            logits, hidden_states = outputs
+            return logits, hidden_states
+        return outputs, None
+
     forward_model = getattr(model, "model", model)
-    outputs = forward_model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=output_hidden_states,
-        return_dict=True,
-    )
+    with _fsdp_generation_context(model, accelerator=accelerator):
+        outputs = forward_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
     logits = outputs.logits if hasattr(outputs, "logits") else outputs
     hidden_states = None
     if output_hidden_states and hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
@@ -462,7 +599,9 @@ def _generate_results(
     temperature=0.6,
     top_p=0.9,
     do_sample=False,
+    accelerator=None,
 ):
+    generation_model = _unwrap_model(model, accelerator=accelerator)
     candidate_methods = []
     if use_ground_truth_tools:
         candidate_methods.append("generate_with_ground_truth_tools")
@@ -485,9 +624,10 @@ def _generate_results(
         generation_kwargs["ground_truth_tools"] = ground_truth_tools
 
     for method_name in candidate_methods:
-        method = getattr(model, method_name, None)
+        method = getattr(generation_model, method_name, None)
         if callable(method):
-            return _call_method_with_supported_kwargs(method, **generation_kwargs)
+            with _fsdp_generation_context(model, accelerator=accelerator):
+                return _call_method_with_supported_kwargs(method, **generation_kwargs)
 
     raise AttributeError(
         f"Model {type(model).__name__} does not expose a compatible generation method "
@@ -521,9 +661,11 @@ def _generate_results_with_example_fallback(
     use_eoc,
     use_ground_truth_tools,
     max_new_tokens,
+    accelerator=None,
 ):
     """Generate batch results, falling back to per-example decoding on batch failures."""
     batch_size = len(raw_examples)
+    sharded_fsdp = _is_sharded_fsdp_model(model, accelerator=accelerator)
 
     if use_ground_truth_tools:
         batch_results = []
@@ -547,6 +689,7 @@ def _generate_results_with_example_fallback(
                     temperature=0.6,
                     top_p=0.9,
                     do_sample=False,
+                    accelerator=accelerator,
                 )
                 batch_results.extend(single_result)
             except Exception as exc:
@@ -554,6 +697,7 @@ def _generate_results_with_example_fallback(
                 batch_results.append(_empty_generation_result())
         return batch_results
 
+    batch_failure = None
     try:
         batch_results = _generate_results(
             model,
@@ -568,9 +712,25 @@ def _generate_results_with_example_fallback(
             temperature=0.6,
             top_p=0.9,
             do_sample=False,
+            accelerator=accelerator,
         )
     except Exception as exc:
+        batch_failure = exc
         print(f"   Error processing batch {batch_idx + 1}: {str(exc)}")
+
+    if sharded_fsdp:
+        any_rank_failed = _distributed_any(
+            batch_failure is not None,
+            accelerator=accelerator,
+        )
+        if any_rank_failed:
+            failure_detail = str(batch_failure) if batch_failure is not None else "another rank failed batch generation"
+            raise RuntimeError(
+                f"Batch {batch_idx + 1} generation failed under sharded FSDP ({failure_detail}). "
+                "Aborting evaluation to keep summon_full_params collectives aligned across ranks."
+            ) from batch_failure
+
+    if batch_failure is not None:
         print(f"   Falling back to per-example generation for batch {batch_idx + 1}")
         batch_results = []
         for i in range(batch_size):
@@ -590,6 +750,7 @@ def _generate_results_with_example_fallback(
                     temperature=0.6,
                     top_p=0.9,
                     do_sample=False,
+                    accelerator=accelerator,
                 )
                 batch_results.extend(single_result)
             except Exception as single_exc:
@@ -612,39 +773,9 @@ def _generate_results_with_example_fallback(
     return batch_results
 
 
-def train_native_function_calling_model(
-    model,
-    dataloader,
-    num_epochs=3,
-    lr=0.01,
-    gradient_accumulation_steps=1,
-    device="cuda",
-    lora_lr=None,
-    active_tool_ids=None,
-    renorm_active_rows=False,
-    use_eoc=None,
-    use_js_trunc=None,
-    use_logit_bias=None,
-    logit_bias_loss_weight=0.1,
-    plot_history=None,
-    plot_step_offset=0,
-    plot_round=None,
-):
-    """Train the native function calling model using reserved tokens."""
+def create_native_optimizer(model, lr=0.01, lora_lr=None):
+    """Create the optimizer for native token-memory training."""
     from torch.optim import AdamW
-    from transformers import get_linear_schedule_with_warmup
-
-    model.train()
-    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
-        use_eoc,
-        use_js_trunc,
-    )
-    resolved_use_logit_bias = bool(
-        getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
-    )
-    if resolved_use_logit_bias and not resolved_use_eoc:
-        raise ValueError("use_logit_bias=True requires use_eoc=True")
 
     if model.lora_config and lora_lr is not None:
         embedding_params, lora_params = model.get_trainable_parameters(separate_lora=True)
@@ -654,8 +785,6 @@ def train_native_function_calling_model(
             for param in model.parameters()
             if param.requires_grad and id(param) not in known_param_ids
         ]
-        if extra_trainable_params:
-            print(f"Found {len(extra_trainable_params)} additional trainable parameters")
 
         param_groups = [
             {"params": embedding_params, "lr": lr, "name": "embeddings", "weight_decay": 0.0},
@@ -665,62 +794,163 @@ def train_native_function_calling_model(
             param_groups.append(
                 {"params": extra_trainable_params, "lr": lr, "name": "auxiliary", "weight_decay": 0.0}
             )
-        optimizer = AdamW(param_groups)
-        print(f"Using separate learning rates: embeddings={lr}, LoRA={lora_lr} (wd: emb=0.0, lora=0.01)")
-    else:
-        embedding_params = model.get_trainable_parameters()
-        known_param_ids = {id(param) for param in embedding_params}
-        extra_trainable_params = [
-            param
-            for param in model.parameters()
-            if param.requires_grad and id(param) not in known_param_ids
-        ]
-        param_groups = [{"params": embedding_params, "lr": lr, "weight_decay": 0.0, "name": "embeddings"}]
-        if extra_trainable_params:
-            print(f"Found {len(extra_trainable_params)} additional trainable parameters")
-            param_groups.append(
-                {"params": extra_trainable_params, "lr": lr, "weight_decay": 0.0, "name": "auxiliary"}
+        return AdamW(param_groups)
+
+    embedding_params = model.get_trainable_parameters()
+    known_param_ids = {id(param) for param in embedding_params}
+    extra_trainable_params = [
+        param
+        for param in model.parameters()
+        if param.requires_grad and id(param) not in known_param_ids
+    ]
+    param_groups = [{"params": embedding_params, "lr": lr, "weight_decay": 0.0, "name": "embeddings"}]
+    if extra_trainable_params:
+        param_groups.append(
+            {"params": extra_trainable_params, "lr": lr, "weight_decay": 0.0, "name": "auxiliary"}
+        )
+    return AdamW(param_groups)
+
+
+def save_native_checkpoint(model, checkpoint_path, payload, accelerator=None):
+    """Save a round checkpoint while keeping FSDP full-param collectives matched across ranks."""
+    should_write = accelerator is None or accelerator.is_main_process
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    with _fsdp_generation_context(model, accelerator=accelerator):
+        if not should_write:
+            return None
+        checkpoint_payload = dict(payload)
+        checkpoint_payload["trainable_state"] = base_model.build_trainable_state_payload()
+        torch.save(checkpoint_payload, checkpoint_path)
+    return checkpoint_path
+
+
+def train_native_function_calling_model(
+    model,
+    dataloader,
+    num_epochs=3,
+    lr=0.01,
+    gradient_accumulation_steps=1,
+    device="cuda",
+    lora_lr=None,
+    optimizer=None,
+    scheduler=None,
+    active_tool_ids=None,
+    renorm_active_rows=False,
+    use_eoc=None,
+    use_js_trunc=None,
+    use_logit_bias=None,
+    logit_bias_loss_weight=0.1,
+    plot_history=None,
+    plot_step_offset=0,
+    plot_round=None,
+    accelerator=None,
+):
+    """Train the native function calling model using reserved tokens."""
+    from torch.optim import AdamW
+    from transformers import get_linear_schedule_with_warmup
+
+    model.train()
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
+        base_model,
+        use_eoc,
+        use_js_trunc,
+    )
+    resolved_use_logit_bias = bool(
+        getattr(base_model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
+    )
+    if resolved_use_logit_bias and not resolved_use_eoc:
+        raise ValueError("use_logit_bias=True requires use_eoc=True")
+
+    if optimizer is None:
+        if base_model.lora_config and lora_lr is not None:
+            embedding_params, lora_params = base_model.get_trainable_parameters(separate_lora=True)
+            known_param_ids = {id(param) for param in embedding_params + lora_params}
+            extra_trainable_params = [
+                param
+                for param in base_model.parameters()
+                if param.requires_grad and id(param) not in known_param_ids
+            ]
+            if extra_trainable_params:
+                print(f"Found {len(extra_trainable_params)} additional trainable parameters")
+
+            param_groups = [
+                {"params": embedding_params, "lr": lr, "name": "embeddings", "weight_decay": 0.0},
+                {"params": lora_params, "lr": lora_lr, "name": "lora", "weight_decay": 0.01},
+            ]
+            if extra_trainable_params:
+                param_groups.append(
+                    {"params": extra_trainable_params, "lr": lr, "name": "auxiliary", "weight_decay": 0.0}
+                )
+            optimizer = AdamW(param_groups)
+            print(
+                f"Using separate learning rates: embeddings={lr}, LoRA={lora_lr} "
+                "(wd: emb=0.0, lora=0.01)"
             )
-        optimizer = AdamW(param_groups)
-        print(f"Using single learning rate: {lr} (wd: emb=0.0)")
+        else:
+            embedding_params = base_model.get_trainable_parameters()
+            known_param_ids = {id(param) for param in embedding_params}
+            extra_trainable_params = [
+                param
+                for param in base_model.parameters()
+                if param.requires_grad and id(param) not in known_param_ids
+            ]
+            param_groups = [{"params": embedding_params, "lr": lr, "weight_decay": 0.0, "name": "embeddings"}]
+            if extra_trainable_params:
+                print(f"Found {len(extra_trainable_params)} additional trainable parameters")
+                param_groups.append(
+                    {"params": extra_trainable_params, "lr": lr, "weight_decay": 0.0, "name": "auxiliary"}
+                )
+            optimizer = AdamW(param_groups)
+            print(f"Using single learning rate: {lr} (wd: emb=0.0)")
 
-    total_steps = len(dataloader) * num_epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=total_steps // 10,
-        num_training_steps=total_steps,
-    )
+    total_optimizer_steps = max(1, math.ceil(len(dataloader) / gradient_accumulation_steps) * num_epochs)
+    if scheduler is None:
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=total_optimizer_steps // 10,
+            num_training_steps=total_optimizer_steps,
+        )
+    if accelerator is not None:
+        optimizer = accelerator.prepare_optimizer(optimizer)
+        scheduler = accelerator.prepare_scheduler(scheduler)
 
-    print(f"Training for {num_epochs} epochs, {len(dataloader)} batches per epoch")
-    print(f"Total steps: {total_steps}")
-    if model.lora_config and lora_lr is not None:
-        print(f"Learning rates: embeddings={lr}, LoRA={lora_lr} (with linear schedule + warmup)")
-    else:
-        print(f"Learning rate: {lr} (with linear schedule + warmup)")
-    print(f"Warmup steps: {total_steps // 10}")
-    print(
-        "Mode: "
-        f"use_eoc={resolved_use_eoc}, use_js_trunc={resolved_use_js_trunc}, "
-        f"use_logit_bias={resolved_use_logit_bias}, "
-        f"logit_bias_loss_weight={logit_bias_loss_weight}"
-    )
+    should_log = accelerator is None or accelerator.is_main_process
+    if should_log:
+        print(f"Training for {num_epochs} epochs, {len(dataloader)} batches per epoch")
+        print(f"Total optimizer steps: {total_optimizer_steps}")
+        if base_model.lora_config and lora_lr is not None:
+            print(f"Learning rates: embeddings={lr}, LoRA={lora_lr} (with linear schedule + warmup)")
+        else:
+            print(f"Learning rate: {lr} (with linear schedule + warmup)")
+        print(f"Warmup steps: {total_optimizer_steps // 10}")
+        print(
+            "Mode: "
+            f"use_eoc={resolved_use_eoc}, use_js_trunc={resolved_use_js_trunc}, "
+            f"use_logit_bias={resolved_use_logit_bias}, "
+            f"logit_bias_loss_weight={logit_bias_loss_weight}"
+        )
 
-    all_trainable_params = model.get_trainable_parameters()
+    all_trainable_params = base_model.get_trainable_parameters()
     total_trainable = sum(param.numel() for param in all_trainable_params)
 
-    if model.decouple_embeddings:
-        print("Training mode: Decoupled embeddings")
-        print(
-            "Trainable parameters: "
-            f"{total_trainable:,} "
-            f"(input: {model.trainable_tool_input_embeddings.numel():,}, "
-            f"output: {model.trainable_tool_output_embeddings.numel():,})"
-        )
-    else:
-        print("Training mode: Coupled embeddings")
-        print(f"Trainable parameters: {total_trainable:,} (shared: {model.trainable_tool_embeddings.numel():,})")
-    print(f"Tool token IDs to monitor: {model.reserved_token_ids}")
-    print()
+    if should_log:
+        if base_model.decouple_embeddings:
+            print("Training mode: Decoupled embeddings")
+            print(
+                "Trainable parameters: "
+                f"{total_trainable:,} "
+                f"(input: {base_model.trainable_tool_input_embeddings.numel():,}, "
+                f"output: {base_model.trainable_tool_output_embeddings.numel():,})"
+            )
+        else:
+            print("Training mode: Coupled embeddings")
+            print(
+                f"Trainable parameters: {total_trainable:,} "
+                f"(shared: {base_model.trainable_tool_embeddings.numel():,})"
+            )
+        print(f"Tool token IDs to monitor: {base_model.reserved_token_ids}")
+        print()
 
     total_loss_metrics = defaultdict(float)
     total_valid_positions = 0
@@ -730,6 +960,7 @@ def train_native_function_calling_model(
     total_logit_bias_initial_positions = 0
     total_logit_bias_eoc_positions = 0
     successful_steps = 0
+    optimizer_steps = 0
     step = 0
 
     window_batches = 0
@@ -739,265 +970,360 @@ def train_native_function_calling_model(
     window_tool_positions = 0
     window_logit_bias_positions = 0
 
-    zero = torch.tensor(0.0, device=device)
-    has_logit_bias_head = hasattr(model, "logit_bias_head") and model.logit_bias_head is not None
-    if resolved_use_logit_bias and not has_logit_bias_head:
+    work_device = accelerator.device if accelerator is not None else torch.device(device)
+    zero = torch.tensor(0.0, device=work_device)
+    has_logit_bias_head = hasattr(base_model, "logit_bias_head") and base_model.logit_bias_head is not None
+    if should_log and resolved_use_logit_bias and not has_logit_bias_head:
         print("Warning: logit bias requested but model has no logit_bias_head; detached prior loss will stay zero.")
+
+    optimizer.zero_grad(set_to_none=True)
 
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+            accumulation_context = accelerator.accumulate(model) if accelerator is not None else nullcontext()
+            with accumulation_context:
+                input_ids, attention_mask, labels = _maybe_move_batch(batch, device, accelerator=accelerator)
 
-            logits, hidden_states = _forward_with_optional_hidden_states(
-                model,
-                input_ids,
-                attention_mask,
-                output_hidden_states=resolved_use_logit_bias,
-                final_hidden_state_only=resolved_use_logit_bias,
-            )
-
-            if not torch.isfinite(logits).all():
-                print(
-                    f"Warning: skipping non-finite logits at epoch {epoch + 1}, "
-                    f"batch {batch_idx + 1}/{len(dataloader)}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                step += 1
-                continue
-
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            valid_mask = shift_labels != -100
-
-            if valid_mask.sum() == 0:
-                print(
-                    f"Warning: skipping batch with no valid targets at epoch {epoch + 1}, "
-                    f"batch {batch_idx + 1}/{len(dataloader)}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                step += 1
-                continue
-
-            ce_loss_per_position = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-                reduction="none",
-            )
-            ce_loss_per_position = ce_loss_per_position.view_as(shift_labels)
-            ar_loss = ce_loss_per_position[valid_mask].mean()
-
-            masks = build_shift_supervision_masks(
-                shift_labels,
-                model,
-                use_eoc=resolved_use_eoc,
-            )
-            eoc_count = int(masks["eoc_mask"].sum().item())
-            tool_count = int(masks["tool_mask"].sum().item())
-            logit_bias_loss = zero
-            logit_bias_targets = None
-            logit_bias_initial_count = 0
-            logit_bias_eoc_count = 0
-
-            if resolved_use_logit_bias and hidden_states is not None:
-                (
-                    logit_bias_hidden_states,
-                    logit_bias_targets,
-                    _,
-                    _,
-                    logit_bias_initial_count,
-                    logit_bias_eoc_count,
-                ) = gather_logit_bias_examples(
-                    hidden_states,
-                    labels,
+                logits, hidden_states = _forward_with_optional_hidden_states(
                     model,
-                    return_indices=True,
+                    input_ids,
+                    attention_mask,
+                    output_hidden_states=resolved_use_logit_bias,
+                    final_hidden_state_only=resolved_use_logit_bias,
+                    accelerator=accelerator,
                 )
-                if logit_bias_targets.numel() > 0 and has_logit_bias_head:
-                    _, logit_bias_loss = compute_logit_bias_loss(
-                        model,
+
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                valid_mask = shift_labels != -100
+                skip_flags = _sync_skip_flags(
+                    {
+                        "non_finite_logits": not torch.isfinite(logits).all().item(),
+                        "no_valid_targets": valid_mask.sum().item() == 0,
+                    },
+                    accelerator=accelerator,
+                    device=work_device,
+                )
+
+                if skip_flags["non_finite_logits"]:
+                    if should_log:
+                        print(
+                        f"Warning: skipping non-finite logits at epoch {epoch + 1}, "
+                        f"batch {batch_idx + 1}/{len(dataloader)}"
+                        )
+                    optimizer.zero_grad(set_to_none=True)
+                    step += 1
+                    continue
+
+                if skip_flags["no_valid_targets"]:
+                    if should_log:
+                        print(
+                        f"Warning: skipping batch with no valid targets at epoch {epoch + 1}, "
+                        f"batch {batch_idx + 1}/{len(dataloader)}"
+                        )
+                    optimizer.zero_grad(set_to_none=True)
+                    step += 1
+                    continue
+
+                ce_loss_per_position = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                )
+                ce_loss_per_position = ce_loss_per_position.view_as(shift_labels)
+                ar_loss = ce_loss_per_position[valid_mask].mean()
+
+                masks = build_shift_supervision_masks(
+                    shift_labels,
+                    base_model,
+                    use_eoc=resolved_use_eoc,
+                )
+                eoc_count = int(masks["eoc_mask"].sum().item())
+                tool_count = int(masks["tool_mask"].sum().item())
+                logit_bias_loss = zero
+                logit_bias_targets = None
+                logit_bias_initial_count = 0
+                logit_bias_eoc_count = 0
+
+                if resolved_use_logit_bias and hidden_states is not None:
+                    (
                         logit_bias_hidden_states,
                         logit_bias_targets,
+                        _,
+                        _,
+                        logit_bias_initial_count,
+                        logit_bias_eoc_count,
+                    ) = gather_logit_bias_examples(
+                        hidden_states,
+                        labels,
+                        base_model,
+                        return_indices=True,
                     )
+                    if logit_bias_targets.numel() > 0 and has_logit_bias_head:
+                        _, logit_bias_loss = compute_logit_bias_loss(
+                            base_model,
+                            logit_bias_hidden_states,
+                            logit_bias_targets,
+                        )
 
-            loss = ar_loss
-            if resolved_use_logit_bias:
-                loss = loss + logit_bias_loss_weight * logit_bias_loss
-
-            step_loss_metrics = _build_loss_metrics(
-                total_loss=loss,
-                ar_loss=ar_loss,
-                extra_loss_metrics={
-                    "logit_bias_loss": logit_bias_loss if resolved_use_logit_bias else None,
-                },
-            )
-
-            if not torch.isfinite(loss):
-                print(
-                    f"Warning: skipping non-finite loss at epoch {epoch + 1}, "
-                    f"batch {batch_idx + 1}/{len(dataloader)}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                step += 1
-                continue
-
-            loss.backward()
-
-            trainable_params = model.get_trainable_parameters()
-            if any(param.grad is not None and not torch.isfinite(param.grad).all() for param in trainable_params):
-                print(
-                    f"Warning: skipping optimizer step with non-finite gradients at epoch {epoch + 1}, "
-                    f"batch {batch_idx + 1}/{len(dataloader)}"
-                )
-                optimizer.zero_grad(set_to_none=True)
-                step += 1
-                continue
-
-            if active_tool_ids is not None:
-                try:
-                    total_tools = len(model.reserved_token_ids)
-                    total_rows = model.trainable_tool_input_embeddings.size(0)
-                    device_for_mask = model.trainable_tool_input_embeddings.device
-                    active_mask = torch.zeros(total_rows, dtype=torch.bool, device=device_for_mask)
-                    active_mask[active_tool_ids] = True
-                    if total_rows > total_tools:
-                        active_mask[total_tools:] = True
-
-                    params_to_mask = []
-                    if hasattr(model, "trainable_tool_input_embeddings") and model.trainable_tool_input_embeddings is not None:
-                        params_to_mask.append(model.trainable_tool_input_embeddings)
-                    if hasattr(model, "trainable_tool_output_embeddings") and model.trainable_tool_output_embeddings is not None:
-                        if model.trainable_tool_output_embeddings is not model.trainable_tool_input_embeddings:
-                            params_to_mask.append(model.trainable_tool_output_embeddings)
-
-                    for param in params_to_mask:
-                        if param.grad is not None:
-                            inactive_rows = ~active_mask
-                            param.grad[inactive_rows] = 0
-                except Exception as exc:
-                    print(f"Warning: failed to apply active tool grad mask: {exc}")
-
-            current_lr_values = [float(param_group["lr"]) for param_group in optimizer.param_groups]
-            if (step + 1) % gradient_accumulation_steps == 0:
-                optimizer.step()
-
-                if renorm_active_rows and active_tool_ids is not None:
-                    try:
-                        total_tools = len(model.reserved_token_ids)
-                        device_for_mask = model.trainable_tool_input_embeddings.device
-                        active_mask = torch.zeros(total_tools, dtype=torch.bool, device=device_for_mask)
-                        active_mask[active_tool_ids] = True
-                        inactive_mask = ~active_mask
-
-                        params_to_norm = []
-                        if hasattr(model, "trainable_tool_output_embeddings") and model.trainable_tool_output_embeddings is not None:
-                            params_to_norm.append(model.trainable_tool_output_embeddings)
-                        elif hasattr(model, "trainable_tool_embeddings") and model.trainable_tool_embeddings is not None:
-                            params_to_norm.append(model.trainable_tool_embeddings)
-
-                        with torch.no_grad():
-                            for param in params_to_norm:
-                                tool_rows = param.data[:total_tools]
-                                if inactive_mask.any():
-                                    target_norm = tool_rows[inactive_mask].norm(dim=1).mean().clamp(min=1e-6)
-                                else:
-                                    target_norm = tool_rows.norm(dim=1).mean().clamp(min=1e-6)
-
-                                active_idx = active_mask.nonzero(as_tuple=False).squeeze(-1)
-                                if active_idx.numel() > 0:
-                                    active_norms = tool_rows[active_idx].norm(dim=1, keepdim=True).clamp(min=1e-6)
-                                    tool_rows[active_idx] = tool_rows[active_idx] * (target_norm / active_norms)
-                    except Exception as exc:
-                        print(f"Warning: failed to apply post-step renorm: {exc}")
-
-                optimizer.zero_grad()
-                scheduler.step()
-
-            total_valid_positions += int(valid_mask.sum().item())
-            total_eoc_positions += eoc_count
-            total_tool_positions += tool_count
-            if resolved_use_logit_bias and logit_bias_targets is not None:
-                total_logit_bias_positions += int(logit_bias_targets.numel())
-                total_logit_bias_initial_positions += logit_bias_initial_count
-                total_logit_bias_eoc_positions += logit_bias_eoc_count
-            successful_steps += 1
-            for metric_name, metric_value in step_loss_metrics.items():
-                metric_float = _metric_value_to_float(metric_value)
-                total_loss_metrics[metric_name] += metric_float
-                window_loss_metrics[metric_name] += metric_float
-
-            window_batches += 1
-            window_valid_positions += int(valid_mask.sum().item())
-            window_eoc_positions += eoc_count
-            window_tool_positions += tool_count
-            if resolved_use_logit_bias and logit_bias_targets is not None:
-                window_logit_bias_positions += int(logit_bias_targets.numel())
-            if plot_history is not None:
-                plot_step = plot_step_offset + successful_steps
-                _append_loss_plot_record(plot_history, plot_step, plot_round, step_loss_metrics)
-                _append_lr_plot_records(
-                    plot_history,
-                    plot_step,
-                    plot_round,
-                    optimizer,
-                    current_lr_values,
-                )
-
-            if (batch_idx + 1) % 10 == 0:
-                lr_values = current_lr_values
-                if model.lora_config and lora_lr is not None:
-                    lr_info = f"LR(emb/lora): {lr_values[0]:.6f}/{lr_values[1]:.6f}"
-                else:
-                    lr_info = f"LR: {lr_values[0]:.6f}"
-
-                window_denom = max(1, window_batches)
-                window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
-                logit_bias_fragment = ""
+                loss = ar_loss
                 if resolved_use_logit_bias:
-                    logit_bias_fragment = (
-                        f"LogitBias: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
-                    )
-                print(
-                    f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
-                    f"Loss: {window_avg_metrics.get('total_loss', 0.0):.4f}, "
-                    f"AR: {window_avg_metrics.get('ar_loss', 0.0):.4f}, "
-                    f"{logit_bias_fragment}"
-                    f"Sites(valid/eoc/tool/logit_bias): {window_valid_positions}/{window_eoc_positions}/"
-                    f"{window_tool_positions}/{window_logit_bias_positions}, "
-                    f"{lr_info}"
+                    loss = loss + logit_bias_loss_weight * logit_bias_loss
+
+                step_loss_metrics = _build_loss_metrics(
+                    total_loss=loss,
+                    ar_loss=ar_loss,
+                    extra_loss_metrics={
+                        "logit_bias_loss": logit_bias_loss if resolved_use_logit_bias else None,
+                    },
                 )
 
-                window_batches = 0
-                window_loss_metrics = defaultdict(float)
-                window_valid_positions = 0
-                window_eoc_positions = 0
-                window_tool_positions = 0
-                window_logit_bias_positions = 0
+                skip_flags = _sync_skip_flags(
+                    {
+                        "non_finite_loss": not torch.isfinite(loss).item(),
+                    },
+                    accelerator=accelerator,
+                    device=work_device,
+                )
+                if skip_flags["non_finite_loss"]:
+                    if should_log:
+                        print(
+                        f"Warning: skipping non-finite loss at epoch {epoch + 1}, "
+                        f"batch {batch_idx + 1}/{len(dataloader)}"
+                        )
+                    optimizer.zero_grad(set_to_none=True)
+                    step += 1
+                    continue
 
-            step += 1
+                backward_loss = loss
+                if accelerator is not None:
+                    accelerator.backward(backward_loss)
+                else:
+                    backward_loss = loss / gradient_accumulation_steps
+                    backward_loss.backward()
 
-    avg_loss_metrics = _average_metrics(total_loss_metrics, successful_steps)
-    default_inactive_avg = 0.0 if successful_steps > 0 else float("nan")
+                trainable_params = base_model.get_trainable_parameters()
+                skip_flags = _sync_skip_flags(
+                    {
+                        "non_finite_gradients": any(
+                            param.grad is not None and not torch.isfinite(param.grad).all().item()
+                            for param in trainable_params
+                        ),
+                    },
+                    accelerator=accelerator,
+                    device=work_device,
+                )
+                if skip_flags["non_finite_gradients"]:
+                    if should_log:
+                        print(
+                        f"Warning: skipping optimizer step with non-finite gradients at epoch {epoch + 1}, "
+                        f"batch {batch_idx + 1}/{len(dataloader)}"
+                        )
+                    optimizer.zero_grad(set_to_none=True)
+                    step += 1
+                    continue
+
+                if active_tool_ids is not None:
+                    try:
+                        total_tools = len(base_model.reserved_token_ids)
+                        total_rows = base_model.trainable_tool_input_embeddings.size(0)
+                        device_for_mask = base_model.trainable_tool_input_embeddings.device
+                        active_mask = torch.zeros(total_rows, dtype=torch.bool, device=device_for_mask)
+                        active_mask[active_tool_ids] = True
+                        if total_rows > total_tools:
+                            active_mask[total_tools:] = True
+
+                        params_to_mask = []
+                        if (
+                            hasattr(base_model, "trainable_tool_input_embeddings")
+                            and base_model.trainable_tool_input_embeddings is not None
+                        ):
+                            params_to_mask.append(base_model.trainable_tool_input_embeddings)
+                        if (
+                            hasattr(base_model, "trainable_tool_output_embeddings")
+                            and base_model.trainable_tool_output_embeddings is not None
+                        ):
+                            if base_model.trainable_tool_output_embeddings is not base_model.trainable_tool_input_embeddings:
+                                params_to_mask.append(base_model.trainable_tool_output_embeddings)
+
+                        for param in params_to_mask:
+                            if param.grad is not None:
+                                inactive_rows = ~active_mask
+                                param.grad[inactive_rows] = 0
+                    except Exception as exc:
+                        if should_log:
+                            print(f"Warning: failed to apply active tool grad mask: {exc}")
+
+                current_lr_values = [float(param_group["lr"]) for param_group in optimizer.param_groups]
+                should_step = (
+                    accelerator.sync_gradients
+                    if accelerator is not None
+                    else ((step + 1) % gradient_accumulation_steps == 0 or batch_idx == len(dataloader) - 1)
+                )
+                if should_step:
+                    _sync_fsdp_ignored_module_gradients(model, accelerator=accelerator)
+                    optimizer.step()
+                    optimizer_steps += 1
+
+                    if renorm_active_rows and active_tool_ids is not None:
+                        try:
+                            total_tools = len(base_model.reserved_token_ids)
+                            device_for_mask = base_model.trainable_tool_input_embeddings.device
+                            active_mask = torch.zeros(total_tools, dtype=torch.bool, device=device_for_mask)
+                            active_mask[active_tool_ids] = True
+                            inactive_mask = ~active_mask
+
+                            params_to_norm = []
+                            if (
+                                hasattr(base_model, "trainable_tool_output_embeddings")
+                                and base_model.trainable_tool_output_embeddings is not None
+                            ):
+                                params_to_norm.append(base_model.trainable_tool_output_embeddings)
+                            elif (
+                                hasattr(base_model, "trainable_tool_embeddings")
+                                and base_model.trainable_tool_embeddings is not None
+                            ):
+                                params_to_norm.append(base_model.trainable_tool_embeddings)
+
+                            with torch.no_grad():
+                                for param in params_to_norm:
+                                    tool_rows = param.data[:total_tools]
+                                    if inactive_mask.any():
+                                        target_norm = tool_rows[inactive_mask].norm(dim=1).mean().clamp(min=1e-6)
+                                    else:
+                                        target_norm = tool_rows.norm(dim=1).mean().clamp(min=1e-6)
+
+                                    active_idx = active_mask.nonzero(as_tuple=False).squeeze(-1)
+                                    if active_idx.numel() > 0:
+                                        active_norms = tool_rows[active_idx].norm(dim=1, keepdim=True).clamp(min=1e-6)
+                                        tool_rows[active_idx] = tool_rows[active_idx] * (target_norm / active_norms)
+                        except Exception as exc:
+                            if should_log:
+                                print(f"Warning: failed to apply post-step renorm: {exc}")
+
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+                total_valid_positions += int(valid_mask.sum().item())
+                total_eoc_positions += eoc_count
+                total_tool_positions += tool_count
+                if resolved_use_logit_bias and logit_bias_targets is not None:
+                    total_logit_bias_positions += int(logit_bias_targets.numel())
+                    total_logit_bias_initial_positions += logit_bias_initial_count
+                    total_logit_bias_eoc_positions += logit_bias_eoc_count
+                successful_steps += 1
+                for metric_name, metric_value in step_loss_metrics.items():
+                    metric_float = _metric_value_to_float(metric_value)
+                    total_loss_metrics[metric_name] += metric_float
+                    window_loss_metrics[metric_name] += metric_float
+
+                window_batches += 1
+                window_valid_positions += int(valid_mask.sum().item())
+                window_eoc_positions += eoc_count
+                window_tool_positions += tool_count
+                if resolved_use_logit_bias and logit_bias_targets is not None:
+                    window_logit_bias_positions += int(logit_bias_targets.numel())
+                if plot_history is not None and should_log:
+                    plot_step = plot_step_offset + successful_steps
+                    _append_loss_plot_record(plot_history, plot_step, plot_round, step_loss_metrics)
+                    _append_lr_plot_records(
+                        plot_history,
+                        plot_step,
+                        plot_round,
+                        optimizer,
+                        current_lr_values,
+                    )
+
+                if should_log and (batch_idx + 1) % 10 == 0:
+                    lr_values = current_lr_values
+                    if base_model.lora_config and lora_lr is not None:
+                        lr_info = f"LR(emb/lora): {lr_values[0]:.6f}/{lr_values[1]:.6f}"
+                    else:
+                        lr_info = f"LR: {lr_values[0]:.6f}"
+
+                    window_denom = max(1, window_batches)
+                    window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
+                    logit_bias_fragment = ""
+                    if resolved_use_logit_bias:
+                        logit_bias_fragment = (
+                            f"LogitBias: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
+                        )
+                    print(
+                        f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
+                        f"Loss: {window_avg_metrics.get('total_loss', 0.0):.4f}, "
+                        f"AR: {window_avg_metrics.get('ar_loss', 0.0):.4f}, "
+                        f"{logit_bias_fragment}"
+                        f"Sites(valid/eoc/tool/logit_bias): {window_valid_positions}/{window_eoc_positions}/"
+                        f"{window_tool_positions}/{window_logit_bias_positions}, "
+                        f"{lr_info}"
+                    )
+
+                    window_batches = 0
+                    window_loss_metrics = defaultdict(float)
+                    window_valid_positions = 0
+                    window_eoc_positions = 0
+                    window_tool_positions = 0
+                    window_logit_bias_positions = 0
+
+                step += 1
+
+    local_successful_steps = successful_steps
+    local_optimizer_steps = optimizer_steps
+    aggregated_successful_steps = successful_steps
+    if accelerator is not None:
+        reduced_metrics = torch.tensor(
+            [
+                total_loss_metrics.get("total_loss", 0.0),
+                total_loss_metrics.get("ar_loss", 0.0),
+                total_loss_metrics.get("logit_bias_loss", 0.0),
+                float(total_valid_positions),
+                float(total_eoc_positions),
+                float(total_tool_positions),
+                float(total_logit_bias_positions),
+                float(total_logit_bias_initial_positions),
+                float(total_logit_bias_eoc_positions),
+                float(successful_steps),
+                float(optimizer_steps),
+            ],
+            device=accelerator.device,
+        )
+        reduced_metrics = accelerator.reduce(reduced_metrics, reduction="sum")
+        total_loss_metrics = {
+            "total_loss": reduced_metrics[0].item(),
+            "ar_loss": reduced_metrics[1].item(),
+            "logit_bias_loss": reduced_metrics[2].item(),
+        }
+        total_valid_positions = int(reduced_metrics[3].item())
+        total_eoc_positions = int(reduced_metrics[4].item())
+        total_tool_positions = int(reduced_metrics[5].item())
+        total_logit_bias_positions = int(reduced_metrics[6].item())
+        total_logit_bias_initial_positions = int(reduced_metrics[7].item())
+        total_logit_bias_eoc_positions = int(reduced_metrics[8].item())
+        aggregated_successful_steps = int(reduced_metrics[9].item())
+
+    avg_loss_metrics = _average_metrics(total_loss_metrics, aggregated_successful_steps)
+    default_inactive_avg = 0.0 if aggregated_successful_steps > 0 else float("nan")
     avg_total_loss = avg_loss_metrics.get("total_loss", float("nan"))
     avg_ar_loss = avg_loss_metrics.get("ar_loss", float("nan"))
     avg_logit_bias_loss = avg_loss_metrics.get("logit_bias_loss", default_inactive_avg)
 
-    print("\nTraining completed!")
-    print(f"Average total loss: {avg_total_loss:.4f}")
-    print(f"Average AR loss:    {avg_ar_loss:.4f}")
-    if resolved_use_logit_bias:
-        print(f"Average Logit bias loss: {avg_logit_bias_loss:.4f}")
-    print(f"Total valid supervised positions: {total_valid_positions}")
-    if resolved_use_eoc:
-        print(f"Total EOC positions: {total_eoc_positions}")
-        print(f"Total tool positions: {total_tool_positions}")
-    if resolved_use_logit_bias:
-        print(f"Total logit-bias positions: {total_logit_bias_positions}")
-        print(f"Logit-bias tool sites from assistant-start positions: {total_logit_bias_initial_positions}")
-        print(f"Logit-bias tool sites from EOC positions: {total_logit_bias_eoc_positions}")
-    print(f"Successful optimizer steps: {successful_steps}")
+    if should_log:
+        print("\nTraining completed!")
+        print(f"Average total loss: {avg_total_loss:.4f}")
+        print(f"Average AR loss:    {avg_ar_loss:.4f}")
+        if resolved_use_logit_bias:
+            print(f"Average Logit bias loss: {avg_logit_bias_loss:.4f}")
+        print(f"Total valid supervised positions: {total_valid_positions}")
+        if resolved_use_eoc:
+            print(f"Total EOC positions: {total_eoc_positions}")
+            print(f"Total tool positions: {total_tool_positions}")
+        if resolved_use_logit_bias:
+            print(f"Total logit-bias positions: {total_logit_bias_positions}")
+            print(f"Logit-bias tool sites from assistant-start positions: {total_logit_bias_initial_positions}")
+            print(f"Logit-bias tool sites from EOC positions: {total_logit_bias_eoc_positions}")
+        print(f"Successful batches: {local_successful_steps}")
+        print(f"Optimizer steps: {local_optimizer_steps}")
 
     return {
         "avg_total_loss": avg_total_loss,
@@ -1009,13 +1335,15 @@ def train_native_function_calling_model(
         "total_logit_bias_positions": total_logit_bias_positions,
         "total_logit_bias_initial_positions": total_logit_bias_initial_positions,
         "total_logit_bias_eoc_positions": total_logit_bias_eoc_positions,
-        "successful_steps": successful_steps,
+        "successful_steps": local_successful_steps,
+        "aggregated_successful_steps": aggregated_successful_steps,
+        "optimizer_steps": local_optimizer_steps,
         "use_eoc": resolved_use_eoc,
         "use_js_trunc": resolved_use_js_trunc,
         "use_logit_bias": resolved_use_logit_bias,
         "avg_loss_metrics": avg_loss_metrics,
-        "plot_next_step": plot_step_offset + successful_steps,
-        "plot_end_step": plot_step_offset + successful_steps,
+        "plot_next_step": plot_step_offset + local_successful_steps,
+        "plot_end_step": plot_step_offset + local_successful_steps,
     }
 
 
@@ -1029,16 +1357,21 @@ def demo_native_function_calling(
     use_eoc=None,
     use_js_trunc=None,
     use_logit_bias=None,
+    accelerator=None,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    should_log = accelerator is None or accelerator.is_main_process
+    if not should_log:
+        return
     resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
+        base_model,
         use_eoc,
         use_js_trunc,
     )
     resolved_use_logit_bias = bool(
-        getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
+        getattr(base_model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     if resolved_use_js_trunc:
@@ -1048,7 +1381,7 @@ def demo_native_function_calling(
 
     print(f"\n=== Native Function Calling Demo ({mode_desc}) ===")
     print(f"Testing on {len(test_examples)} held-out examples")
-    print(f"Available tools: {model.tool_names}")
+    print(f"Available tools: {base_model.tool_names}")
     print()
 
     for i, example in enumerate(test_examples):
@@ -1066,7 +1399,9 @@ def demo_native_function_calling(
             "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n"
             f"{user_input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
         )
-        user_tokens = tokenizer(user_text, return_tensors="pt").to(device)
+        user_tokens = tokenizer(user_text, return_tensors="pt").to(
+            accelerator.device if accelerator is not None else device
+        )
 
         results = _generate_results(
             model,
@@ -1082,6 +1417,7 @@ def demo_native_function_calling(
             temperature=0.6,
             top_p=0.9,
             do_sample=True,
+            accelerator=accelerator,
         )
         mode_line = "Ground truth tools used" if use_ground_truth_tools else "Model predicts tools"
         if resolved_use_js_trunc:
@@ -1098,7 +1434,7 @@ def demo_native_function_calling(
                 print(f"  Tool {j + 1}: {tool_info['tool_name']}")
                 print(f"  Function Call {j + 1}: {func_call}")
 
-                parsed = model.parse_function_call(func_call)
+                parsed = base_model.parse_function_call(func_call)
                 print(f"  Parsed {j + 1}: {parsed}")
                 print()
         else:
@@ -1106,7 +1442,7 @@ def demo_native_function_calling(
             print(f"Tool Token Used: {result.get('tool_token_used', 'N/A')}")
             print(f"Function Call: {result['function_call']}")
 
-            parsed = model.parse_function_call(result["function_call"])
+            parsed = base_model.parse_function_call(result["function_call"])
             print(f"Parsed: {parsed}")
 
         print(f"Full Generated: {result['full_generated_sequence']}")
@@ -1124,19 +1460,22 @@ def eval_native_function_calling(
     use_eoc=None,
     use_js_trunc=None,
     use_logit_bias=None,
+    accelerator=None,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
     from eval import compare_function_calls_advanced, calculate_argument_accuracy, calculate_tool_metrics
     import time
 
     model.eval()
+    base_model = _unwrap_model(model, accelerator=accelerator)
+    should_log = accelerator is None or accelerator.is_main_process
     resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
+        base_model,
         use_eoc,
         use_js_trunc,
     )
     resolved_use_logit_bias = bool(
-        getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
+        getattr(base_model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
 
     total_examples = len(test_dataloader.dataset)
@@ -1146,9 +1485,10 @@ def eval_native_function_calling(
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
 
-    print(f"\n=== Native Function Calling Evaluation ({mode_desc}) ===")
-    print(f"Evaluating on {total_examples} test examples")
-    print()
+    if should_log:
+        print(f"\n=== Native Function Calling Evaluation ({mode_desc}) ===")
+        print(f"Evaluating on {total_examples} test examples")
+        print()
 
     exact_matches = 0
     tool_tp = 0
@@ -1187,7 +1527,7 @@ def eval_native_function_calling(
         }
     )
 
-    candidate_tools = list(getattr(model, "tool_names", []))
+    candidate_tools = list(getattr(base_model, "tool_names", []))
     if not candidate_tools:
         candidate_tools = [
             tool
@@ -1197,18 +1537,18 @@ def eval_native_function_calling(
     candidate_tools = list(dict.fromkeys(candidate_tools))
 
     start_time = time.time()
-    print("🔄 Running batch evaluation...")
+    if should_log:
+        print("🔄 Running batch evaluation...")
 
     processed_examples = 0
     for batch_idx, batch in enumerate(test_dataloader):
         batch_size = len(batch["raw_data"])
         processed_examples += batch_size
 
-        if batch_idx % 10 == 0 or processed_examples == total_examples:
+        if should_log and (batch_idx % 10 == 0 or processed_examples == total_examples):
             print(f"   Progress: {processed_examples}/{total_examples} ({100 * processed_examples / total_examples:.1f}%)")
 
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
+        input_ids, attention_mask, _ = _maybe_move_batch(batch, device, accelerator=accelerator)
         batch_results = _generate_results_with_example_fallback(
             model=model,
             tokenizer=tokenizer,
@@ -1221,10 +1561,17 @@ def eval_native_function_calling(
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             max_new_tokens=max_new_tokens,
+            accelerator=accelerator,
         )
+        raw_examples = batch["raw_data"]
+        if accelerator is not None:
+            batch_results = accelerator.gather_for_metrics(batch_results, use_gather_object=True)
+            raw_examples = accelerator.gather_for_metrics(raw_examples, use_gather_object=True)
 
-        for i in range(batch_size):
-            example = batch["raw_data"][i]
+        if not should_log:
+            continue
+
+        for i, example in enumerate(raw_examples):
             result = batch_results[i]
             expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
             expected_calls = example.get("function_calls", [example.get("function_call", "{}")])
@@ -1304,6 +1651,8 @@ def eval_native_function_calling(
                 breakdown["tool_recall_scores"].append(tool_metrics["tool_recall"])
 
     eval_time = time.time() - start_time
+    if not should_log:
+        return None
 
     exact_accuracy = exact_matches / total_examples
     tool_judgments = tool_tp + tool_tn + tool_fp + tool_fn

@@ -14,9 +14,11 @@ import os
 import sys
 import torch
 from typing import List, Dict, Any, Optional
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
+from accelerate.utils import disable_fsdp_ram_efficient_loading, enable_fsdp_ram_efficient_loading
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from eval import compare_function_calls_advanced, calculate_tool_selection_accuracy
+from fsdp_utils import build_accelerator
 from tool_retrieval import ToolRetriever
 from run_layout import (
     DEFAULT_RUNS_DIR,
@@ -25,6 +27,11 @@ from run_layout import (
     resolve_run_context,
     write_json,
 )
+
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+except ImportError:
+    FSDP = None
 
 
 class TeeStream:
@@ -39,6 +46,25 @@ class TeeStream:
     def flush(self):
         for stream in self.streams:
             stream.flush()
+
+
+def _unwrap_model(model, accelerator=None):
+    return accelerator.unwrap_model(model) if accelerator is not None else model
+
+
+def _fsdp_generation_context(model, accelerator=None):
+    if FSDP is None:
+        return nullcontext()
+    if not isinstance(model, FSDP):
+        return nullcontext()
+    if accelerator is not None and getattr(accelerator.distributed_type, "name", "") != "FSDP":
+        return nullcontext()
+    fsdp_plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None) if accelerator is not None else None
+    sharding_strategy = getattr(fsdp_plugin, "sharding_strategy", None)
+    strategy_name = getattr(sharding_strategy, "name", str(sharding_strategy))
+    if strategy_name == "NO_SHARD":
+        return nullcontext()
+    return FSDP.summon_full_params(model, recurse=True, writeback=False)
 
 
 def resolve_run_file_path(run_context, requested_path, default_name):
@@ -59,6 +85,40 @@ def strip_call_count_breakdown(value):
     if isinstance(value, list):
         return [strip_call_count_breakdown(item) for item in value]
     return value
+
+
+def build_aligned_eval_shard(test_data, accelerator, batch_size):
+    entries = [
+        {
+            "sample_id": sample_id,
+            "sample": sample,
+            "is_padding": False,
+        }
+        for sample_id, sample in enumerate(test_data)
+    ]
+    if accelerator is None or accelerator.num_processes <= 1:
+        return entries, len(entries), len(entries)
+
+    local_entries = entries[accelerator.process_index::accelerator.num_processes]
+    actual_local_samples = len(local_entries)
+    if not entries:
+        return local_entries, actual_local_samples, actual_local_samples
+
+    max_local_samples = (len(entries) + accelerator.num_processes - 1) // accelerator.num_processes
+    target_local_batches = (max_local_samples + batch_size - 1) // batch_size
+    target_local_samples = target_local_batches * batch_size
+    pad_sample = local_entries[-1]["sample"] if local_entries else entries[0]["sample"]
+
+    while len(local_entries) < target_local_samples:
+        local_entries.append(
+            {
+                "sample_id": None,
+                "sample": pad_sample,
+                "is_padding": True,
+            }
+        )
+
+    return local_entries, actual_local_samples, target_local_samples
 
 def load_tool_descriptions(filepath="tool_descriptions.json") -> Dict[str, Any]:
     """Load tool descriptions from JSON file"""
@@ -114,30 +174,49 @@ Examples:
 class ICLBaseline:
     """In-Context Learning baseline using Hugging Face transformers"""
     
-    def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct", device="cuda", dtype=torch.bfloat16,
-                 use_rag=False, retrieval_k=10):
+    def __init__(
+        self,
+        model_name="meta-llama/Llama-3.2-1B-Instruct",
+        device="cuda",
+        dtype=torch.bfloat16,
+        use_rag=False,
+        retrieval_k=10,
+        accelerator=None,
+        use_fsdp=False,
+    ):
         self.model_name = model_name
-        self.device = device
+        self.accelerator = accelerator
+        self.device = accelerator.device if accelerator is not None else device
         self.dtype = dtype
         self.use_rag = use_rag
         self.retrieval_k = retrieval_k
+        self.use_fsdp = use_fsdp
+        should_log = accelerator is None or accelerator.is_main_process
         
         # Initialize retriever if RAG is enabled
         self.retriever = None
         if self.use_rag:
-            print(f"Initializing RAG with top-{retrieval_k} retrieval...")
+            if should_log:
+                print(f"Initializing RAG with top-{retrieval_k} retrieval...")
             self.retriever = ToolRetriever()
         
-        print(f"Loading model: {model_name}")
-        print(f"Device: {device}, Dtype: {dtype}")
+        if should_log:
+            print(f"Loading model: {model_name}")
+            print(f"Device: {self.device}, Dtype: {dtype}")
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=self.dtype,
-            device_map="auto" if device == "cuda" else None
-        )
+        model_device = "cpu" if self.use_fsdp else self.device
+        if self.use_fsdp:
+            enable_fsdp_ram_efficient_loading()
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=self.dtype,
+            ).to(model_device)
+        finally:
+            if self.use_fsdp:
+                disable_fsdp_ram_efficient_loading()
         
         # Configure tokenizer for decoder-only models
         if self.tokenizer.pad_token is None:
@@ -145,7 +224,8 @@ class ICLBaseline:
         self.tokenizer.padding_side = 'left'  # Use left padding for decoder-only models
         
         self.model.eval()
-        print("Model loaded successfully!")
+        if should_log:
+            print("Model loaded successfully!")
     
     def generate_batch_responses(self, prompts: List[str], max_length=4096, max_new_tokens=256, temperature=0.6, do_sample=True, top_p=0.9) -> List[str]:
         """Generate responses for a batch of prompts"""
@@ -161,17 +241,19 @@ class ICLBaseline:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
+        generation_model = _unwrap_model(self.model, accelerator=self.accelerator)
         with torch.no_grad():
-            generated = self.model.generate(
-                input_ids=inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=self.tokenizer.eos_token_id,
-                use_cache=True
-            )
+            with _fsdp_generation_context(self.model, accelerator=self.accelerator):
+                generated = generation_model.generate(
+                    input_ids=inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=do_sample,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    use_cache=True
+                )
         
         # Decode only the new tokens for each sequence
         responses = []
@@ -320,43 +402,65 @@ class ICLBaseline:
                       tool_descriptions_path="tool_descriptions.json",
                       max_samples=None, output_file="icl_results.json", batch_size=8) -> Dict[str, float]:
         """Run full evaluation on test data"""
+        should_log = self.accelerator is None or self.accelerator.is_main_process
         
-        print("Loading data...")
+        if should_log:
+            print("Loading data...")
         tool_descriptions = load_tool_descriptions(tool_descriptions_path)
         test_data = load_test_data(test_data_path)
         
         # Initialize retriever with all tools if RAG is enabled
         if self.use_rag and self.retriever:
-            print("Indexing tools for retrieval...")
+            if should_log:
+                print("Indexing tools for retrieval...")
             self.retriever.index_tools(tool_descriptions)
         
         if max_samples:
             test_data = test_data[:max_samples]
+        total_samples = len(test_data)
+        eval_entries, local_sample_count, padded_local_sample_count = build_aligned_eval_shard(
+            test_data,
+            self.accelerator,
+            batch_size,
+        )
         
-        print(f"Evaluating on {len(test_data)} samples...")
-        print(f"Using {len(tool_descriptions)} available tools")
+        if should_log:
+            print(f"Evaluating on {total_samples} total samples...")
+            print(f"Rank 0 processing {local_sample_count} local samples...")
+            if padded_local_sample_count != local_sample_count:
+                print(
+                    f"Rank 0 padded its local shard to {padded_local_sample_count} samples "
+                    "so FSDP generation calls stay aligned across ranks."
+                )
+            print(f"Using {len(tool_descriptions)} available tools")
         
         results = []
         total_exact_matches = 0
         total_partial_scores = 0
         
         # Process data in batches
-        num_batches = (len(test_data) + batch_size - 1) // batch_size
-        print(f"Processing {num_batches} batches of size {batch_size}...")
+        num_batches = (len(eval_entries) + batch_size - 1) // batch_size
+        if should_log:
+            print(f"Processing {num_batches} batches of size {batch_size}...")
         
-        for batch_idx in range(0, len(test_data), batch_size):
-            batch_end = min(batch_idx + batch_size, len(test_data))
-            batch_data = test_data[batch_idx:batch_end]
+        for batch_idx in range(0, len(eval_entries), batch_size):
+            batch_entries = eval_entries[batch_idx:batch_idx + batch_size]
+            batch_data = [entry["sample"] for entry in batch_entries]
             current_batch_num = batch_idx // batch_size + 1
             
-            print(f"Processing batch {current_batch_num}/{num_batches} (samples {batch_idx+1}-{batch_end})...")
+            if should_log:
+                print(f"Processing batch {current_batch_num}/{num_batches}...")
             
             # Make batch predictions
             batch_predictions = self.predict_batch(batch_data, tool_descriptions)
             
             # Evaluate each sample in the batch
-            for i, (sample, prediction) in enumerate(zip(batch_data, batch_predictions)):
-                sample_id = batch_idx + i
+            for entry, prediction in zip(batch_entries, batch_predictions):
+                if entry["is_padding"]:
+                    continue
+
+                sample = entry["sample"]
+                sample_id = entry["sample_id"]
                 
                 # Get target tools and function calls
                 target_tools = sample.get('tools', [])
@@ -401,7 +505,15 @@ class ICLBaseline:
                 })
         
         # Calculate comprehensive metrics
-        n_samples = len(test_data)
+        if self.accelerator is not None:
+            results = self.accelerator.gather_for_metrics(results, use_gather_object=True)
+        if not should_log:
+            return {}
+        results.sort(key=lambda result: result['sample_id'])
+
+        total_exact_matches = 0
+        total_partial_scores = 0
+        n_samples = len(results)
         
         # Calculate aggregated metrics
         total_precision = 0
@@ -416,6 +528,9 @@ class ICLBaseline:
         call_count_stats = {}  # Track accuracy by number of function calls
         
         for result in results:
+            total_exact_matches += int(result['exact_match'])
+            total_partial_scores += result['f1_score']
+
             # Aggregate precision and recall
             total_precision += result['precision']
             total_recall += result['recall']
@@ -579,6 +694,19 @@ def main():
                        help="Hugging Face model name")
     parser.add_argument("--device", default="cuda", help="Device to use")
     parser.add_argument("--dtype", default="bfloat16", help="Model dtype")
+    parser.add_argument("--use_fsdp", action="store_true",
+                       help="Wrap the backbone with Accelerate FSDP for multi-GPU evaluation")
+    parser.add_argument("--mixed_precision", type=str, default="bf16",
+                       choices=["no", "fp16", "bf16"],
+                       help="Accelerate mixed precision mode")
+    parser.add_argument("--fsdp_sharding_strategy", type=str, default="NO_SHARD",
+                       choices=["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD", "HYBRID_SHARD_ZERO2"],
+                       help="FSDP sharding strategy")
+    parser.add_argument("--fsdp_backward_prefetch", type=str, default="BACKWARD_PRE",
+                       choices=["BACKWARD_PRE", "BACKWARD_POST", "none"],
+                       help="FSDP backward prefetch mode")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                       help="Unused evaluation setting kept for shared Accelerate setup")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to evaluate (default: None - evaluate all)")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for evaluation")
     parser.add_argument("--output", default=None, help="Output file for results")
@@ -596,6 +724,9 @@ def main():
                        help="Number of tools to retrieve when using RAG (default: 10)")
     
     args = parser.parse_args()
+    accelerator = build_accelerator(args, args.model_name, use_seedable_sampler=False)
+    should_log = accelerator.is_main_process
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     run_context = resolve_run_context(
         experiment_name="compositional_icl",
@@ -621,50 +752,66 @@ def main():
     else:
         dtype = torch.float32
     
-    write_json(
-        artifact_path(run_context, "run_config.json"),
-        build_run_config(
-            vars(args),
-            run_context,
-            extra={
-                "experiment_type": "icl_baseline",
-                "artifacts": {
-                    "evaluation_log": evaluation_log_file,
-                    "evaluation_results": output_file,
+    if should_log:
+        write_json(
+            artifact_path(run_context, "run_config.json"),
+            build_run_config(
+                vars(args),
+                run_context,
+                extra={
+                    "experiment_type": "icl_baseline",
+                    "world_size": world_size,
+                    "artifacts": {
+                        "evaluation_log": evaluation_log_file,
+                        "evaluation_results": output_file,
+                    },
+                    "test_data": os.path.abspath(args.test_data),
+                    "tool_descriptions": os.path.abspath(args.tool_descriptions),
                 },
-                "test_data": os.path.abspath(args.test_data),
-                "tool_descriptions": os.path.abspath(args.tool_descriptions),
-            },
-        ),
-    )
+            ),
+        )
 
-    with open(evaluation_log_file, "a", encoding="utf-8") as log_handle:
-        tee_stream = TeeStream(sys.stdout, log_handle)
-        with redirect_stdout(tee_stream):
+    def run_baseline():
+        if should_log:
             print(f"Run directory: {run_context['run_dir']}")
+            print(f"World size: {world_size}")
+            print(f"Use FSDP: {args.use_fsdp}")
 
-            baseline = ICLBaseline(
-                model_name=args.model_name,
-                device=args.device,
-                dtype=dtype,
-                use_rag=args.use_rag,
-                retrieval_k=args.retrieval_k
-            )
-            
+        baseline = ICLBaseline(
+            model_name=args.model_name,
+            device=args.device,
+            dtype=dtype,
+            use_rag=args.use_rag,
+            retrieval_k=args.retrieval_k,
+            accelerator=accelerator,
+            use_fsdp=args.use_fsdp,
+        )
+        baseline.model = accelerator.prepare(baseline.model)
+
+        if should_log:
             if args.use_rag:
                 print(f"\n🔍 RAG enabled: Retrieving top-{args.retrieval_k} tools per query")
             else:
                 print("\n📦 RAG disabled: Using all tools in prompt")
-            
-            metrics = baseline.run_evaluation(
-                test_data_path=args.test_data,
-                tool_descriptions_path=args.tool_descriptions,
-                max_samples=args.max_samples,
-                output_file=output_file,
-                batch_size=args.batch_size
-            )
-            
+
+        baseline.run_evaluation(
+            test_data_path=args.test_data,
+            tool_descriptions_path=args.tool_descriptions,
+            max_samples=args.max_samples,
+            output_file=output_file,
+            batch_size=args.batch_size
+        )
+
+        if should_log:
             print("\n✅ ICL baseline evaluation complete!")
+
+    if should_log:
+        with open(evaluation_log_file, "a", encoding="utf-8") as log_handle:
+            tee_stream = TeeStream(sys.stdout, log_handle)
+            with redirect_stdout(tee_stream):
+                run_baseline()
+    else:
+        run_baseline()
 
 if __name__ == "__main__":
     main()

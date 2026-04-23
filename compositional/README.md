@@ -32,11 +32,35 @@ Useful flags:
 - `--use_eoc`
 - `--use_js_trunc`
 - `--use_logit_bias`
+- `--use_fsdp`
+- `--mixed_precision`
+- `--fsdp_sharding_strategy`
+- `--fsdp_backward_prefetch`
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
 - `--max_length` default `1024`
 - `--max_new_tokens` default `512`
+
+## Launcher Shape
+
+The maintained compositional launchers now run through `accelerate launch` and use `--use_fsdp` as the default multi-GPU path for:
+
+- `main_sequential.py`
+- `lora_sequential.py`
+- `icl_baseline.py`
+
+The old `device_map`-based multi-GPU loading path has been removed from the maintained compositional code.
+
+In this launcher shape:
+
+- model loading stays on CPU first when `--use_fsdp` is enabled, then Accelerate/FSDP owns sharding and placement
+- the maintained compositional defaults use `--fsdp_sharding_strategy NO_SHARD`, which keeps the FSDP execution path while avoiding sharded-parameter conflicts with the custom TokMem forward/generation logic
+- in TokMem evaluation, batch generation failures still fall back to per-example decoding under `NO_SHARD`; sharded FSDP strategies abort that batch instead so `summon_full_params` collectives stay rank-aligned
+- training and evaluation batch sizes stay per process
+- `icl_baseline.py` pads each rank-local evaluation shard to the same number of batches before FSDP generation, then drops padding-only rows from gathered metrics so sharded strategies keep collective calls aligned
+- TokMem checkpoints now save compact trainable-state payloads instead of full model `state_dict`s
+- LoRA checkpoints save adapter weights from the FSDP-wrapped run
 
 ## Method Notes
 

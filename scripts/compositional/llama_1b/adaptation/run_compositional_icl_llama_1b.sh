@@ -13,7 +13,7 @@ cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 source /data/ruochen/anaconda/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2
 
 cd "$ROOT_DIR/compositional"
 
@@ -28,10 +28,17 @@ python xlam_datasets.py \
     --test_multi_tool_ratios "0.5,0.5" \
     --output_dir "$ROOT_DIR/compositional/data"
 
-python -u icl_baseline.py \
+accelerate launch \
+    --num_processes 3 \
+    --num_machines 1 \
+    --multi_gpu \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    icl_baseline.py \
     --test_data "$ROOT_DIR/compositional/data/test/function_calling_test_tools51-100_4calls.json" \
     --tool_descriptions "$ROOT_DIR/compositional/data/tool_descriptions_tools51-100.json" \
     --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \
+    --use_fsdp \
     --batch_size 16 \
     --use_rag \
     --retrieval_k 5 \
