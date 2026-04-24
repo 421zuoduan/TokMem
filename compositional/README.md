@@ -4,33 +4,38 @@ This directory contains the compositional TokMem experiments on XLAM/APIGen.
 
 ## Current Maintained Method Surface
 
-The maintained compositional path now keeps two method switches:
+The maintained compositional path keeps these method switches:
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_tool_head_replacement`
 
-Historical archived runs still exist under `compositional/runs/`. Current code, launchers, and docs describe the maintained `eoc/logit_bias` family.
+Historical archived runs still exist under `compositional/runs/`. Current code and docs describe the maintained `eoc/logit_bias/tool_head_replacement` family.
 
 ## Modes
 
-| Mode | `--use_eoc` | `--use_logit_bias` | Behavior |
-| --- | --- | --- | --- |
-| Baseline | off | off | Original TokMem decoding and training |
-| EOC token only | on | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
-| EOC + logit bias | on | on | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
+| Mode | `--use_eoc` | `--use_logit_bias` | `--use_tool_head_replacement` | Behavior |
+| --- | --- | --- | --- | --- |
+| Baseline | off | off | off | Original TokMem decoding and training |
+| EOC token only | on | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
+| EOC + logit bias | on | on | off | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
+| EOC + tool-head replacement | on | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
 
 Constraint summary:
 
 - `--use_logit_bias` requires `--use_eoc`
+- `--use_tool_head_replacement` requires `--use_eoc`
+- `--use_logit_bias` and `--use_tool_head_replacement` are decode-time alternatives
 
 Useful flags:
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_tool_head_replacement`
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
-- `--max_length` default `1024`
+- `--max_length` default `512`
 - `--max_new_tokens` default `512`
 
 ## Method Notes
@@ -47,9 +52,9 @@ When `--use_eoc` is enabled, each gold tool span becomes:
 
 `--max_new_tokens` controls only the training-time evaluation and demo decode budget in `main_sequential.py`. It does not change teacher-forcing supervision length during training.
 
-### Logit bias
+### Auxiliary tool head
 
-`--use_logit_bias` adds a detached auxiliary head and a soft decode-time bias.
+`--use_logit_bias` and `--use_tool_head_replacement` both train a detached auxiliary tool-prior head on boundary states.
 
 Training:
 
@@ -57,6 +62,10 @@ Training:
 2. detach those boundary hidden states
 3. predict the next gold tool id with `logit_bias_head`
 4. add `logit_bias_loss_weight * CE` to the autoregressive loss
+
+### Logit bias
+
+`--use_logit_bias` uses the auxiliary head as a soft decode-time bias.
 
 Decoding:
 
@@ -67,6 +76,19 @@ Decoding:
 5. add the result back only to tool-token columns
 
 This means an informative prior only reweights relative preference among tool tokens and leaves non-tool logits unchanged.
+
+### Tool-head replacement
+
+`--use_tool_head_replacement` uses the auxiliary head as a hard replacement policy at EOC decision sites.
+
+Decoding:
+
+1. let the base LM sample the next token at assistant-start or `eoc` boundary rows
+2. check whether that sampled token is one of the reserved tool tokens
+3. for rows where the base LM already triggered a tool token, sample a replacement tool id from the auxiliary head
+4. write the replacement reserved tool token into the generated sequence
+
+This makes replacement trigger-gated: the auxiliary head chooses which tool token to emit only after the base LM has already decided to emit a tool token at a boundary. Non-tool continuations from the base LM pass through unchanged.
 
 ## Maintained Launchers
 
@@ -84,7 +106,7 @@ Additional Llama-1B adaptation launchers over `1-50 -> 51-100`:
 
 These launchers use `1-50:1,51-100:3` with `--use_lora --freeze_lora_after_first`, so the first round adapts LoRA on held-out tools and later rounds continue TokMem-side training on `51-100`.
 
-`main_sequential.py` now accepts `--batch_size_per_round` for multi-round TokMem runs. The current Llama-1B adaptation launchers use `16,32`, so the adaptation round matches the suite LoRA train batch size and the later TokMem round matches the suite TokMem train batch size. The shell launchers keep `BATCH_SIZE_PER_ROUND` overridable for smoke tests.
+`main_sequential.py` now accepts `--batch_size_per_round` for multi-round TokMem runs. The current Llama-1B adaptation launchers use `16,24`, so the adaptation round matches the suite LoRA train batch size and the later TokMem round matches the suite TokMem train batch size. The shell launchers keep `BATCH_SIZE_PER_ROUND` overridable for smoke tests.
 
 Single-round comparison launchers with the same Llama-1B data split settings:
 
@@ -106,9 +128,29 @@ Paper-level compositional suite launcher:
 
 - `scripts/compositional/run_paper_compositional_suite.sh`
 
-This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`.
+This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`.
 
-It uses one scheduling unit per `model × method × trial`, keeps the 5 trials independently schedulable across GPUs, writes archived outputs under `results/compositional/<suite_name>/`, and produces:
+The same suite also schedules a separate `51-100 / 10 calls` TokMem-family stress test for `tokmem`, `tokmem_eoc_logit_bias`, `adap_tokmem`, and `adap_tokmem_eoc_logit_bias`. It synthesizes `8000` train and `800` test examples with 10-call filenames and uses smaller TokMem train/eval batches:
+
+- `llama1b`: `4/16`
+- `llama3b`: `2/8`
+- `llama8b`: `1/4`
+
+For the two 10-call adaptation methods, the first round stays aligned with the suite adaptation setup over `1-50 / 4 calls`, and the second round trains on `51-100 / 10 calls`:
+
+- `llama1b`: `16,4`
+- `llama3b`: `8,2`
+- `llama8b`: `4,1`
+
+The suite passes max length by call scope: `4calls=512` and `10calls=1024`.
+
+The three adaptation methods use `1-50:1,51-100:3` inside the same suite, with round-wise train batch sizes aligned to the maintained suite defaults:
+
+- `llama1b`: `16,24`
+- `llama3b`: `8,16`
+- `llama8b`: `4,8`
+
+It uses one scheduling unit per `call scope × model × method × trial`, keeps the 5 trials independently schedulable across GPUs, writes archived outputs under `results/compositional/<suite_name>/`, and produces:
 
 - `runs/<task_name>/` per trial
 - `task_manifest.tsv`
@@ -116,18 +158,26 @@ It uses one scheduling unit per `model × method × trial`, keeps the 5 trials i
 - `summary.md`
 - `summary.json`
 - `scheduler.log`
+- `gpu_availability.log`
 
-When the suite is resumed with `--rerun-failed --suite-name <existing-suite>`, the launcher keeps the existing suite-level `run_paper_compositional_suite.sh`, `suite_config.json`, and `task_manifest.tsv` in place. The current rerun invocation is snapshotted under:
+The suite scheduler only monitors and schedules the GPUs listed by `--gpus`. A task starts on a GPU after that GPU reports `memory.used <= 2048 MiB` for 300 consecutive seconds; `--poll-seconds` controls the sampling interval.
+
+When the suite is rerun with `--suite-name <existing-suite>`, the launcher reconciles the existing `task_manifest.tsv` with the method set defined in the current script. Existing successful tasks stay skipped, newly introduced methods are appended into the same manifest, and the refreshed `summary.md` and `summary.json` cover the combined old and new tasks.
+
+When the suite is resumed with `--rerun-failed --suite-name <existing-suite>`, the launcher reuses the recorded `task_manifest.tsv` as-is and only retries unfinished tasks already listed in that manifest. The current rerun invocation is snapshotted under:
 
 - `reruns/<rerun_id>/run_paper_compositional_suite.sh`
 - `reruns/<rerun_id>/suite_config.json`
 - `reruns/<rerun_id>/task_manifest.tsv`
 
-Current maintained comparison tables only include:
+Suite-level metadata keeps evaluation scopes and adaptation training scopes separately. `summary.md` writes separate result tables for `tools 51-100 / 4 calls` and `tools 51-100 / 10 calls`; adaptation entries record `1-50:1,51-100:3` plus their per-round call limits.
+
+Use these labels when reporting TokMem-family method comparisons:
 
 - `baseline`
 - `eoc-only`
 - `eoc+logit_bias`
+- `eoc+tool_head_replacement`
 
 ## Run Layout
 
@@ -165,7 +215,7 @@ For ICL/RAG, `function_calls` on the maintained compositional dataset store argu
 - `epochs`
 - `avg_total_loss`
 - `avg_ar_loss`
-- `avg_logit_bias_loss` when `use_logit_bias=true`
+- `avg_logit_bias_loss` when `use_logit_bias=true` or `use_tool_head_replacement=true`
 
 Detailed position counters are available in the per-round training `results` payload and training logs. The saved `training_summary.json` stays a run-level loss summary.
 
@@ -213,7 +263,7 @@ This regenerates the synthetic data files under `compositional/data/` with fixed
 ## Key Components
 
 - `main_sequential.py`: maintained TokMem entrypoint
-- `model.py`: reserved-tool-token model, EOC boundary logic, logit-bias decoding
-- `training.py`: autoregressive training loop plus detached logit-bias auxiliary loss
+- `model.py`: reserved-tool-token model, EOC boundary logic, logit-bias decoding, tool-head replacement decoding
+- `training.py`: autoregressive training loop plus detached auxiliary tool-head loss
 - `dataset.py`: XLAM/APIGen data loading and EOC target formatting
 - `tool_retrieval.py`: RAG tool retrieval for ICL and related baselines

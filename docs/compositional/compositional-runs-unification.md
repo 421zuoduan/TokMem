@@ -32,7 +32,7 @@ README 汇总型 launcher 位于：
 
 - `scripts/compositional/run_paper_compositional_suite.sh`
 
-这个 suite launcher 固定跑 `51-100 / 4 calls`，覆盖 `llama1b`、`llama3b`、`llama8b` 和 `icl`、`rag`、`lora`、`tokmem`、`tokmem_eoc`、`tokmem_eoc_logit_bias` 六种方法。调度粒度是单个 `model × method × trial`，所以同一 `model/method` 的 5 个 trial 可以分散到不同 GPU 上执行。
+这个 suite launcher 固定评测 `51-100 / 4 calls`，覆盖 `llama1b`、`llama3b`、`llama8b` 和 `icl`、`rag`、`lora`、`tokmem`、`tokmem_eoc`、`tokmem_eoc_logit_bias`、`adap_tokmem`、`adap_tokmem_eoc`、`adap_tokmem_eoc_logit_bias`。其中 `adap_tokmem*` 的训练轮次是 `1-50:1,51-100:3`。调度粒度是单个 `model × method × trial`，所以同一 `model/method` 的 5 个 trial 可以分散到不同 GPU 上执行。suite 只监控和调度 `--gpus` 指定的 GPU；suite 自己的任务结束后，只要 `memory.used <= 2048 MiB` 就能继续启动下一项；外部占用释放后的 GPU 需要连续 300 秒低于阈值。
 
 ## Run Context
 
@@ -85,6 +85,7 @@ results/compositional/<suite_name>/
   summary.md
   summary.json
   scheduler.log
+  gpu_availability.log
   suite_config.json
   dataset.log
   run_paper_compositional_suite.sh
@@ -94,7 +95,8 @@ results/compositional/<suite_name>/
 
 - `runs/<task_name>/` 是单个 `model × method × trial` 的 trial run 目录。
 - `task_status.json` 会在调度过程中持续刷新，记录每个 task 的状态、GPU、日志和结果文件路径。
-- `summary.md` 汇总 5 次 trial 的均值、失败实验、未完成实验组、训练耗时排名和长耗时 trial。
+- `gpu_availability.log` 记录 `--gpus` 范围内每次调度轮询看到的显存、连续空闲秒数和 `ready` / `busy` / `external_cooldown` 状态。
+- `summary.md` 汇总 5 次 trial 的均值、失败实验、未完成实验组、训练耗时排名和长耗时 trial，并单独写出 evaluation scope 与 `adap_tokmem*` 的 adaptation scope。
 - `summary.json` 提供与 `summary.md` 对齐的结构化结果。
 
 ## 结构化结果

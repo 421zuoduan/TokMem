@@ -97,7 +97,7 @@ def build_training_summary_payload(run_name, all_results, experiment_type="tokme
                 "avg_logit_bias_loss": _summary_loss_value(
                     metrics,
                     "avg_logit_bias_loss",
-                    metrics.get("use_logit_bias", False),
+                    metrics.get("use_logit_bias", False) or metrics.get("use_tool_head_replacement", False),
                 ),
             }
         )

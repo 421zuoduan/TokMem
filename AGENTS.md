@@ -144,6 +144,7 @@ When code changes affect how people run, interpret, analyze, or compare experime
 Documentation updates are required when changes affect any of the following:
 
 - training or evaluation entrypoints, launcher scripts, CLI flags, default values, or required environment setup
+- batch size changes in paper-suite launchers or experiment defaults; update `docs/paper-suite-batch-size-comparison.md` in the same change
 - run artifact layout, checkpoint naming, log files, saved JSON outputs, or the meaning of files under `compositional/runs/`, `atomic/logs/`, or `results/`
 - dataset sources, filtering rules, split construction, sample-count assumptions, generated file names, or cached-data behavior
 - metric definitions, evaluation logic, analysis workflow, or the interpretation of reported numbers such as `routing acc`, `Task Prediction Accuracy`, `Rouge-L`, exact match, tool accuracy, or parse-error-related metrics

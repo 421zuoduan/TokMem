@@ -19,6 +19,8 @@ import os
 import random
 import numpy as np
 
+from generation_baseline_utils import prepare_run_dir, write_json
+
 # Import our custom modules
 from task_model import TaskCallingModel, print_model_info
 from task_dataset import (
@@ -149,6 +151,7 @@ def load_split_cache(args):
         payload["val_data"],
         payload["test_data"],
         payload["task_names"],
+        cached_metadata,
         cache_path,
     )
 
@@ -192,6 +195,8 @@ def main():
                         help='Validate every n steps')
     parser.add_argument('--split_cache_path', type=str, default=None,
                         help='Path to a cached train/val/test split to load instead of sampling tasks at runtime')
+    parser.add_argument('--run_dir', type=str, default=None,
+                        help='Directory where logs and results will be written')
     parser.add_argument('--use_logit_bias', action='store_true',
                         help='Train and apply a first-step task logit-bias head over reserved task tokens')
     parser.add_argument('--logit_bias_loss_weight', type=float, default=1.0,
@@ -204,6 +209,12 @@ def main():
     
     # Set random seed first for full reproducibility
     set_random_seed(args.seed)
+    run_dir = prepare_run_dir(
+        run_dir=args.run_dir,
+        experiment_tag="tokmem",
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+    )
     print()
     
     print("=" * 60)
@@ -222,6 +233,7 @@ def main():
     print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
     print(f"Logit bias network: {args.logit_bias_network}")
     print(f"Logit bias scale: {args.logit_bias_scale}")
+    print(f"Run directory: {run_dir}")
     if any(x is not None for x in [args.train_size, args.val_size, args.test_size]):
         print(f"Sizes mode per task - Train: {args.train_size}, Val: {args.val_size}, Test: {args.test_size} (test is selected first, stable)")
     if args.split_cache_path:
@@ -233,7 +245,7 @@ def main():
     
     # Set up logging
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging()
+    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(log_dir=run_dir)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
     print()
@@ -248,7 +260,7 @@ def main():
 
     if args.split_cache_path:
         print(f"Loading cached split from: {os.path.abspath(args.split_cache_path)}")
-        train_data, val_data, test_data, task_names, split_cache_path = load_split_cache(args)
+        train_data, val_data, test_data, task_names, split_cache_metadata, split_cache_path = load_split_cache(args)
         effective_num_tasks = len(task_names)
         print(
             f"Cached split loaded. Train: {len(train_data)}, Val: {len(val_data)}, "
@@ -256,6 +268,7 @@ def main():
         )
     else:
         effective_num_tasks = args.num_tasks
+        split_cache_metadata = None
         split_cache_path = None
 
     # Add reserved special tokens to the tokenizer
@@ -280,6 +293,50 @@ def main():
             test_size=args.test_size,
             few_shot=args.few_shot,
         )
+
+    if split_cache_metadata is not None:
+        write_json(os.path.join(run_dir, "split_cache_metadata.json"), split_cache_metadata)
+
+    write_json(
+        os.path.join(run_dir, "run_config.json"),
+        {
+            "mode": "tokmem",
+            "model_name": args.model_name,
+            "tasks_dir": os.path.abspath(args.tasks_dir),
+            "num_tasks": effective_num_tasks,
+            "train_size": args.train_size,
+            "val_size": args.val_size,
+            "test_size": args.test_size,
+            "batch_size": args.batch_size,
+            "val_batch_size": args.val_batch_size,
+            "test_batch_size": args.test_batch_size,
+            "max_length": args.max_length,
+            "max_instruction_tokens": args.max_instruction_tokens,
+            "num_epochs": args.num_epochs,
+            "lr": args.lr,
+            "device": args.device,
+            "device_map": args.device_map,
+            "seed": args.seed,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "shuffle_train": args.shuffle_train,
+            "few_shot": args.few_shot,
+            "validate_every_n_steps": args.validate_every_n_steps,
+            "split_cache_path": split_cache_path,
+            "run_dir": run_dir,
+            "use_logit_bias": args.use_logit_bias,
+            "logit_bias_loss_weight": args.logit_bias_loss_weight,
+            "logit_bias_network": args.logit_bias_network,
+            "logit_bias_scale": args.logit_bias_scale,
+            "timestamp": timestamp,
+            "dataset_summary": {
+                "train_examples": len(train_data),
+                "val_examples": len(val_data),
+                "test_examples": len(test_data),
+                "task_count": len(task_names),
+            },
+            "args": vars(args),
+        },
+    )
     
     # Initialize model
     print("Initializing Task Calling Model...")
@@ -329,6 +386,7 @@ def main():
     )
     
     # Training
+    train_results = None
     if not args.skip_training and train_dataloader:
         print("Starting Training...")
         train_results = train_task_calling_model(
@@ -340,11 +398,21 @@ def main():
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             device=args.device,
             timestamp=timestamp,
+            save_dir=os.path.join(run_dir, "saved_models"),
             validate_every_n_steps=args.validate_every_n_steps,
             use_logit_bias=args.use_logit_bias,
             logit_bias_loss_weight=args.logit_bias_loss_weight,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
+        write_json(
+            os.path.join(run_dir, "train_results.json"),
+            {
+                "avg_total_loss": train_results["avg_total_loss"],
+                "avg_logit_bias_loss": train_results["avg_logit_bias_loss"],
+                "best_val_loss": train_results["best_val_loss"],
+                "best_model_path": train_results["best_model_path"],
+            },
+        )
         
         # Load best model state if validation was performed and best model was found
         if train_results['best_model_state'] is not None:
@@ -381,6 +449,31 @@ def main():
         print(f"   Exact Match Accuracy: {results['exact_accuracy']:.3f}")
         print(f"   Average Response Score: {results['avg_response_score']:.3f}")
         print("=" * 50)
+        write_json(os.path.join(run_dir, "evaluation_results.json"), results)
+        write_json(
+            os.path.join(run_dir, "run_summary.json"),
+            {
+                "mode": "tokmem",
+                "run_dir": run_dir,
+                "model_name": args.model_name,
+                "split_cache_path": split_cache_path,
+                "metrics": results,
+                "dataset_summary": {
+                    "train_examples": len(train_data),
+                    "val_examples": len(val_data),
+                    "test_examples": len(test_data),
+                    "task_count": len(task_names),
+                },
+                "artifacts": {
+                    "training_log": training_log,
+                    "evaluation_log": evaluation_log,
+                    "run_config": os.path.join(run_dir, "run_config.json"),
+                    "train_results": os.path.join(run_dir, "train_results.json") if train_results is not None else None,
+                    "evaluation_results": os.path.join(run_dir, "evaluation_results.json"),
+                    "best_task_tokens": train_results["best_model_path"] if train_results is not None else None,
+                },
+            },
+        )
         
         # # Optional: Ground truth task evaluation for comparison
         # print("\nRunning ground truth task evaluation for comparison...")

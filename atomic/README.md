@@ -23,16 +23,17 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 - `--train_size`, `--val_size`, `--test_size`: Number of instances per task for training, validation, and testing.
 - `--shuffle_train` / `--no-shuffle_train`: Control whether the training dataloader shuffles samples. The maintained default is `--shuffle_train`.
 - `--split_cache_path`: Load `train_data`, `val_data`, `test_data`, and `task_names` from a cached split file instead of runtime sampling.
+- `--run_dir`: Write logs, checkpoints, and result JSONs into one explicit run folder.
 - `--use_logit_bias`: Enable the first-step task logit-bias head over reserved task tokens.
 - `--logit_bias_loss_weight`: Weight on the detached hidden-state bias-head supervision loss.
 - `--logit_bias_network`: Bias-head architecture, `linear` or `mlp`.
 - `--logit_bias_scale`: Decode-time scale applied to the bias logits on the first generated token.
 
-## Fairness And Batch Size
+## Paper Suite Batch Size
 
-For current `atomic` fairness guidance and single-GPU memory-based batch recommendations, see:
+For current `atomic` paper-suite batch size settings, see:
 
-- [docs/atomic/2026-04-24-atomic-fairness-and-memory-batch-size.md](/data/shilong/tokmem/docs/atomic/2026-04-24-atomic-fairness-and-memory-batch-size.md)
+- [docs/paper-suite-batch-size-comparison.md](/data/shilong/tokmem/docs/paper-suite-batch-size-comparison.md)
 
 ## Usage
 
@@ -51,6 +52,8 @@ This path reuses a precomputed cached split and enables the first-step logit-bia
 bash main_tokmem_fixed_split.sh
 ```
 
+`main_in_domain.py` now writes `run_config.json`, `train_results.json`, `evaluation_results.json`, and `run_summary.json` into the active run directory. When `--split_cache_path` is used, it also writes `split_cache_metadata.json` there.
+
 The Qwen 0.5B fixed-split baseline launcher under `scripts/atomic/qwen_0_5b/` uses `--device_map balanced` and a smaller validation batch to match the archived multi-GPU memory layout.
 
 ### Raw base-model evaluation
@@ -60,7 +63,7 @@ This path loads the base model directly and evaluates with an `instruction + que
 bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_base_model.sh
 ```
 
-The Python entrypoint is `main_base_model.py`. It writes `run_config.json`, `evaluation_results.json`, `evaluation_predictions.jsonl`, and `run_summary.json` into one folder under `atomic/runs/`.
+The Python entrypoint is `main_base_model.py`. It writes `run_config.json`, `evaluation_results.json`, `evaluation_predictions.jsonl`, and `run_summary.json` into one folder under `atomic/runs/`. The prediction JSONL uses a compact default with query, expected response, predicted response, per-example metrics, and task metadata. Use `--save_verbose_predictions` when debugging requires the repeated instruction text, prompt preview, and full decoded sequence.
 
 ### SBERT RAG baseline
 This path uses the raw base model for generation, retrieves demonstrations with `Sentence-BERT`, and formats the prompt using the repo's few-shot conversational layout:
@@ -69,10 +72,10 @@ This path uses the raw base model for generation, retrieves demonstrations with 
 bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_rag.sh
 ```
 
-The Python entrypoint is `main_rag_baseline.py`. It can reuse a saved SBERT corpus through `--corpus_cache_path` and records both generation metrics and retrieval top-1 / top-k accuracy in `evaluation_results.json`.
+The Python entrypoint is `main_rag_baseline.py`. It can reuse a saved SBERT corpus through `--corpus_cache_path` and records both generation metrics and retrieval top-1 / top-k accuracy in `evaluation_results.json`. Retrieval is precomputed in batches before the generator model is loaded. The default retriever placement uses `cuda` when available and falls back to `cpu`; pass `--retriever_device cpu` only for runs that deliberately isolate SBERT from generator GPUs. `--retrieval_batch_size` controls retrieval precompute batch size. Use `--save_verbose_predictions` when debugging requires the repeated instruction text, prompt preview, and full decoded sequence.
 
 ### Paper suite launcher
-This launcher schedules the maintained fixed-split atomic comparison suite across the local `Qwen 0.5B`, `Llama 3B`, and `Llama 8B` checkpoints. The default scope is the existing `700-task` cached split with five methods: `base`, `rag`, `lora`, `tokmem`, and `tokmem_logit_bias`.
+This launcher schedules the maintained fixed-split atomic comparison suite across the local `Qwen 0.5B`, `Llama 3B`, and `Llama 8B` checkpoints. The default scope is the existing `700-task` cached split with five methods: `base`, `rag`, `lora`, `tokmem`, and `tokmem_logit_bias`. Each model/method group runs three trials and reports means over successful groups.
 
 ```bash
 bash ../scripts/atomic/run_paper_atomic_suite.sh --gpus 0,1,2,3
@@ -84,6 +87,10 @@ The suite writes all artifacts under `results/atomic/<suite-name>/`:
 - task manifest: `results/atomic/<suite-name>/task_manifest.tsv`
 - task status: `results/atomic/<suite-name>/task_status.json`
 - summary: `results/atomic/<suite-name>/summary.md`
+- scheduler log: `results/atomic/<suite-name>/scheduler.log`
+- GPU availability log: `results/atomic/<suite-name>/gpu_availability.log`
+
+The suite scheduler only monitors and schedules the GPUs listed by `--gpus`. Suite-owned tasks reserve their assigned GPU for the full process lifetime, including RAG corpus processing before generator loading. GPUs that are already free, or just finished a suite-owned task, can launch the next task immediately once `memory.used <= 2048 MiB`; the 300-second availability window applies after external GPU occupancy. `--poll-seconds` controls the sampling interval. Each task still writes its own runtime `gpu_monitor.log` under the task run directory.
 
 Default `700-task` batch settings in the launcher:
 

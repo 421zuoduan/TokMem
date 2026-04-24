@@ -261,6 +261,7 @@ def build_prediction_row(
     prompt_text,
     mode,
     extra=None,
+    include_verbose=False,
 ):
     """Build a per-example prediction row."""
     expected_tasks = example.get("tasks", ["unknown"])
@@ -285,7 +286,6 @@ def build_prediction_row(
 
     row = {
         "mode": mode,
-        "instruction": example.get("instruction", ""),
         "query": example.get("query", ""),
         "expected_task": expected_tasks[0] if expected_tasks else None,
         "expected_tasks": expected_tasks,
@@ -294,9 +294,15 @@ def build_prediction_row(
         "predicted_response": predicted_response,
         "response_exact_match": response_exact_match,
         "response_rouge_l": round(response_rouge_l, 4),
-        "prompt_preview": prompt_text[:500],
-        "full_generated_sequence": full_generated_sequence,
     }
+    if include_verbose:
+        row.update(
+            {
+                "instruction": example.get("instruction", ""),
+                "prompt_preview": prompt_text[:500],
+                "full_generated_sequence": full_generated_sequence,
+            }
+        )
     if extra:
         row.update(extra)
     return row
@@ -312,6 +318,7 @@ def evaluate_generation_batches(
     batch_size,
     mode,
     logger=None,
+    include_verbose_predictions=False,
 ):
     """Run batch generation and evaluation with a callback that builds prompts."""
     model.eval()
@@ -363,16 +370,17 @@ def evaluate_generation_batches(
             all_predictions.append(predicted_response)
             all_references.append(example["responses"])
             all_task_names.append(example["tasks"][0] if example.get("tasks") else "unknown")
-            prediction_rows.append(
-                build_prediction_row(
-                    example=example,
-                    predicted_response=predicted_response,
-                    full_generated_sequence=generated_text,
-                    prompt_text=prompt_text,
-                    mode=mode,
-                    extra=batch_payloads[offset].get("row_extra"),
-                )
+            row = build_prediction_row(
+                example=example,
+                predicted_response=predicted_response,
+                full_generated_sequence=generated_text,
+                prompt_text=prompt_text,
+                mode=mode,
+                extra=batch_payloads[offset].get("row_extra"),
+                include_verbose=include_verbose_predictions,
             )
+            row["example_index"] = start_idx + offset
+            prediction_rows.append(row)
 
         processed = min(start_idx + len(batch_examples), total_examples)
         progress_message = f"Progress: {processed}/{total_examples} ({processed / total_examples * 100:.1f}%)"

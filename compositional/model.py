@@ -57,15 +57,19 @@ class FunctionCallingModel(nn.Module):
     def __init__(self, model_name,
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
                  decouple_embeddings=False, lora_config=None, use_eoc=False,
-                 use_logit_bias=False, logit_bias_network="linear", logit_bias_scale=1.0):
+                 use_logit_bias=False, use_tool_head_replacement=False,
+                 logit_bias_network="linear", logit_bias_scale=1.0):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name, local_files_only=True)
         self.use_eoc = use_eoc
         self.use_logit_bias = use_logit_bias
+        self.use_tool_head_replacement = use_tool_head_replacement
         self.logit_bias_network = logit_bias_network
         self.logit_bias_scale = logit_bias_scale
-        if self.use_logit_bias and not self.use_eoc:
-            raise ValueError("--use_logit_bias requires --use_eoc")
+        if self.use_logit_bias and self.use_tool_head_replacement:
+            raise ValueError("--use_logit_bias and --use_tool_head_replacement are decode-time alternatives")
+        if (self.use_logit_bias or self.use_tool_head_replacement) and not self.use_eoc:
+            raise ValueError("--use_logit_bias and --use_tool_head_replacement require --use_eoc")
         if self.logit_bias_network not in {"linear", "mlp"}:
             raise ValueError(f"Unsupported logit_bias_network: {self.logit_bias_network}")
 
@@ -181,7 +185,7 @@ class FunctionCallingModel(nn.Module):
             self.trainable_tool_input_embeddings = self.trainable_tool_embeddings
             self.trainable_tool_output_embeddings = self.trainable_tool_embeddings
 
-        if self.use_logit_bias:
+        if self.use_logit_bias or self.use_tool_head_replacement:
             self.logit_bias_head = build_logit_bias_head(
                 self.config.hidden_size,
                 self.num_tools,
@@ -339,7 +343,7 @@ class FunctionCallingModel(nn.Module):
         logit_bias_params = 0
         if self.logit_bias_head is not None:
             logit_bias_params = sum(p.numel() for p in self.logit_bias_head.parameters())
-            print(f"Logit bias head parameters: {logit_bias_params:,}")
+            print(f"Auxiliary tool-head parameters: {logit_bias_params:,}")
 
         # Count LoRA parameters if using LoRA
         if self.lora_config:
@@ -415,6 +419,41 @@ class FunctionCallingModel(nn.Module):
         logits = logits.clone()
         logits[active_indices[:, None], tool_token_ids[None, :]] += tool_bias
         return logits
+
+    def _replace_tool_triggers_with_head_predictions(
+        self,
+        next_tokens,
+        hidden_states,
+        active_decision_rows,
+        temperature=0.6,
+        top_p=0.9,
+        do_sample=False,
+    ):
+        """Replace base-LM tool triggers with auxiliary-head tool predictions."""
+        if self.logit_bias_head is None or not active_decision_rows.any():
+            return next_tokens
+        if hidden_states is None:
+            raise ValueError("Boundary hidden states are required when use_tool_head_replacement is enabled")
+
+        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=next_tokens.device)
+        is_tool_token = (next_tokens[:, None] == tool_token_ids[None, :]).any(dim=-1)
+        replacement_rows = active_decision_rows & is_tool_token
+        if not replacement_rows.any():
+            return next_tokens
+
+        replacement_indices = replacement_rows.nonzero(as_tuple=False).squeeze(-1)
+        tool_logits = self._get_logit_bias_scores(hidden_states[replacement_indices])
+        replacement_tool_ids = self._sample_next_tokens(
+            tool_logits,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        replacement_token_ids = tool_token_ids[replacement_tool_ids]
+
+        replaced_tokens = next_tokens.clone()
+        replaced_tokens[replacement_indices] = replacement_token_ids.to(dtype=replaced_tokens.dtype)
+        return replaced_tokens
 
     def _get_core_model(self):
         """Return the underlying causal LM."""
@@ -539,13 +578,21 @@ class FunctionCallingModel(nn.Module):
         top_p=0.9,
         do_sample=False,
         use_logit_bias=None,
+        use_tool_head_replacement=None,
     ):
         """Generate complete sequence: predict tool, then generate function call"""
         self.eval()
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
+        resolved_use_tool_head_replacement = (
+            self.use_tool_head_replacement
+            if use_tool_head_replacement is None
+            else use_tool_head_replacement
+        )
+        if resolved_use_logit_bias and resolved_use_tool_head_replacement:
+            raise ValueError("use_logit_bias and use_tool_head_replacement are decode-time alternatives")
         
         with torch.no_grad():
-            if not resolved_use_logit_bias:
+            if not resolved_use_logit_bias and not resolved_use_tool_head_replacement:
                 # Use native generation - our overrides make the custom embeddings/logits transparent
                 generated = self.model.generate(
                     input_ids=user_tokens,
@@ -576,7 +623,8 @@ class FunctionCallingModel(nn.Module):
                 )
                 active_decision_rows = decision_context & ~finished
                 need_last_hidden_state = bool(
-                    resolved_use_logit_bias and active_decision_rows.any()
+                    (resolved_use_logit_bias or resolved_use_tool_head_replacement)
+                    and active_decision_rows.any()
                 )
                 next_logits, last_hidden_states, past_key_values = self._generation_forward_step(
                     input_ids=step_input_ids,
@@ -599,6 +647,15 @@ class FunctionCallingModel(nn.Module):
                     top_p=top_p,
                     do_sample=do_sample
                 )
+                if resolved_use_tool_head_replacement and active_decision_rows.any():
+                    next_tokens = self._replace_tool_triggers_with_head_predictions(
+                        next_tokens=next_tokens,
+                        hidden_states=last_hidden_states,
+                        active_decision_rows=active_decision_rows,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
                 next_tokens = next_tokens.masked_fill(finished, tokenizer.eos_token_id)
 
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
@@ -623,12 +680,20 @@ class FunctionCallingModel(nn.Module):
         do_sample=False,
         use_eoc=None,
         use_logit_bias=None,
+        use_tool_head_replacement=None,
     ):
         """Generate sequence where predicted tool tokens are replaced with ground truth tool tokens"""
         self.eval()
 
         resolved_use_eoc = self.use_eoc if use_eoc is None else use_eoc
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
+        resolved_use_tool_head_replacement = (
+            self.use_tool_head_replacement
+            if use_tool_head_replacement is None
+            else use_tool_head_replacement
+        )
+        if resolved_use_logit_bias and resolved_use_tool_head_replacement:
+            raise ValueError("use_logit_bias and use_tool_head_replacement are decode-time alternatives")
         
         # Convert ground truth tool names to token IDs
         gt_tool_token_ids = []
@@ -668,7 +733,8 @@ class FunctionCallingModel(nn.Module):
 
                 analysis_rows = active_decision_rows & ~force_ground_truth_rows
                 need_last_hidden_state = bool(
-                    resolved_use_logit_bias and analysis_rows.any()
+                    (resolved_use_logit_bias or resolved_use_tool_head_replacement)
+                    and analysis_rows.any()
                 )
                 logits, last_hidden_states, past_key_values = self._generation_forward_step(
                     input_ids=step_input_ids,
@@ -691,6 +757,15 @@ class FunctionCallingModel(nn.Module):
                 if next_tokens is None:
                     next_tokens = self._sample_next_tokens(
                         selection_logits,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                if resolved_use_tool_head_replacement and analysis_rows.any():
+                    next_tokens = self._replace_tool_triggers_with_head_predictions(
+                        next_tokens=next_tokens,
+                        hidden_states=last_hidden_states,
+                        active_decision_rows=analysis_rows,
                         temperature=temperature,
                         top_p=top_p,
                         do_sample=do_sample,

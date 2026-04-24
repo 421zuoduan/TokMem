@@ -8,6 +8,8 @@ SUITE_TIMESTAMP="$(date -u +%Y%m%d_%H%M%S)"
 SUITE_NAME="paper_atomic_700task_${SUITE_TIMESTAMP}"
 GPU_IDS_CSV="0,1,2,3"
 POLL_SECONDS=5
+GPU_MEMORY_LIMIT_MIB=2048
+GPU_IDLE_REQUIRED_SECONDS=300
 RERUN_FAILED=0
 EXPLICIT_SUITE_NAME=0
 
@@ -19,7 +21,7 @@ Runs the maintained atomic fixed-split suite for:
 - default split: 700 tasks / train 500 / val 10 / test 50 / seed 42
 - models: qwen0_5b, llama3b, llama8b
 - methods: base, rag, lora, tokmem, tokmem_logit_bias
-- 5 trials per model/method, seed fixed to 42 for every trial to match the cached split metadata
+- 3 trials per model/method, seed fixed to 42 for every trial to match the cached split metadata
 
 Artifacts:
 - runs:    results/atomic/<suite-name>/runs/
@@ -27,6 +29,10 @@ Artifacts:
 - status:  results/atomic/<suite-name>/task_status.json
 
 Notes:
+- GPU scheduling only considers the IDs passed by --gpus.
+- Suite-owned tasks keep their GPU reserved for the full process lifetime.
+- GPUs that are already free, or just finished a suite-owned task, are eligible immediately.
+- A GPU that was externally busy is eligible after memory.used stays <= 2048 MiB for 300 consecutive seconds.
 - --rerun-failed requires --suite-name <existing-suite>
 - the default split cache must exist before launch
 EOF
@@ -90,6 +96,7 @@ STATUS_FILE="$SUITE_DIR/task_status.json"
 SUMMARY_FILE="$SUITE_DIR/summary.md"
 SUMMARY_JSON_FILE="$SUITE_DIR/summary.json"
 SCHEDULER_LOG="$SUITE_DIR/scheduler.log"
+GPU_AVAILABILITY_LOG="$SUITE_DIR/gpu_availability.log"
 SUITE_CONFIG_FILE="$SUITE_DIR/suite_config.json"
 
 if [[ "$RERUN_FAILED" -eq 1 && "$EXPLICIT_SUITE_NAME" -ne 1 ]]; then
@@ -103,15 +110,14 @@ if [[ "$RERUN_FAILED" -eq 1 && ! -d "$SUITE_DIR" ]]; then
 fi
 
 RAG_RETRIEVAL_TOP_K=3
-TOKMEM_GRADIENT_ACCUMULATION_STEPS=1
 TOKMEM_EPOCHS=1
 TOKMEM_LR="5e-3"
 TOKMEM_VALIDATE_EVERY_N_STEPS=1000
 LOGIT_BIAS_LOSS_WEIGHT="0.1"
 LOGIT_BIAS_NETWORK="linear"
 LOGIT_BIAS_SCALE="1.0"
-TRIAL_COUNT=5
-TRIAL_SEEDS=(42 42 42 42 42)
+TRIAL_COUNT=3
+TRIAL_SEEDS=(42 42 42)
 
 MODEL_KEYS=(qwen0_5b llama3b llama8b)
 METHODS=(base rag lora tokmem tokmem_logit_bias)
@@ -124,39 +130,51 @@ declare -A MODEL_PATHS=(
 )
 
 declare -A LORA_TRAIN_BATCH_SIZES=(
-    [qwen0_5b]=16
+    [qwen0_5b]=8
+    [llama3b]=2
+    [llama8b]=2
+)
+
+declare -A LORA_EVAL_BATCH_SIZES=(
+    [qwen0_5b]=32
     [llama3b]=16
     [llama8b]=8
 )
 
-declare -A LORA_EVAL_BATCH_SIZES=(
-    [qwen0_5b]=64
-    [llama3b]=64
-    [llama8b]=48
+declare -A LORA_GRADIENT_ACCUMULATION_STEPS=(
+    [qwen0_5b]=1
+    [llama3b]=2
+    [llama8b]=2
 )
 
 declare -A TOKMEM_TRAIN_BATCH_SIZES=(
-    [qwen0_5b]=16
+    [qwen0_5b]=8
+    [llama3b]=4
+    [llama8b]=2
+)
+
+declare -A TOKMEM_EVAL_BATCH_SIZES=(
+    [qwen0_5b]=64
     [llama3b]=32
     [llama8b]=16
 )
 
-declare -A TOKMEM_EVAL_BATCH_SIZES=(
-    [qwen0_5b]=256
-    [llama3b]=128
-    [llama8b]=64
+declare -A TOKMEM_GRADIENT_ACCUMULATION_STEPS=(
+    [qwen0_5b]=1
+    [llama3b]=1
+    [llama8b]=2
 )
 
 declare -A BASE_TEST_BATCH_SIZES=(
-    [qwen0_5b]=1024
-    [llama3b]=512
-    [llama8b]=256
-)
-
-declare -A RAG_TEST_BATCH_SIZES=(
     [qwen0_5b]=512
     [llama3b]=256
     [llama8b]=128
+)
+
+declare -A RAG_TEST_BATCH_SIZES=(
+    [qwen0_5b]=256
+    [llama3b]=128
+    [llama8b]=64
 )
 
 IFS=',' read -r -a GPU_IDS <<< "$GPU_IDS_CSV"
@@ -169,7 +187,7 @@ conda activate tokmem
 
 export TOKENIZERS_PARALLELISM=false
 
-touch "$SCHEDULER_LOG"
+touch "$SCHEDULER_LOG" "$GPU_AVAILABILITY_LOG"
 
 log() {
     local ts
@@ -178,8 +196,9 @@ log() {
 }
 
 write_suite_config() {
-    python - "$SUITE_CONFIG_FILE" "$SUITE_NAME" "$GPU_IDS_CSV" "$POLL_SECONDS" "$RERUN_FAILED" \
-        "$TASKS_DIR" "$SPLIT_CACHE" "$NUM_TASKS" "$TRAIN_SIZE" "$VAL_SIZE" "$TEST_SIZE" "$SEED" \
+    python - "$SUITE_CONFIG_FILE" "$SUITE_NAME" "$GPU_IDS_CSV" "$POLL_SECONDS" "$GPU_MEMORY_LIMIT_MIB" \
+        "$GPU_IDLE_REQUIRED_SECONDS" "$RERUN_FAILED" "$TASKS_DIR" "$SPLIT_CACHE" \
+        "$NUM_TASKS" "$TRAIN_SIZE" "$VAL_SIZE" "$TEST_SIZE" "$SEED" \
         "$MAX_LENGTH" "$MAX_INSTRUCTION_TOKENS" "$MAX_NEW_TOKENS" <<'PY'
 import json
 import sys
@@ -190,42 +209,43 @@ payload = {
     "suite_name": sys.argv[2],
     "gpu_ids": sys.argv[3].split(","),
     "poll_seconds": int(sys.argv[4]),
-    "rerun_failed": bool(int(sys.argv[5])),
-    "tasks_dir": sys.argv[6],
-    "split_cache_path": sys.argv[7],
+    "gpu_memory_limit_mib": int(sys.argv[5]),
+    "gpu_idle_required_seconds": int(sys.argv[6]),
+    "rerun_failed": bool(int(sys.argv[7])),
+    "tasks_dir": sys.argv[8],
+    "split_cache_path": sys.argv[9],
     "dataset": {
-        "num_tasks": int(sys.argv[8]),
-        "train_size": int(sys.argv[9]),
-        "val_size": int(sys.argv[10]),
-        "test_size": int(sys.argv[11]),
-        "seed": int(sys.argv[12]),
-        "max_length": int(sys.argv[13]),
-        "max_instruction_tokens": int(sys.argv[14]),
-        "max_new_tokens": int(sys.argv[15]),
+        "num_tasks": int(sys.argv[10]),
+        "train_size": int(sys.argv[11]),
+        "val_size": int(sys.argv[12]),
+        "test_size": int(sys.argv[13]),
+        "seed": int(sys.argv[14]),
+        "max_length": int(sys.argv[15]),
+        "max_instruction_tokens": int(sys.argv[16]),
+        "max_new_tokens": int(sys.argv[17]),
     },
-    "trial_count": 5,
-    "trial_seeds": [42, 42, 42, 42, 42],
+    "trial_count": 3,
+    "trial_seeds": [42, 42, 42],
         "batch_settings": {
             "qwen0_5b": {
-            "lora": {"train_batch_size": 16, "eval_batch_size": 64},
-            "tokmem_family": {"train_batch_size": 16, "eval_batch_size": 256},
-            "base": {"test_batch_size": 1024},
-            "rag": {"test_batch_size": 512, "retrieval_top_k": 3},
-        },
-        "llama3b": {
-            "lora": {"train_batch_size": 16, "eval_batch_size": 64},
-            "tokmem_family": {"train_batch_size": 32, "eval_batch_size": 128},
-            "base": {"test_batch_size": 256},
+            "lora": {"train_batch_size": 8, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
+            "tokmem_family": {"train_batch_size": 8, "eval_batch_size": 64, "gradient_accumulation_steps": 1},
+            "base": {"test_batch_size": 512},
             "rag": {"test_batch_size": 256, "retrieval_top_k": 3},
         },
-        "llama8b": {
-            "lora": {"train_batch_size": 8, "eval_batch_size": 48},
-            "tokmem_family": {"train_batch_size": 16, "eval_batch_size": 64},
+        "llama3b": {
+            "lora": {"train_batch_size": 2, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
+            "tokmem_family": {"train_batch_size": 4, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
             "base": {"test_batch_size": 256},
             "rag": {"test_batch_size": 128, "retrieval_top_k": 3},
         },
+        "llama8b": {
+            "lora": {"train_batch_size": 2, "eval_batch_size": 8, "gradient_accumulation_steps": 2},
+            "tokmem_family": {"train_batch_size": 2, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
+            "base": {"test_batch_size": 128},
+            "rag": {"test_batch_size": 64, "retrieval_top_k": 3},
+        },
         "shared_training": {
-            "gradient_accumulation_steps": 1,
             "epochs": 1,
             "lr": 5e-3,
             "validate_every_n_steps": 1000,
@@ -309,8 +329,10 @@ build_task_command() {
     local rag_test_batch_size="${RAG_TEST_BATCH_SIZES[$model_key]}"
     local lora_train_batch_size="${LORA_TRAIN_BATCH_SIZES[$model_key]}"
     local lora_eval_batch_size="${LORA_EVAL_BATCH_SIZES[$model_key]}"
+    local lora_gradient_accumulation_steps="${LORA_GRADIENT_ACCUMULATION_STEPS[$model_key]}"
     local tokmem_train_batch_size="${TOKMEM_TRAIN_BATCH_SIZES[$model_key]}"
     local tokmem_eval_batch_size="${TOKMEM_EVAL_BATCH_SIZES[$model_key]}"
+    local tokmem_gradient_accumulation_steps="${TOKMEM_GRADIENT_ACCUMULATION_STEPS[$model_key]}"
 
     case "$method" in
         base)
@@ -372,7 +394,7 @@ build_task_command() {
                 --test_batch_size "$lora_eval_batch_size"
                 --num_epochs "$TOKMEM_EPOCHS"
                 --lr "$TOKMEM_LR"
-                --gradient_accumulation_steps "$TOKMEM_GRADIENT_ACCUMULATION_STEPS"
+                --gradient_accumulation_steps "$lora_gradient_accumulation_steps"
                 --validate_every_n_steps "$TOKMEM_VALIDATE_EVERY_N_STEPS"
                 --seed "$seed"
                 --save_path "$task_dir/saved_models/lora_best"
@@ -392,7 +414,7 @@ build_task_command() {
                 --split_cache_path "$SPLIT_CACHE"
                 --num_epochs "$TOKMEM_EPOCHS"
                 --batch_size "$tokmem_train_batch_size"
-                --gradient_accumulation_steps "$TOKMEM_GRADIENT_ACCUMULATION_STEPS"
+                --gradient_accumulation_steps "$tokmem_gradient_accumulation_steps"
                 --max_length "$MAX_LENGTH"
                 --max_instruction_tokens "$MAX_INSTRUCTION_TOKENS"
                 --lr "$TOKMEM_LR"
@@ -400,6 +422,7 @@ build_task_command() {
                 --test_batch_size "$tokmem_eval_batch_size"
                 --validate_every_n_steps "$TOKMEM_VALIDATE_EVERY_N_STEPS"
                 --seed "$seed"
+                --run_dir "$task_dir"
             )
             if [[ "$method" == "tokmem_logit_bias" ]]; then
                 TASK_CMD+=(
@@ -655,6 +678,8 @@ EOF
         exit "$local_exit_code"
     ) &
 
+    unset GPU_IDLE_SINCE["$gpu_id"]
+    unset GPU_EXTERNAL_COOLDOWN_REQUIRED["$gpu_id"]
     GPU_PID["$gpu_id"]=$!
     GPU_TASK_INDEX["$gpu_id"]=$task_index
 }
@@ -704,6 +729,91 @@ all_gpus_idle() {
         fi
     done
     return 0
+}
+
+gpu_memory_used_mib() {
+    local gpu_id="$1"
+    nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$gpu_id" 2>/dev/null \
+        | awk 'NR == 1 {gsub(/^[ \t]+|[ \t]+$/, "", $0); print $0}'
+}
+
+record_gpu_availability() {
+    local now_epoch="$1"
+    local now_iso gpu_id memory_used idle_since idle_seconds state cooldown_required
+    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    for gpu_id in "${GPU_IDS[@]}"; do
+        if [[ -n "${GPU_PID[$gpu_id]-}" ]]; then
+            unset GPU_IDLE_SINCE["$gpu_id"]
+            printf '[%s]\tgpu=%s\tstate=suite_busy\tmemory_mib=unknown\tidle_seconds=0\n' \
+                "$now_iso" "$gpu_id" >> "$GPU_AVAILABILITY_LOG"
+            continue
+        fi
+
+        if memory_used="$(gpu_memory_used_mib "$gpu_id")" && [[ "$memory_used" =~ ^[0-9]+$ ]]; then
+            if (( memory_used <= GPU_MEMORY_LIMIT_MIB )); then
+                cooldown_required="${GPU_EXTERNAL_COOLDOWN_REQUIRED[$gpu_id]-0}"
+                if [[ "$cooldown_required" == "1" ]]; then
+                    if [[ -z "${GPU_IDLE_SINCE[$gpu_id]-}" ]]; then
+                        GPU_IDLE_SINCE["$gpu_id"]="$now_epoch"
+                        log "GPU external availability window started gpu=$gpu_id memory_mib=$memory_used limit_mib=$GPU_MEMORY_LIMIT_MIB required_seconds=$GPU_IDLE_REQUIRED_SECONDS"
+                    fi
+                    idle_since="${GPU_IDLE_SINCE[$gpu_id]}"
+                    idle_seconds=$((now_epoch - idle_since))
+                    state="external_cooldown"
+                    if (( idle_seconds >= GPU_IDLE_REQUIRED_SECONDS )); then
+                        state="ready"
+                    fi
+                else
+                    if [[ -z "${GPU_IDLE_SINCE[$gpu_id]-}" ]]; then
+                        GPU_IDLE_SINCE["$gpu_id"]=$((now_epoch - GPU_IDLE_REQUIRED_SECONDS))
+                        log "GPU available for immediate suite launch gpu=$gpu_id memory_mib=$memory_used limit_mib=$GPU_MEMORY_LIMIT_MIB"
+                    fi
+                    idle_since="${GPU_IDLE_SINCE[$gpu_id]}"
+                    idle_seconds=$((now_epoch - idle_since))
+                    state="ready"
+                fi
+            else
+                if [[ -n "${GPU_IDLE_SINCE[$gpu_id]-}" ]]; then
+                    log "GPU availability window reset by external occupancy gpu=$gpu_id memory_mib=$memory_used limit_mib=$GPU_MEMORY_LIMIT_MIB"
+                fi
+                GPU_EXTERNAL_COOLDOWN_REQUIRED["$gpu_id"]=1
+                unset GPU_IDLE_SINCE["$gpu_id"]
+                idle_seconds=0
+                state="busy"
+            fi
+            printf '[%s]\tgpu=%s\tstate=%s\tmemory_mib=%s\tidle_seconds=%s\n' \
+                "$now_iso" "$gpu_id" "$state" "$memory_used" "$idle_seconds" >> "$GPU_AVAILABILITY_LOG"
+        else
+            if [[ -n "${GPU_IDLE_SINCE[$gpu_id]-}" ]]; then
+                log "GPU availability window reset gpu=$gpu_id reason=nvidia-smi-query-failed"
+            fi
+            unset GPU_IDLE_SINCE["$gpu_id"]
+            printf '[%s]\tgpu=%s\tstate=query_failed\tmemory_mib=unknown\tidle_seconds=0\n' \
+                "$now_iso" "$gpu_id" >> "$GPU_AVAILABILITY_LOG"
+        fi
+    done
+}
+
+gpu_ready_for_launch() {
+    local gpu_id="$1"
+    local now_epoch="$2"
+    local idle_since="${GPU_IDLE_SINCE[$gpu_id]-}"
+    local cooldown_required="${GPU_EXTERNAL_COOLDOWN_REQUIRED[$gpu_id]-0}"
+
+    if [[ -n "${GPU_PID[$gpu_id]-}" || -z "$idle_since" ]]; then
+        return 1
+    fi
+
+    if [[ "$cooldown_required" != "1" ]]; then
+        return 0
+    fi
+
+    if (( now_epoch - idle_since >= GPU_IDLE_REQUIRED_SECONDS )); then
+        return 0
+    fi
+
+    return 1
 }
 
 write_suite_status_json() {
@@ -877,14 +987,14 @@ summary_lines = [
     "",
     "## Batch Settings",
     "",
-    "| Model | LoRA train | LoRA eval | TokMem train | TokMem eval | base test | rag test |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-    "| qwen0_5b | 16 | 64 | 16 | 256 | 1024 | 512 |",
-    "| llama3b | 16 | 64 | 32 | 128 | 512 | 256 |",
-    "| llama8b | 8 | 48 | 16 | 64 | 256 | 128 |",
+    "| Model | LoRA train | LoRA grad acc | LoRA eval | TokMem train | TokMem grad acc | TokMem eval | base test | rag test |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| qwen0_5b | 8 | 1 | 32 | 8 | 1 | 64 | 512 | 256 |",
+    "| llama3b | 2 | 2 | 16 | 4 | 1 | 32 | 256 | 128 |",
+    "| llama8b | 2 | 2 | 8 | 2 | 2 | 16 | 128 | 64 |",
     "",
     "- current launcher methods: `base`, `rag`, `lora`, `tokmem`, `tokmem_logit_bias`",
-    "- shared training settings: grad_acc `1`, epochs `1`, lr `5e-3`, validate_every_n_steps `1000`",
+    "- shared training settings: epochs `1`, lr `5e-3`, validate_every_n_steps `1000`",
     "- `rag` retrieval top-k: `3`",
     "",
     "## Mean Results",
@@ -1079,7 +1189,7 @@ summary_lines.extend(
         "",
         "## Notes",
         "",
-        "- Mean metrics are only reported for groups with `5/5` successful trials.",
+        f"- Mean metrics are only reported for groups with `{trial_count}/{trial_count}` successful trials.",
         "- `Routing Acc` is populated for `tokmem` and `tokmem_logit_bias` only.",
         "- `Retrieval Top-1` and `Retrieval Top-K` are populated for `rag` only.",
         "- `lora` uses the shared training settings and keeps replay disabled in the launcher command.",
@@ -1112,6 +1222,8 @@ PY
 
 declare -A GPU_PID=()
 declare -A GPU_TASK_INDEX=()
+declare -A GPU_IDLE_SINCE=()
+declare -A GPU_EXTERNAL_COOLDOWN_REQUIRED=()
 
 validate_inputs
 write_suite_config
@@ -1124,12 +1236,17 @@ log "Pending tasks: ${#TASK_PENDING_INDEXES[@]}"
 pending_cursor=0
 while true; do
     harvest_finished_tasks
+    now_epoch="$(date +%s)"
+    record_gpu_availability "$now_epoch"
 
     for gpu_id in "${GPU_IDS[@]}"; do
         if [[ -n "${GPU_PID[$gpu_id]-}" ]]; then
             continue
         fi
         if [[ "$pending_cursor" -ge "${#TASK_PENDING_INDEXES[@]}" ]]; then
+            continue
+        fi
+        if ! gpu_ready_for_launch "$gpu_id" "$now_epoch"; then
             continue
         fi
 

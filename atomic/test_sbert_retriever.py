@@ -36,12 +36,13 @@ def set_seed(seed=42):
 class SBERTRetriever:
     """Sentence-BERT based retriever for few-shot examples"""
     
-    def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
+    def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2', device=None):
         """Initialize the sentence-BERT model"""
         print(f"Loading Sentence-BERT model: {model_name}")
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer(model_name, device=device)
         self.corpus_embeddings = None
         self.corpus_metadata = []
+        self._normalized_corpus_matrix = None
         
     def build_corpus(self, tasks_data: Dict[str, List[Dict]], task_instructions: Dict[str, str] = None):
         """Build retrieval corpus from few-shot examples of all tasks
@@ -80,8 +81,71 @@ class SBERTRetriever:
             convert_to_tensor=True,
             show_progress_bar=True
         )
+        self._normalized_corpus_matrix = None
         
         return len(corpus_texts)
+
+    def _get_normalized_corpus_matrix(self):
+        """Return a cached CPU numpy matrix for batched cosine retrieval."""
+        if self._normalized_corpus_matrix is None:
+            if self.corpus_embeddings is None:
+                raise ValueError("Corpus has not been built or loaded")
+            if torch.is_tensor(self.corpus_embeddings):
+                corpus_matrix = self.corpus_embeddings.detach().cpu().numpy()
+            else:
+                corpus_matrix = np.asarray(self.corpus_embeddings)
+            corpus_matrix = corpus_matrix.astype(np.float32, copy=False)
+            norms = np.linalg.norm(corpus_matrix, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            self._normalized_corpus_matrix = corpus_matrix / norms
+        return self._normalized_corpus_matrix
+
+    def retrieve_top_k_batch(self, queries: List[str], k: int = 1, batch_size: int = 512) -> List[List[Dict]]:
+        """Retrieve top-k examples for a batch of queries using CPU matrix operations."""
+        if not queries:
+            return []
+        if k <= 0:
+            raise ValueError("k must be positive")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        corpus_matrix = self._get_normalized_corpus_matrix()
+        if not self.corpus_metadata:
+            raise ValueError("Corpus metadata is empty")
+        k = min(k, len(self.corpus_metadata))
+        all_results = []
+
+        for start_idx in range(0, len(queries), batch_size):
+            query_batch = queries[start_idx:start_idx + batch_size]
+            query_embeddings = self.model.encode(
+                query_batch,
+                batch_size=batch_size,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                normalize_embeddings=True,
+            ).astype(np.float32, copy=False)
+            similarities = query_embeddings @ corpus_matrix.T
+
+            top_k_indices = np.argpartition(-similarities, kth=k - 1, axis=1)[:, :k]
+            top_k_scores = np.take_along_axis(similarities, top_k_indices, axis=1)
+            order = np.argsort(-top_k_scores, axis=1)
+            top_k_indices = np.take_along_axis(top_k_indices, order, axis=1)
+            top_k_scores = np.take_along_axis(top_k_scores, order, axis=1)
+
+            for row_indices, row_scores in zip(top_k_indices, top_k_scores):
+                row_results = []
+                for idx, score in zip(row_indices, row_scores):
+                    metadata = self.corpus_metadata[int(idx)]
+                    row_results.append({
+                        'score': float(score),
+                        'task': metadata['task'],
+                        'input': metadata['input'],
+                        'output': metadata['output'],
+                        'explanation': metadata['explanation']
+                    })
+                all_results.append(row_results)
+
+        return all_results
     
     def retrieve_top_k(self, query: str, k: int = 1) -> List[Dict]:
         """Retrieve top-k most similar examples for a query

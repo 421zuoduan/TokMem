@@ -41,7 +41,7 @@ python xlam_datasets.py \
 
 python -u main_sequential.py \
     --training_rounds "1-50:1,51-100:3" \
-    --batch_size_per_round "${BATCH_SIZE_PER_ROUND:-16,32}" \
+    --batch_size_per_round "${BATCH_SIZE_PER_ROUND:-16,24}" \
     --train_max_function_calls_per_round "4,4" \
     --test_max_function_calls_per_round "4,4" \
     --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \

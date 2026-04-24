@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--split_cache_path", type=str, default=None,
                         help="Path to a cached train/val/test split")
+    parser.add_argument("--save_verbose_predictions", action="store_true",
+                        help="Save instruction, prompt preview, and full decoded sequence in evaluation_predictions.jsonl")
     parser.add_argument("--run_dir", type=str, default=None,
                         help="Directory where logs and results will be written")
     return parser.parse_args()
@@ -118,6 +120,7 @@ def main():
             "device_map": args.device_map,
             "seed": args.seed,
             "split_cache_path": os.path.abspath(args.split_cache_path) if args.split_cache_path else None,
+            "save_verbose_predictions": args.save_verbose_predictions,
             "run_dir": run_dir,
             "timestamp": timestamp,
             "dataset_summary": {
@@ -156,6 +159,7 @@ def main():
         batch_size=args.test_batch_size,
         mode="base_model_generation",
         logger=eval_logger,
+        include_verbose_predictions=args.save_verbose_predictions,
     )
 
     predictions_path = os.path.join(run_dir, "evaluation_predictions.jsonl")

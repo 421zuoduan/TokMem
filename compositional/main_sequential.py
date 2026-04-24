@@ -267,6 +267,8 @@ def build_parser():
                         help="Insert an explicit end-of-control token after each tool-controlled span")
     parser.add_argument("--use_logit_bias", action="store_true",
                         help="Train an external detached tool prior head and use it as a soft decode-time logit bias")
+    parser.add_argument("--use_tool_head_replacement", action="store_true",
+                        help="Train the detached tool prior head and replace triggered tool tokens at EOC decision sites")
     parser.add_argument("--logit_bias_loss_weight", type=float, default=0.1,
                         help="Weight for the detached tool-prior CE loss")
     parser.add_argument("--logit_bias_network", type=str, default="linear", choices=["mlp", "linear"],
@@ -278,7 +280,7 @@ def build_parser():
                         help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         help="Model dtype")
-    parser.add_argument("--max_length", type=int, default=1024,
+    parser.add_argument("--max_length", type=int, default=512,
                         help="Maximum sequence length")
     parser.add_argument("--decouple_embeddings", action="store_true",
                         help="Use separate weights for input and output tool token embeddings")
@@ -334,8 +336,12 @@ def build_parser():
 
 
 def validate_args(args, parser):
+    if args.use_logit_bias and args.use_tool_head_replacement:
+        parser.error("--use_logit_bias and --use_tool_head_replacement are decode-time alternatives")
     if args.use_logit_bias and not args.use_eoc:
         parser.error("--use_logit_bias requires --use_eoc")
+    if args.use_tool_head_replacement and not args.use_eoc:
+        parser.error("--use_tool_head_replacement requires --use_eoc")
     if args.max_length <= 0:
         parser.error("--max_length must be positive")
     if args.max_new_tokens <= 0:
@@ -404,9 +410,8 @@ def main():
     )
     logger = logging.getLogger(__name__)
     
-    # Log start time and configuration
+    # Log start time; full configuration is recorded after per-round overrides are expanded.
     logger.info(f"=== Sequential Training Started at {datetime.now()} ===")
-    logger.info(f"Configuration: model={args.model_name}, rounds={args.training_rounds}, batch_size={args.batch_size}")
     logger.info(f"Run directory: {run_context['run_dir']}")
     
     # Parse training rounds
@@ -466,6 +471,11 @@ def main():
         args.test_max_function_calls,
         "test_max_function_calls_per_round"
     )
+    batch_size_log_value = ",".join(str(batch_size) for batch_size in batch_size_by_round)
+    logger.info(
+        f"Configuration: model={args.model_name}, rounds={args.training_rounds}, "
+        f"batch_size_per_round={batch_size_log_value}"
+    )
     
     # Set dtype
     if args.dtype == "float16":
@@ -481,9 +491,11 @@ def main():
     print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
     print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
+    print(f"Tool head replacement: {'Enabled' if args.use_tool_head_replacement else 'Disabled'}")
+    if args.use_logit_bias or args.use_tool_head_replacement:
+        print(f"Auxiliary tool-head network: {args.logit_bias_network}")
+        print(f"Auxiliary tool-head loss weight: {args.logit_bias_loss_weight}")
     if args.use_logit_bias:
-        print(f"Logit bias network: {args.logit_bias_network}")
-        print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
         print(f"Logit bias scale: {args.logit_bias_scale}")
     print(f"Max length: {args.max_length}")
     print(f"Max new tokens: {args.max_new_tokens}")
@@ -619,6 +631,7 @@ def main():
                 lora_config=lora_config,
                 use_eoc=args.use_eoc,
                 use_logit_bias=args.use_logit_bias,
+                use_tool_head_replacement=args.use_tool_head_replacement,
                 logit_bias_network=args.logit_bias_network,
                 logit_bias_scale=args.logit_bias_scale,
             )
@@ -687,6 +700,7 @@ def main():
             renorm_active_rows=(args.renorm_active_tools and round_num > 2),
             use_eoc=args.use_eoc,
             use_logit_bias=args.use_logit_bias,
+            use_tool_head_replacement=args.use_tool_head_replacement,
             logit_bias_loss_weight=args.logit_bias_loss_weight,
             plot_history=plot_history,
             plot_step_offset=plot_step_offset,
@@ -738,6 +752,7 @@ def main():
                         use_ground_truth_tools=args.use_ground_truth_tools,
                         use_eoc=args.use_eoc,
                         use_logit_bias=args.use_logit_bias,
+                        use_tool_head_replacement=args.use_tool_head_replacement,
                     )
                 )
             
@@ -780,6 +795,7 @@ def main():
                                 use_ground_truth_tools=args.use_ground_truth_tools,
                                 use_eoc=args.use_eoc,
                                 use_logit_bias=args.use_logit_bias,
+                                use_tool_head_replacement=args.use_tool_head_replacement,
                             )
                         )
                     
@@ -840,6 +856,7 @@ def main():
                 use_ground_truth_tools=args.use_ground_truth_tools,
                 use_eoc=args.use_eoc,
                 use_logit_bias=args.use_logit_bias,
+                use_tool_head_replacement=args.use_tool_head_replacement,
             )
         )
     

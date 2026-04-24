@@ -144,9 +144,9 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
         'avg_logit_bias_loss': avg_logit_bias_loss,
     }
 
-def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01, 
+def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01,
                            gradient_accumulation_steps=1, device="cuda", timestamp=None,
-                           validate_every_n_steps=1000, use_logit_bias=False,
+                           save_dir="saved_models", validate_every_n_steps=1000, use_logit_bias=False,
                            logit_bias_loss_weight=0.0):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
@@ -355,7 +355,12 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                         best_val_loss = avg_val_loss
                         # Save best token state for later use
                         best_model_state = extract_trained_token_state(model)
-                        best_model_path = save_trained_model(model, timestamp=timestamp, suffix='best')
+                        best_model_path = save_trained_model(
+                            model,
+                            save_dir=save_dir,
+                            timestamp=timestamp,
+                            suffix='best',
+                        )
                         training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
 
         # After each epoch, run validation to compute average validation loss
@@ -380,7 +385,12 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 best_val_loss = avg_val_loss
                 # Save best token state for later use
                 best_model_state = extract_trained_token_state(model)
-                best_model_path = save_trained_model(model, timestamp=timestamp, suffix='best')
+                best_model_path = save_trained_model(
+                    model,
+                    save_dir=save_dir,
+                    timestamp=timestamp,
+                    suffix='best',
+                )
                 training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
     
     avg_total_loss = total_loss / total_batches

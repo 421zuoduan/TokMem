@@ -447,6 +447,7 @@ def _generate_results(
     user_tokens,
     user_mask,
     use_logit_bias=False,
+    use_tool_head_replacement=False,
     use_eoc=False,
     use_ground_truth_tools=False,
     ground_truth_tools=None,
@@ -470,6 +471,7 @@ def _generate_results(
         "top_p": top_p,
         "do_sample": do_sample,
         "use_logit_bias": use_logit_bias,
+        "use_tool_head_replacement": use_tool_head_replacement,
         "use_eoc": use_eoc,
     }
     if ground_truth_tools is not None:
@@ -482,7 +484,9 @@ def _generate_results(
 
     raise AttributeError(
         f"Model {type(model).__name__} does not expose a compatible generation method "
-        f"use_logit_bias={use_logit_bias}, use_ground_truth_tools={use_ground_truth_tools}."
+        f"use_logit_bias={use_logit_bias}, "
+        f"use_tool_head_replacement={use_tool_head_replacement}, "
+        f"use_ground_truth_tools={use_ground_truth_tools}."
     )
 
 
@@ -507,6 +511,7 @@ def _generate_results_with_example_fallback(
     raw_examples,
     batch_idx,
     use_logit_bias,
+    use_tool_head_replacement,
     use_eoc,
     use_ground_truth_tools,
     max_new_tokens,
@@ -528,6 +533,7 @@ def _generate_results_with_example_fallback(
                     single_input,
                     single_mask,
                     use_logit_bias=use_logit_bias,
+                    use_tool_head_replacement=use_tool_head_replacement,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=True,
                     ground_truth_tools=expected_tools,
@@ -549,6 +555,7 @@ def _generate_results_with_example_fallback(
             input_ids,
             attention_mask,
             use_logit_bias=use_logit_bias,
+            use_tool_head_replacement=use_tool_head_replacement,
             use_eoc=use_eoc,
             use_ground_truth_tools=False,
             max_new_tokens=max_new_tokens,
@@ -570,6 +577,7 @@ def _generate_results_with_example_fallback(
                     single_input,
                     single_mask,
                     use_logit_bias=use_logit_bias,
+                    use_tool_head_replacement=use_tool_head_replacement,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=False,
                     max_new_tokens=max_new_tokens,
@@ -610,6 +618,7 @@ def train_native_function_calling_model(
     renorm_active_rows=False,
     use_eoc=None,
     use_logit_bias=None,
+    use_tool_head_replacement=None,
     logit_bias_loss_weight=0.1,
     plot_history=None,
     plot_step_offset=0,
@@ -624,8 +633,16 @@ def train_native_function_calling_model(
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
-    if resolved_use_logit_bias and not resolved_use_eoc:
-        raise ValueError("use_logit_bias=True requires use_eoc=True")
+    resolved_use_tool_head_replacement = bool(
+        getattr(model, "use_tool_head_replacement", False)
+        if use_tool_head_replacement is None
+        else use_tool_head_replacement
+    )
+    if resolved_use_logit_bias and resolved_use_tool_head_replacement:
+        raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
+    use_auxiliary_tool_head = resolved_use_logit_bias or resolved_use_tool_head_replacement
+    if use_auxiliary_tool_head and not resolved_use_eoc:
+        raise ValueError("use_logit_bias=True or use_tool_head_replacement=True requires use_eoc=True")
 
     if model.lora_config and lora_lr is not None:
         embedding_params, lora_params = model.get_trainable_parameters(separate_lora=True)
@@ -683,6 +700,7 @@ def train_native_function_calling_model(
         "Mode: "
         f"use_eoc={resolved_use_eoc}, "
         f"use_logit_bias={resolved_use_logit_bias}, "
+        f"use_tool_head_replacement={resolved_use_tool_head_replacement}, "
         f"logit_bias_loss_weight={logit_bias_loss_weight}"
     )
 
@@ -722,8 +740,8 @@ def train_native_function_calling_model(
 
     zero = torch.tensor(0.0, device=device)
     has_logit_bias_head = hasattr(model, "logit_bias_head") and model.logit_bias_head is not None
-    if resolved_use_logit_bias and not has_logit_bias_head:
-        print("Warning: logit bias requested but model has no logit_bias_head; detached prior loss will stay zero.")
+    if use_auxiliary_tool_head and not has_logit_bias_head:
+        print("Warning: auxiliary tool head requested but model has no logit_bias_head; detached prior loss will stay zero.")
 
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
@@ -735,8 +753,8 @@ def train_native_function_calling_model(
                 model,
                 input_ids,
                 attention_mask,
-                output_hidden_states=resolved_use_logit_bias,
-                final_hidden_state_only=resolved_use_logit_bias,
+                output_hidden_states=use_auxiliary_tool_head,
+                final_hidden_state_only=use_auxiliary_tool_head,
             )
 
             if not torch.isfinite(logits).all():
@@ -782,7 +800,7 @@ def train_native_function_calling_model(
             logit_bias_initial_count = 0
             logit_bias_eoc_count = 0
 
-            if resolved_use_logit_bias and hidden_states is not None:
+            if use_auxiliary_tool_head and hidden_states is not None:
                 (
                     logit_bias_hidden_states,
                     logit_bias_targets,
@@ -804,14 +822,14 @@ def train_native_function_calling_model(
                     )
 
             loss = ar_loss
-            if resolved_use_logit_bias:
+            if use_auxiliary_tool_head:
                 loss = loss + logit_bias_loss_weight * logit_bias_loss
 
             step_loss_metrics = _build_loss_metrics(
                 total_loss=loss,
                 ar_loss=ar_loss,
                 extra_loss_metrics={
-                    "logit_bias_loss": logit_bias_loss if resolved_use_logit_bias else None,
+                    "logit_bias_loss": logit_bias_loss if use_auxiliary_tool_head else None,
                 },
             )
 
@@ -899,7 +917,7 @@ def train_native_function_calling_model(
             total_valid_positions += int(valid_mask.sum().item())
             total_eoc_positions += eoc_count
             total_tool_positions += tool_count
-            if resolved_use_logit_bias and logit_bias_targets is not None:
+            if use_auxiliary_tool_head and logit_bias_targets is not None:
                 total_logit_bias_positions += int(logit_bias_targets.numel())
                 total_logit_bias_initial_positions += logit_bias_initial_count
                 total_logit_bias_eoc_positions += logit_bias_eoc_count
@@ -913,7 +931,7 @@ def train_native_function_calling_model(
             window_valid_positions += int(valid_mask.sum().item())
             window_eoc_positions += eoc_count
             window_tool_positions += tool_count
-            if resolved_use_logit_bias and logit_bias_targets is not None:
+            if use_auxiliary_tool_head and logit_bias_targets is not None:
                 window_logit_bias_positions += int(logit_bias_targets.numel())
             if plot_history is not None:
                 plot_step = plot_step_offset + successful_steps
@@ -936,9 +954,10 @@ def train_native_function_calling_model(
                 window_denom = max(1, window_batches)
                 window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
                 logit_bias_fragment = ""
-                if resolved_use_logit_bias:
+                if use_auxiliary_tool_head:
+                    aux_label = "LogitBias" if resolved_use_logit_bias else "ToolHead"
                     logit_bias_fragment = (
-                        f"LogitBias: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
+                        f"{aux_label}: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
                     )
                 print(
                     f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
@@ -968,16 +987,16 @@ def train_native_function_calling_model(
     print("\nTraining completed!")
     print(f"Average total loss: {avg_total_loss:.4f}")
     print(f"Average AR loss:    {avg_ar_loss:.4f}")
-    if resolved_use_logit_bias:
-        print(f"Average Logit bias loss: {avg_logit_bias_loss:.4f}")
+    if use_auxiliary_tool_head:
+        print(f"Average auxiliary tool-head loss: {avg_logit_bias_loss:.4f}")
     print(f"Total valid supervised positions: {total_valid_positions}")
     if resolved_use_eoc:
         print(f"Total EOC positions: {total_eoc_positions}")
         print(f"Total tool positions: {total_tool_positions}")
-    if resolved_use_logit_bias:
-        print(f"Total logit-bias positions: {total_logit_bias_positions}")
-        print(f"Logit-bias tool sites from assistant-start positions: {total_logit_bias_initial_positions}")
-        print(f"Logit-bias tool sites from EOC positions: {total_logit_bias_eoc_positions}")
+    if use_auxiliary_tool_head:
+        print(f"Total auxiliary tool-head positions: {total_logit_bias_positions}")
+        print(f"Auxiliary tool-head sites from assistant-start positions: {total_logit_bias_initial_positions}")
+        print(f"Auxiliary tool-head sites from EOC positions: {total_logit_bias_eoc_positions}")
     print(f"Successful optimizer steps: {successful_steps}")
 
     return {
@@ -993,6 +1012,7 @@ def train_native_function_calling_model(
         "successful_steps": successful_steps,
         "use_eoc": resolved_use_eoc,
         "use_logit_bias": resolved_use_logit_bias,
+        "use_tool_head_replacement": resolved_use_tool_head_replacement,
         "avg_loss_metrics": avg_loss_metrics,
         "plot_next_step": plot_step_offset + successful_steps,
         "plot_end_step": plot_step_offset + successful_steps,
@@ -1008,6 +1028,7 @@ def demo_native_function_calling(
     use_ground_truth_tools=False,
     use_eoc=None,
     use_logit_bias=None,
+    use_tool_head_replacement=None,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
@@ -1015,9 +1036,18 @@ def demo_native_function_calling(
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
+    resolved_use_tool_head_replacement = bool(
+        getattr(model, "use_tool_head_replacement", False)
+        if use_tool_head_replacement is None
+        else use_tool_head_replacement
+    )
+    if resolved_use_logit_bias and resolved_use_tool_head_replacement:
+        raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
+    if resolved_use_tool_head_replacement:
+        mode_desc += " + tool head replacement"
 
     print(f"\n=== Native Function Calling Demo ({mode_desc}) ===")
     print(f"Testing on {len(test_examples)} held-out examples")
@@ -1047,6 +1077,7 @@ def demo_native_function_calling(
             user_tokens["input_ids"],
             user_tokens["attention_mask"],
             use_logit_bias=resolved_use_logit_bias,
+            use_tool_head_replacement=resolved_use_tool_head_replacement,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             ground_truth_tools=expected_tools if use_ground_truth_tools else None,
@@ -1058,6 +1089,8 @@ def demo_native_function_calling(
         mode_line = "Ground truth tools used" if use_ground_truth_tools else "Model predicts tools"
         if resolved_use_logit_bias:
             mode_line += " + logit bias"
+        if resolved_use_tool_head_replacement:
+            mode_line += " + tool head replacement"
         print(f"Mode: {mode_line}")
 
         result = results[0]
@@ -1093,6 +1126,7 @@ def eval_native_function_calling(
     use_ground_truth_tools=False,
     use_eoc=None,
     use_logit_bias=None,
+    use_tool_head_replacement=None,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
     from eval import compare_function_calls_advanced, calculate_argument_accuracy, calculate_tool_metrics
@@ -1103,11 +1137,20 @@ def eval_native_function_calling(
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
+    resolved_use_tool_head_replacement = bool(
+        getattr(model, "use_tool_head_replacement", False)
+        if use_tool_head_replacement is None
+        else use_tool_head_replacement
+    )
+    if resolved_use_logit_bias and resolved_use_tool_head_replacement:
+        raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
+    if resolved_use_tool_head_replacement:
+        mode_desc += " + tool head replacement"
 
     print(f"\n=== Native Function Calling Evaluation ({mode_desc}) ===")
     print(f"Evaluating on {total_examples} test examples")
@@ -1180,6 +1223,7 @@ def eval_native_function_calling(
             raw_examples=batch["raw_data"],
             batch_idx=batch_idx,
             use_logit_bias=resolved_use_logit_bias,
+            use_tool_head_replacement=resolved_use_tool_head_replacement,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             max_new_tokens=max_new_tokens,

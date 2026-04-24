@@ -2,6 +2,7 @@
 """Evaluate the raw base model with SBERT retrieval-augmented few-shot prompts."""
 
 import argparse
+import gc
 import json
 import os
 from collections import defaultdict
@@ -44,6 +45,10 @@ def parse_args():
     parser.add_argument("--test_batch_size", type=int, default=16, help="Evaluation batch size")
     parser.add_argument("--retrieval_top_k", type=int, default=3,
                         help="How many retrieved demonstrations to place into the prompt")
+    parser.add_argument("--retrieval_batch_size", type=int, default=512,
+                        help="Batch size for precomputing SBERT retrievals")
+    parser.add_argument("--retriever_device", type=str, default=None,
+                        help="Device for SentenceTransformer retrieval; default uses cuda when available, otherwise cpu")
     parser.add_argument("--include_instruction_in_demos", action="store_true",
                         help="Include task instruction when encoding corpus items")
     parser.add_argument("--max_examples_per_task", type=int, default=None,
@@ -57,6 +62,8 @@ def parse_args():
                         help="Path to a cached train/val/test split")
     parser.add_argument("--corpus_cache_path", type=str, default=None,
                         help="Optional path to save/load encoded SBERT corpus")
+    parser.add_argument("--save_verbose_predictions", action="store_true",
+                        help="Save instruction, prompt preview, and full decoded sequence in evaluation_predictions.jsonl")
     parser.add_argument("--run_dir", type=str, default=None,
                         help="Directory where logs and results will be written")
     return parser.parse_args()
@@ -106,6 +113,7 @@ def build_or_load_corpus(
         payload = torch.load(corpus_cache_path, map_location="cpu")
         retriever.corpus_embeddings = payload["corpus_embeddings"]
         retriever.corpus_metadata = payload["corpus_metadata"]
+        retriever._normalized_corpus_matrix = None
         return payload.get("corpus_size", len(retriever.corpus_metadata)), True
 
     corpus_size = retriever.build_corpus(
@@ -129,10 +137,18 @@ def build_or_load_corpus(
     return corpus_size, False
 
 
+def resolve_retriever_device(requested_device):
+    """Resolve the SentenceTransformer device when the CLI leaves it automatic."""
+    if requested_device:
+        return requested_device
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def main():
     """Run SBERT RAG evaluation."""
     args = parse_args()
     set_random_seed(args.seed)
+    retriever_device = resolve_retriever_device(args.retriever_device)
 
     run_dir = prepare_run_dir(
         run_dir=args.run_dir,
@@ -148,6 +164,7 @@ def main():
     print("=" * 60)
     print(f"Generator model: {args.model_name}")
     print(f"Retriever model: {args.retriever_model}")
+    print(f"Retriever device: {retriever_device}")
     print(f"Device: {args.device}")
     print(f"Device map: {args.device_map}")
     print(f"Run directory: {run_dir}")
@@ -183,18 +200,8 @@ def main():
     print(f"Collected {total_demo_count} few-shot examples across {len(task_names)} tasks")
     print()
 
-    print("Loading base model...")
-    model_load_kwargs = {"torch_dtype": "auto"}
-    if args.device_map is not None:
-        model_load_kwargs["device_map"] = args.device_map
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_load_kwargs)
-    if args.device_map is None:
-        model = model.to(args.device)
-    print("Base model loaded")
-    print()
-
     print("Loading retriever...")
-    retriever = SBERTRetriever(model_name=args.retriever_model)
+    retriever = SBERTRetriever(model_name=args.retriever_model, device=retriever_device)
     corpus_size, loaded_from_cache = build_or_load_corpus(
         retriever=retriever,
         tasks_few_shot=tasks_few_shot,
@@ -215,9 +222,17 @@ def main():
         "total": 0,
     }
 
-    def build_batch_payload(example):
-        query_text = f"{example.get('instruction', '')} {example.get('query', '')}"
-        retrieved = retriever.retrieve_top_k(query_text, k=args.retrieval_top_k)
+    print("Precomputing retrievals...")
+    retrieval_queries = [
+        f"{example.get('instruction', '')} {example.get('query', '')}"
+        for example in test_data
+    ]
+    batched_retrievals = retriever.retrieve_top_k_batch(
+        retrieval_queries,
+        k=args.retrieval_top_k,
+        batch_size=args.retrieval_batch_size,
+    )
+    for example, retrieved in zip(test_data, batched_retrievals):
         retrieved_examples = [
             {
                 "input": item["input"],
@@ -235,19 +250,44 @@ def main():
         if true_task in retrieved_tasks:
             retrieval_stats["topk_correct"] += 1
 
+        example["_rag_retrieval_payload"] = {
+            "retrieved_examples": retrieved_examples,
+            "retrieved_tasks": retrieved_tasks,
+            "retrieved_scores": retrieved_scores,
+        }
+    print(f"Precomputed retrievals for {len(test_data)} examples")
+    print()
+
+    del retriever
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print("Loading base model...")
+    model_load_kwargs = {"torch_dtype": "auto"}
+    if args.device_map is not None:
+        model_load_kwargs["device_map"] = args.device_map
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_load_kwargs)
+    if args.device_map is None:
+        model = model.to(args.device)
+    print("Base model loaded")
+    print()
+
+    def build_batch_payload(example):
+        retrieval_payload = example["_rag_retrieval_payload"]
         prompt_text = build_generation_prompt(
             tokenizer=tokenizer,
             instruction=example.get("instruction", ""),
             query=example.get("query", ""),
-            few_shot_examples=retrieved_examples,
+            few_shot_examples=retrieval_payload["retrieved_examples"],
         )
         return {
             "prompt_text": prompt_text,
             "row_extra": {
                 "prompt_style": "retrieved_few_shot",
-                "few_shot_count": len(retrieved_examples),
-                "retrieved_tasks": retrieved_tasks,
-                "retrieved_scores": retrieved_scores,
+                "few_shot_count": len(retrieval_payload["retrieved_examples"]),
+                "retrieved_tasks": retrieval_payload["retrieved_tasks"],
+                "retrieved_scores": retrieval_payload["retrieved_scores"],
             },
         }
 
@@ -262,6 +302,7 @@ def main():
         batch_size=args.test_batch_size,
         mode="rag_generation",
         logger=eval_logger,
+        include_verbose_predictions=args.save_verbose_predictions,
     )
 
     retrieval_results = {
@@ -307,6 +348,9 @@ def main():
             "max_new_tokens": args.max_new_tokens,
             "test_batch_size": args.test_batch_size,
             "retrieval_top_k": args.retrieval_top_k,
+            "retrieval_batch_size": args.retrieval_batch_size,
+            "retriever_device": retriever_device,
+            "requested_retriever_device": args.retriever_device,
             "include_instruction_in_demos": args.include_instruction_in_demos,
             "max_examples_per_task": args.max_examples_per_task,
             "device": args.device,
@@ -314,6 +358,7 @@ def main():
             "seed": args.seed,
             "split_cache_path": os.path.abspath(args.split_cache_path) if args.split_cache_path else None,
             "corpus_cache_path": os.path.abspath(args.corpus_cache_path) if args.corpus_cache_path else None,
+            "save_verbose_predictions": args.save_verbose_predictions,
             "run_dir": run_dir,
             "timestamp": timestamp,
             "dataset_summary": {
