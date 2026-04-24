@@ -56,6 +56,18 @@ def collate_fn(batch):
     }
 
 
+def build_assistant_only_labels(input_ids, attention_mask, prompt_token_count):
+    """Mask left padding and user/prompt tokens so loss starts at assistant content."""
+    labels = input_ids.clone()
+    labels[attention_mask == 0] = -100
+
+    nonpad_tokens = int(attention_mask.sum().item())
+    left_pad_tokens = labels.size(0) - nonpad_tokens
+    assistant_content_start = min(labels.size(0), left_pad_tokens + prompt_token_count)
+    labels[:assistant_content_start] = -100
+    return labels
+
+
 class FunctionCallingDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512, mode="train"):
         self.tokenizer = tokenizer
@@ -118,16 +130,19 @@ class FunctionCallingDataset(Dataset):
         attention_mask = encoding["attention_mask"].squeeze()
         
         if self.mode == "train":
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = -100
-            
             # Only train on assistant response
             assistant_start = "<|start_header_id|>assistant<|end_header_id|>\n"
             if assistant_start in conversation:
                 prefix = conversation.split(assistant_start)[0] + assistant_start
                 prefix_tokens = self.tokenizer(prefix, add_special_tokens=False)["input_ids"]
-                if len(prefix_tokens) < len(labels):
-                    labels[:len(prefix_tokens)] = -100
+                labels = build_assistant_only_labels(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    prompt_token_count=len(prefix_tokens),
+                )
+            else:
+                labels = input_ids.clone()
+                labels[attention_mask == 0] = -100
         else:
             labels = torch.tensor(-100)
         
@@ -678,8 +693,8 @@ def main():
     parser = argparse.ArgumentParser(description="LoRA Baseline - Sequential Function Calling Training")
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
-                        help="Base model name")
+    parser.add_argument("--model_name", type=str, required=True,
+                        help="Local base model path")
     
     # Sequential training arguments
     parser.add_argument("--training_rounds", type=str, required=True,
@@ -866,7 +881,7 @@ def main():
     print()
     
     # Create tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.bos_token
     tokenizer.padding_side = "left"  # Use left padding for decoder-only models
@@ -881,6 +896,7 @@ def main():
         args.model_name,
         torch_dtype=dtype,
         device_map="auto",
+        local_files_only=True,
     )
     
     # Parse target modules once

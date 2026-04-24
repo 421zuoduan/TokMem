@@ -34,7 +34,7 @@ TEST_MULTI_TOOL_RATIOS="0.5,0.5"
 mkdir -p "$RUN_DIR" "$DATA_DIR" "$TRIAL_ROOT" "$HF_CACHE_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
-source /data/ruochen/anaconda/etc/profile.d/conda.sh
+source /home/shilong/anaconda3/etc/profile.d/conda.sh
 conda activate tokmem
 
 export CUDA_VISIBLE_DEVICES=4
@@ -56,16 +56,16 @@ python xlam_datasets.py \
     --output_dir "$DATA_DIR" \
     2>&1 | tee "$RUN_DIR/dataset.log"
 
-printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_js_trunc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
+printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
 
 SETTINGS=(
-    "1|baseline|0|0|0"
-    "2|eoc-only|1|0|0"
-    "3|eoc+logit_bias|1|0|1"
+    "1|baseline|0|0"
+    "2|eoc-only|1|0"
+    "3|eoc+logit_bias|1|1"
 )
 
 for setting_entry in "${SETTINGS[@]}"; do
-    IFS='|' read -r setting_id mode use_eoc use_js_trunc use_logit_bias <<< "$setting_entry"
+    IFS='|' read -r setting_id mode use_eoc use_logit_bias <<< "$setting_entry"
 
     trial_index=0
     for seed in "${TRIAL_SEEDS[@]}"; do
@@ -98,22 +98,19 @@ for setting_entry in "${SETTINGS[@]}"; do
         if [[ "$use_eoc" == "1" ]]; then
             cmd+=(--use_eoc)
         fi
-        if [[ "$use_js_trunc" == "1" ]]; then
-            cmd+=(--use_js_trunc)
-        fi
         if [[ "$use_logit_bias" == "1" ]]; then
             cmd+=(--use_logit_bias)
         fi
 
         {
             printf '=== setting %s trial %s ===\n' "$setting_id" "$trial_index"
-            printf 'mode=%s seed=%s use_eoc=%s use_js_trunc=%s use_logit_bias=%s\n' \
-                "$mode" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias"
+            printf 'mode=%s seed=%s use_eoc=%s use_logit_bias=%s\n' \
+                "$mode" "$seed" "$use_eoc" "$use_logit_bias"
             "${cmd[@]}"
         } 2>&1 | tee "$trial_dir/stdout.log"
 
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias" \
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_logit_bias" \
             "$trial_name" "$trial_dir" "$trial_dir/evaluation_results.json" "$trial_dir/training_summary.json" \
             >> "$MANIFEST_FILE"
     done
@@ -150,8 +147,8 @@ loss_fields = (
     ("avg_logit_bias_loss", "avg Logit bias loss"),
 )
 
-FALLBACK_HEADER = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
-FALLBACK_SEPARATOR = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+FALLBACK_HEADER = "| 实验编号 | 模式 | epochs | lr | eoc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
+FALLBACK_SEPARATOR = "| --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
 SEPARATOR_PATTERN = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+$")
 
 
@@ -236,7 +233,7 @@ artifacts = {
 }
 
 readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
-header, separator = load_last_table_header(readme_text)
+header, separator = FALLBACK_HEADER, FALLBACK_SEPARATOR
 summary_lines = [
     f"# README_MYSELF 三种维护方法对比（{trial_count} 次重复均值）",
     "",
@@ -280,7 +277,7 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
 
     row_text = (
         f"| `{setting_id}` | {first_row['mode']} | {epochs} | {lr} | "
-        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_js_trunc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
+        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
         + " | ".join(format_metric(mean_or_none(metric_values[key])) for key, _ in metric_fields)
         + " |"
     )
@@ -295,7 +292,6 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
             "lr": lr,
             "flags": {
                 "use_eoc": first_row["use_eoc"] == "1",
-                "use_js_trunc": first_row["use_js_trunc"] == "1",
                 "use_logit_bias": first_row["use_logit_bias"] == "1",
             },
             "metrics": {key: mean_or_none(metric_values[key]) for key, _ in metric_fields},

@@ -1,6 +1,8 @@
 #!/bin/bash
 export CUDA_VISIBLE_DEVICES=0
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Parameters
 TOOLS="51-100"
 SAMPLES_PER_TOOL=50
@@ -8,7 +10,8 @@ TRAIN_SIZE=5000
 TEST_SIZE=500
 TRAIN_MAX_CALLS=4
 TEST_MAX_CALLS=4
-MODEL="meta-llama/Llama-3.2-3B-Instruct"
+MODEL="$ROOT_DIR/models/Llama-3.2-3B-Instruct"
+RETRIEVER_MODEL="$ROOT_DIR/models/all-MiniLM-L6-v2"
 BATCH_SIZE=16
 
 # RAG Configuration
@@ -81,7 +84,7 @@ CMD="python icl_baseline.py \
 
 # Add RAG flags if enabled
 if [ "$USE_RAG" = true ]; then
-    CMD="$CMD --use_rag --retrieval_k $RETRIEVAL_K"
+    CMD="$CMD --use_rag --retrieval_k $RETRIEVAL_K --retriever_model_name \"$RETRIEVER_MODEL\""
 fi
 
 # Execute the command

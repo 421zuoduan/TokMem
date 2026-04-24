@@ -1,6 +1,8 @@
 #!/bin/bash
 export CUDA_VISIBLE_DEVICES=0
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Default parameters
 NUM_ROUNDS=2
 TOOLS_PER_ROUND=50
@@ -12,7 +14,7 @@ TRAIN_MAX_CALLS_PER_ROUND="4,4"
 TEST_MAX_CALLS_PER_ROUND="4,4"
 BATCH_SIZE=2
 LR=5e-5
-MODEL="meta-llama/Llama-3.2-3B-Instruct"
+MODEL="$ROOT_DIR/models/Llama-3.2-3B-Instruct"
 START_TOOL=1
 TRAIN_SIZE=5000
 TEST_SIZE=500

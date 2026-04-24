@@ -16,7 +16,11 @@ import torch
 from typing import List, Dict, Any, Optional
 from contextlib import redirect_stdout
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from eval import compare_function_calls_advanced, calculate_tool_selection_accuracy
+from eval import (
+    compare_function_calls_advanced,
+    calculate_tool_metrics,
+    calculate_tool_selection_accuracy,
+)
 from tool_retrieval import ToolRetriever
 from run_layout import (
     DEFAULT_RUNS_DIR,
@@ -39,6 +43,12 @@ class TeeStream:
     def flush(self):
         for stream in self.streams:
             stream.flush()
+
+    def isatty(self):
+        for stream in self.streams:
+            if hasattr(stream, "isatty"):
+                return stream.isatty()
+        return False
 
 
 def resolve_run_file_path(run_context, requested_path, default_name):
@@ -114,8 +124,8 @@ Examples:
 class ICLBaseline:
     """In-Context Learning baseline using Hugging Face transformers"""
     
-    def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct", device="cuda", dtype=torch.bfloat16,
-                 use_rag=False, retrieval_k=10):
+    def __init__(self, model_name, device="cuda", dtype=torch.bfloat16,
+                 use_rag=False, retrieval_k=10, retriever_model_name=None):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
@@ -125,18 +135,24 @@ class ICLBaseline:
         # Initialize retriever if RAG is enabled
         self.retriever = None
         if self.use_rag:
+            if not retriever_model_name:
+                raise ValueError("RAG requires --retriever_model_name with a local sentence-transformer path")
             print(f"Initializing RAG with top-{retrieval_k} retrieval...")
-            self.retriever = ToolRetriever()
+            self.retriever = ToolRetriever(retriever_model_name)
         
         print(f"Loading model: {model_name}")
         print(f"Device: {device}, Dtype: {dtype}")
         
         # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            local_files_only=True,
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=self.dtype,
-            device_map="auto" if device == "cuda" else None
+            device_map="auto" if device == "cuda" else None,
+            local_files_only=True,
         )
         
         # Configure tokenizer for decoder-only models
@@ -230,36 +246,51 @@ class ICLBaseline:
         return function_calls
     
     def _infer_tool_from_call(self, call_dict: Dict[str, Any], tool_descriptions: Dict[str, Any]) -> Optional[str]:
-        """Infer which tool a function call corresponds to by matching parameter names"""
+        """Infer which tool a function call corresponds to from the candidate tool schemas."""
         if not call_dict or 'parse_error' in call_dict or 'raw_text' in call_dict:
             return None
-        
+
         call_params = set(call_dict.keys())
-        best_match = None
-        best_score = 0
-        
+        exact_matches = []
+        subset_matches = []
+
         for tool_name, tool_info in tool_descriptions.items():
             tool_params = set(tool_info.get('parameters', {}).keys())
-            
-            if not tool_params:  # Tool has no parameters
+
+            if call_params == tool_params:
+                exact_matches.append(tool_name)
                 continue
-                
-            # Calculate overlap score
-            overlap = len(call_params & tool_params)
-            total_params = len(tool_params)
-            
-            # Score based on how many required parameters match
-            if overlap > 0:
-                score = overlap / total_params
-                # Bonus if all call params are valid for this tool
-                if call_params.issubset(tool_params):
-                    score += 0.5
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = tool_name
-        
-        return best_match
+
+            if call_params and call_params.issubset(tool_params):
+                subset_matches.append((len(tool_params) - len(call_params), tool_name))
+
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(exact_matches) > 1:
+            return None
+
+        if not subset_matches:
+            return None
+
+        subset_matches.sort()
+        best_gap = subset_matches[0][0]
+        best_matches = [tool_name for gap, tool_name in subset_matches if gap == best_gap]
+        return best_matches[0] if len(best_matches) == 1 else None
+
+    def _infer_tools_from_calls(self, predicted_calls: List[str], tool_descriptions: Dict[str, Any]) -> List[str]:
+        """Map arg-only ICL/RAG outputs back to tool ids when the candidate schema is unique."""
+        inferred_tools = []
+        for call_str in predicted_calls:
+            try:
+                parsed_call = json.loads(call_str)
+            except json.JSONDecodeError:
+                continue
+
+            inferred_tool = self._infer_tool_from_call(parsed_call, tool_descriptions)
+            if inferred_tool:
+                inferred_tools.append(inferred_tool)
+
+        return inferred_tools
     
     def predict_batch(self, batch_data: List[Dict[str, Any]], tool_descriptions: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Make predictions for a batch of samples"""
@@ -291,6 +322,7 @@ class ICLBaseline:
             prompts.append(prompt)
             batch_info.append({
                 'target_tools': target_tools,
+                'candidate_tools': relevant_tools,
                 'prompt_length': len(self.tokenizer.encode(prompt)),
                 'retrieval_recall': retrieval_recall,
                 'retrieval_precision': retrieval_precision,
@@ -304,11 +336,14 @@ class ICLBaseline:
         results = []
         for i, (response, info) in enumerate(zip(responses, batch_info)):
             predicted_calls = self.parse_response(response)
+            predicted_tools = self._infer_tools_from_calls(predicted_calls, tool_descriptions=info['candidate_tools'])
             results.append({
                 'predicted_calls': predicted_calls,
+                'predicted_tools': predicted_tools,
                 'raw_response': response,
                 'prompt_length': info['prompt_length'],
                 'target_tools': info['target_tools'],
+                'routing_candidate_tools': list(info['candidate_tools'].keys()),
                 'retrieval_recall': info.get('retrieval_recall', 1.0),
                 'retrieval_precision': info.get('retrieval_precision', 0.0),
                 'num_tools_in_prompt': info.get('num_tools_in_prompt', 0)
@@ -371,8 +406,8 @@ class ICLBaseline:
                 
                 # Calculate tool selection accuracy
                 tool_selection_metrics = calculate_tool_selection_accuracy(
-                    prediction['predicted_calls'],
-                    target_calls
+                    predicted_tools=prediction['predicted_tools'],
+                    expected_tools=target_tools,
                 )
 
                 # Track metrics
@@ -387,6 +422,7 @@ class ICLBaseline:
                     'target_tools': target_tools,
                     'target_calls': target_calls,
                     'predicted_calls': prediction['predicted_calls'],
+                    'predicted_tools': prediction['predicted_tools'],
                     'raw_response': prediction['raw_response'],
                     'exact_match': eval_result.exact_match,
                     'f1_score': eval_result.f1_score,
@@ -406,6 +442,8 @@ class ICLBaseline:
         # Calculate aggregated metrics
         total_precision = 0
         total_recall = 0
+        total_tool_accuracy = 0
+        total_tool_exact_match_acc = 0
         total_tool_f1 = 0
         total_tool_precision = 0
         total_tool_recall = 0
@@ -419,12 +457,18 @@ class ICLBaseline:
             # Aggregate precision and recall
             total_precision += result['precision']
             total_recall += result['recall']
-            
-            # Aggregate tool selection metrics
-            if 'tool_selection' in result:
-                total_tool_f1 += result['tool_selection']['tool_f1_score']
-                total_tool_precision += result['tool_selection']['tool_precision']
-                total_tool_recall += result['tool_selection']['tool_recall']
+
+            tool_metrics = calculate_tool_metrics(
+                predicted_tools=result['predicted_tools'],
+                expected_tools=result['target_tools'],
+                candidate_tools=tool_descriptions.keys(),
+            )
+            result['tool_metrics'] = tool_metrics
+            total_tool_accuracy += tool_metrics['tool_accuracy']
+            total_tool_exact_match_acc += tool_metrics['tool_exact_match_acc']
+            total_tool_f1 += tool_metrics['tool_f1_score']
+            total_tool_precision += tool_metrics['tool_precision']
+            total_tool_recall += tool_metrics['tool_recall']
             
             # Aggregate retrieval metrics if using RAG
             if self.use_rag:
@@ -457,13 +501,16 @@ class ICLBaseline:
                 call_count_stats[num_calls] = {
                     'correct': 0, 
                     'total': 0,
+                    'tool_accuracy_sum': 0,
+                    'tool_exact_match_sum': 0,
                     'generation_f1_sum': 0,
                     'tool_f1_sum': 0
                 }
             call_count_stats[num_calls]['total'] += 1
+            call_count_stats[num_calls]['tool_accuracy_sum'] += tool_metrics['tool_accuracy']
+            call_count_stats[num_calls]['tool_exact_match_sum'] += tool_metrics['tool_exact_match_acc']
             call_count_stats[num_calls]['generation_f1_sum'] += result['f1_score']
-            if 'tool_selection' in result:
-                call_count_stats[num_calls]['tool_f1_sum'] += result['tool_selection']['tool_f1_score']
+            call_count_stats[num_calls]['tool_f1_sum'] += tool_metrics['tool_f1_score']
             if result['exact_match']:
                 call_count_stats[num_calls]['correct'] += 1
         
@@ -471,25 +518,34 @@ class ICLBaseline:
         for num_calls, stats in call_count_stats.items():
             if stats['total'] > 0:
                 stats['accuracy'] = stats['correct'] / stats['total']
+                stats['avg_tool_accuracy'] = stats['tool_accuracy_sum'] / stats['total']
+                stats['avg_tool_exact_match_acc'] = stats['tool_exact_match_sum'] / stats['total']
                 stats['avg_generation_f1'] = stats['generation_f1_sum'] / stats['total']
                 stats['avg_tool_f1'] = stats['tool_f1_sum'] / stats['total']
             else:
                 stats['accuracy'] = 0
+                stats['avg_tool_accuracy'] = 0
+                stats['avg_tool_exact_match_acc'] = 0
                 stats['avg_generation_f1'] = 0
                 stats['avg_tool_f1'] = 0
         
         final_metrics = {
-            'exact_match_accuracy': total_exact_matches / n_samples,
-            'average_f1_score': total_partial_scores / n_samples,
+            'exact_accuracy': total_exact_matches / n_samples,
+            'tool_accuracy': total_tool_accuracy / n_samples,
+            'tool_exact_match_acc': total_tool_exact_match_acc / n_samples,
+            'avg_tool_f1_score': total_tool_f1 / n_samples,
+            'avg_f1_score': total_partial_scores / n_samples,
             'average_precision': total_precision / n_samples,
             'average_recall': total_recall / n_samples,
-            'tool_selection_f1': total_tool_f1 / n_samples,
             'tool_selection_precision': total_tool_precision / n_samples,
             'tool_selection_recall': total_tool_recall / n_samples,
             'parse_error_rate': parse_errors / n_samples,
             'total_samples': n_samples,
             'call_count_breakdown': call_count_stats
         }
+        final_metrics['exact_match_accuracy'] = final_metrics['exact_accuracy']
+        final_metrics['average_f1_score'] = final_metrics['avg_f1_score']
+        final_metrics['tool_selection_f1'] = final_metrics['avg_tool_f1_score']
         
         # Add RAG metrics if enabled
         if self.use_rag:
@@ -534,11 +590,13 @@ class ICLBaseline:
         # Print detailed results in the requested format
         print(f"\n{'='*50}")
         print(f" RESULTS:")
-        print(f"   Exact Match Accuracy:     {final_metrics['exact_match_accuracy']:.3f} ({total_exact_matches}/{n_samples})")
-        print(f"   Average F1 Score:         {final_metrics['average_f1_score']:.3f}")
+        print(f"   Exact Match Accuracy:     {final_metrics['exact_accuracy']:.3f} ({total_exact_matches}/{n_samples})")
+        print(f"   Tool Acc:                 {final_metrics['tool_accuracy']:.3f}")
+        print(f"   Tool Exact Match Acc:     {final_metrics['tool_exact_match_acc']:.3f}")
+        print(f"   Average Tool F1 Score:    {final_metrics['avg_tool_f1_score']:.3f}")
+        print(f"   Average F1 Score:         {final_metrics['avg_f1_score']:.3f}")
         print(f"   Average Precision:        {final_metrics['average_precision']:.3f}")
         print(f"   Average Recall:           {final_metrics['average_recall']:.3f}")
-        print(f"   Tool Selection F1:        {final_metrics['tool_selection_f1']:.3f}")
         print(f"   Tool Selection Precision: {final_metrics['tool_selection_precision']:.3f}")
         print(f"   Tool Selection Recall:    {final_metrics['tool_selection_recall']:.3f}")
         print(f"   Parse Error Rate:         {final_metrics['parse_error_rate']:.3f}")
@@ -562,6 +620,8 @@ class ICLBaseline:
                 if stats['total'] > 0:
                     print(f"\n   {num_calls} call(s) ({stats['total']} samples):")
                     print(f"      Exact Match:        {stats['accuracy']:.3f} ({stats['correct']}/{stats['total']})")
+                    print(f"      Tool Acc:           {stats['avg_tool_accuracy']:.3f}")
+                    print(f"      Tool Exact Match:   {stats['avg_tool_exact_match_acc']:.3f}")
                     print(f"      Generation F1:      {stats['avg_generation_f1']:.3f}")
                     print(f"      Tool Selection F1:  {stats['avg_tool_f1']:.3f}")
         
@@ -575,8 +635,8 @@ def main():
                        help="Path to test data JSON file")
     parser.add_argument("--tool_descriptions", default="tool_descriptions.json",
                        help="Path to tool descriptions JSON file") 
-    parser.add_argument("--model_name", default="meta-llama/Llama-3.2-1B-Instruct",
-                       help="Hugging Face model name")
+    parser.add_argument("--model_name", required=True,
+                       help="Local model path")
     parser.add_argument("--device", default="cuda", help="Device to use")
     parser.add_argument("--dtype", default="bfloat16", help="Model dtype")
     parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to evaluate (default: None - evaluate all)")
@@ -594,6 +654,8 @@ def main():
                        help="Use RAG for tool retrieval")
     parser.add_argument("--retrieval_k", type=int, default=10,
                        help="Number of tools to retrieve when using RAG (default: 10)")
+    parser.add_argument("--retriever_model_name", type=str, default=None,
+                       help="Local sentence-transformer path for RAG retrieval")
     
     args = parser.parse_args()
 
@@ -648,7 +710,8 @@ def main():
                 device=args.device,
                 dtype=dtype,
                 use_rag=args.use_rag,
-                retrieval_k=args.retrieval_k
+                retrieval_k=args.retrieval_k,
+                retriever_model_name=args.retriever_model_name,
             )
             
             if args.use_rag:

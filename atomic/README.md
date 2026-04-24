@@ -28,6 +28,12 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 - `--logit_bias_network`: Bias-head architecture, `linear` or `mlp`.
 - `--logit_bias_scale`: Decode-time scale applied to the bias logits on the first generated token.
 
+## Fairness And Batch Size
+
+For current `atomic` fairness guidance and single-GPU memory-based batch recommendations, see:
+
+- [docs/atomic/2026-04-24-atomic-fairness-and-memory-batch-size.md](/data/shilong/tokmem/docs/atomic/2026-04-24-atomic-fairness-and-memory-batch-size.md)
+
 ## Usage
 
 ### Maintained TokMem runtime split
@@ -36,12 +42,58 @@ bash main_tokmem.sh
 ```
 
 ### Maintained TokMem fixed split
-This path reuses a precomputed cached split under `atomic/cached_splits/` and enables the first-step logit-bias head:
+This path reuses a precomputed cached split and enables the first-step logit-bias head:
+
+- model directory: `models/Qwen2.5-0.5B-Instruct`
+- split cache: `atomic/cached_splits/task50-500-10-50-seed42/tokmem_atomic_fixed_split_maxlen1024.pt`
+
 ```bash
 bash main_tokmem_fixed_split.sh
 ```
 
 The Qwen 0.5B fixed-split baseline launcher under `scripts/atomic/qwen_0_5b/` uses `--device_map balanced` and a smaller validation batch to match the archived multi-GPU memory layout.
+
+### Raw base-model evaluation
+This path loads the base model directly and evaluates with an `instruction + query` prompt without few-shot examples:
+
+```bash
+bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_base_model.sh
+```
+
+The Python entrypoint is `main_base_model.py`. It writes `run_config.json`, `evaluation_results.json`, `evaluation_predictions.jsonl`, and `run_summary.json` into one folder under `atomic/runs/`.
+
+### SBERT RAG baseline
+This path uses the raw base model for generation, retrieves demonstrations with `Sentence-BERT`, and formats the prompt using the repo's few-shot conversational layout:
+
+```bash
+bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_rag.sh
+```
+
+The Python entrypoint is `main_rag_baseline.py`. It can reuse a saved SBERT corpus through `--corpus_cache_path` and records both generation metrics and retrieval top-1 / top-k accuracy in `evaluation_results.json`.
+
+### Paper suite launcher
+This launcher schedules the maintained fixed-split atomic comparison suite across the local `Qwen 0.5B`, `Llama 3B`, and `Llama 8B` checkpoints. The default scope is the existing `700-task` cached split with four methods: `base`, `rag`, `tokmem`, and `tokmem_logit_bias`.
+
+```bash
+bash ../scripts/atomic/run_paper_atomic_suite.sh --gpus 0,1,2,3
+```
+
+The suite writes all artifacts under `results/atomic/<suite-name>/`:
+
+- per-task runs: `results/atomic/<suite-name>/runs/`
+- task manifest: `results/atomic/<suite-name>/task_manifest.tsv`
+- task status: `results/atomic/<suite-name>/task_status.json`
+- summary: `results/atomic/<suite-name>/summary.md`
+
+Default `700-task` batch settings in the launcher:
+
+| Model | LoRA train | LoRA eval | TokMem train | TokMem eval | base test | rag test |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Qwen 0.5B` | `32` | `64` | `64` | `256` | `1024` | `512` |
+| `Llama 3B` | `16` | `64` | `48` | `128` | `512` | `256` |
+| `Llama 8B` | `8` | `48` | `16` | `64` | `256` | `128` |
+
+Use `--suite-name <existing-suite> --rerun-failed` to rerun only failed tasks inside an existing suite directory.
 
 ### Older local atomic path
 Archived local experiments, scripts, and docs live under `atomic/archive/current_local/`.

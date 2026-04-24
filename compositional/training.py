@@ -16,16 +16,9 @@ LOSS_METRIC_ORDER = (
 )
 
 
-def _resolve_mode_flags(model, use_eoc=None, use_js_trunc=None):
+def _resolve_mode_flags(model, use_eoc=None):
     resolved_use_eoc = bool(getattr(model, "use_eoc", False) if use_eoc is None else use_eoc)
-    resolved_use_js_trunc = bool(
-        getattr(model, "use_js_trunc", False) if use_js_trunc is None else use_js_trunc
-    )
-
-    if resolved_use_js_trunc and not resolved_use_eoc:
-        raise ValueError("use_js_trunc=True requires use_eoc=True")
-
-    return resolved_use_eoc, resolved_use_js_trunc
+    return resolved_use_eoc
 
 
 def _call_method_with_supported_kwargs(method, **kwargs):
@@ -453,7 +446,6 @@ def _generate_results(
     tokenizer,
     user_tokens,
     user_mask,
-    use_js_trunc=False,
     use_logit_bias=False,
     use_eoc=False,
     use_ground_truth_tools=False,
@@ -477,7 +469,6 @@ def _generate_results(
         "temperature": temperature,
         "top_p": top_p,
         "do_sample": do_sample,
-        "use_js_trunc": use_js_trunc,
         "use_logit_bias": use_logit_bias,
         "use_eoc": use_eoc,
     }
@@ -491,7 +482,6 @@ def _generate_results(
 
     raise AttributeError(
         f"Model {type(model).__name__} does not expose a compatible generation method "
-        f"for use_js_trunc={use_js_trunc}, "
         f"use_logit_bias={use_logit_bias}, use_ground_truth_tools={use_ground_truth_tools}."
     )
 
@@ -516,7 +506,6 @@ def _generate_results_with_example_fallback(
     attention_mask,
     raw_examples,
     batch_idx,
-    use_js_trunc,
     use_logit_bias,
     use_eoc,
     use_ground_truth_tools,
@@ -538,7 +527,6 @@ def _generate_results_with_example_fallback(
                     tokenizer,
                     single_input,
                     single_mask,
-                    use_js_trunc=use_js_trunc,
                     use_logit_bias=use_logit_bias,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=True,
@@ -560,7 +548,6 @@ def _generate_results_with_example_fallback(
             tokenizer,
             input_ids,
             attention_mask,
-            use_js_trunc=use_js_trunc,
             use_logit_bias=use_logit_bias,
             use_eoc=use_eoc,
             use_ground_truth_tools=False,
@@ -582,7 +569,6 @@ def _generate_results_with_example_fallback(
                     tokenizer,
                     single_input,
                     single_mask,
-                    use_js_trunc=use_js_trunc,
                     use_logit_bias=use_logit_bias,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=False,
@@ -623,7 +609,6 @@ def train_native_function_calling_model(
     active_tool_ids=None,
     renorm_active_rows=False,
     use_eoc=None,
-    use_js_trunc=None,
     use_logit_bias=None,
     logit_bias_loss_weight=0.1,
     plot_history=None,
@@ -635,11 +620,7 @@ def train_native_function_calling_model(
     from transformers import get_linear_schedule_with_warmup
 
     model.train()
-    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
-        use_eoc,
-        use_js_trunc,
-    )
+    resolved_use_eoc = _resolve_mode_flags(model, use_eoc)
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
@@ -700,7 +681,7 @@ def train_native_function_calling_model(
     print(f"Warmup steps: {total_steps // 10}")
     print(
         "Mode: "
-        f"use_eoc={resolved_use_eoc}, use_js_trunc={resolved_use_js_trunc}, "
+        f"use_eoc={resolved_use_eoc}, "
         f"use_logit_bias={resolved_use_logit_bias}, "
         f"logit_bias_loss_weight={logit_bias_loss_weight}"
     )
@@ -1011,7 +992,6 @@ def train_native_function_calling_model(
         "total_logit_bias_eoc_positions": total_logit_bias_eoc_positions,
         "successful_steps": successful_steps,
         "use_eoc": resolved_use_eoc,
-        "use_js_trunc": resolved_use_js_trunc,
         "use_logit_bias": resolved_use_logit_bias,
         "avg_loss_metrics": avg_loss_metrics,
         "plot_next_step": plot_step_offset + successful_steps,
@@ -1027,22 +1007,15 @@ def demo_native_function_calling(
     max_new_tokens=512,
     use_ground_truth_tools=False,
     use_eoc=None,
-    use_js_trunc=None,
     use_logit_bias=None,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
-    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
-        use_eoc,
-        use_js_trunc,
-    )
+    resolved_use_eoc = _resolve_mode_flags(model, use_eoc)
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
-    if resolved_use_js_trunc:
-        mode_desc += " + JS trunc"
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
 
@@ -1073,7 +1046,6 @@ def demo_native_function_calling(
             tokenizer,
             user_tokens["input_ids"],
             user_tokens["attention_mask"],
-            use_js_trunc=resolved_use_js_trunc,
             use_logit_bias=resolved_use_logit_bias,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
@@ -1084,8 +1056,6 @@ def demo_native_function_calling(
             do_sample=True,
         )
         mode_line = "Ground truth tools used" if use_ground_truth_tools else "Model predicts tools"
-        if resolved_use_js_trunc:
-            mode_line += " + JS trunc"
         if resolved_use_logit_bias:
             mode_line += " + logit bias"
         print(f"Mode: {mode_line}")
@@ -1122,7 +1092,6 @@ def eval_native_function_calling(
     max_new_tokens=512,
     use_ground_truth_tools=False,
     use_eoc=None,
-    use_js_trunc=None,
     use_logit_bias=None,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
@@ -1130,19 +1099,13 @@ def eval_native_function_calling(
     import time
 
     model.eval()
-    resolved_use_eoc, resolved_use_js_trunc = _resolve_mode_flags(
-        model,
-        use_eoc,
-        use_js_trunc,
-    )
+    resolved_use_eoc = _resolve_mode_flags(model, use_eoc)
     resolved_use_logit_bias = bool(
         getattr(model, "use_logit_bias", False) if use_logit_bias is None else use_logit_bias
     )
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
-    if resolved_use_js_trunc:
-        mode_desc += " + JS trunc"
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
 
@@ -1216,7 +1179,6 @@ def eval_native_function_calling(
             attention_mask=attention_mask,
             raw_examples=batch["raw_data"],
             batch_idx=batch_idx,
-            use_js_trunc=resolved_use_js_trunc,
             use_logit_bias=resolved_use_logit_bias,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,

@@ -10,6 +10,12 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from typing import List, Dict, Any
 import json
+import os
+
+
+DEFAULT_RETRIEVER_MODEL_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "models", "all-MiniLM-L6-v2")
+)
 
 
 class ToolRetriever:
@@ -18,15 +24,15 @@ class ToolRetriever:
     Based on ToolLLM's embedding-based retrieval approach.
     """
     
-    def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
+    def __init__(self, model_name):
         """
         Initialize with a pre-trained sentence transformer model.
         
         Args:
-            model_name: Name of the sentence transformer model to use
+            model_name: Local path of the sentence transformer model to use
         """
         print(f"Initializing ToolRetriever with model: {model_name}")
-        self.encoder = SentenceTransformer(model_name)
+        self.encoder = SentenceTransformer(model_name, local_files_only=True)
         self.tool_embeddings = None
         self.tool_descriptions = None
         self.tool_names = []
@@ -180,7 +186,7 @@ def test_retriever():
     }
     
     # Initialize retriever
-    retriever = ToolRetriever()
+    retriever = ToolRetriever(DEFAULT_RETRIEVER_MODEL_PATH)
     retriever.index_tools(sample_tools)
     
     # Test queries

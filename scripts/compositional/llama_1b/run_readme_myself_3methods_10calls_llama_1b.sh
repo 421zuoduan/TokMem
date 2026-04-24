@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
-RUN_NAME="readme_myself_allmethods_llama_1b_${RUN_ID}"
+RUN_NAME="readme_myself_3methods_top1_100_10calls_llama_1b_${RUN_ID}"
 RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 DATA_DIR="$RUN_DIR/data"
 TRIAL_ROOT="$RUN_DIR/trials"
@@ -16,25 +16,25 @@ HF_CACHE_DIR="$RUN_DIR/hf-cache"
 
 MODEL_DIR="$ROOT_DIR/models/Llama-3.2-1B-Instruct"
 TRIAL_SEEDS=(42 42 42 42 42)
-TOP_K="51-100"
+TOP_K="1-100"
 TRAINING_ROUNDS="${TOP_K}:1"
 MAX_SAMPLES_PER_TOOL=50
-TRAIN_SIZE=5000
-TEST_SIZE=500
-TRAIN_MAX_CALLS=4
-TEST_MAX_CALLS=4
+TRAIN_SIZE=12000
+TEST_SIZE=1200
+TRAIN_MAX_CALLS=10
+TEST_MAX_CALLS=10
 BATCH_SIZE=4
 EVAL_BATCH_SIZE=16
 EPOCHS=3
 MAX_LENGTH=1024
 LR="0.005"
-TRAIN_MULTI_TOOL_RATIOS="0.5,0.5"
-TEST_MULTI_TOOL_RATIOS="0.5,0.5"
+TRAIN_MULTI_TOOL_RATIOS="0.125,0.125,0.125,0.125,0.125,0.125,0.125,0.125"
+TEST_MULTI_TOOL_RATIOS="0.125,0.125,0.125,0.125,0.125,0.125,0.125,0.125"
 
 mkdir -p "$RUN_DIR" "$DATA_DIR" "$TRIAL_ROOT" "$HF_CACHE_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
-source /data/ruochen/anaconda/etc/profile.d/conda.sh
+source /home/shilong/anaconda3/etc/profile.d/conda.sh
 conda activate tokmem
 
 export CUDA_VISIBLE_DEVICES=4
@@ -56,23 +56,21 @@ python xlam_datasets.py \
     --output_dir "$DATA_DIR" \
     2>&1 | tee "$RUN_DIR/dataset.log"
 
-printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_js_trunc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
+printf "setting_id\tmode\ttrial\tseed\tuse_eoc\tuse_logit_bias\trun_name\trun_dir\tevaluation_results\ttraining_summary\n" > "$MANIFEST_FILE"
 
 SETTINGS=(
-    "1|baseline|0|0|0"
-    "2|eoc-only|1|0|0"
-    "3|eoc+js_trunc|1|1|0"
-    "4|eoc+logit_bias|1|0|1"
-    "5|eoc+js_trunc+logit_bias|1|1|1"
+    "1|baseline|0|0"
+    "2|eoc-only|1|0"
+    "3|eoc+logit_bias|1|1"
 )
 
 for setting_entry in "${SETTINGS[@]}"; do
-    IFS='|' read -r setting_id mode use_eoc use_js_trunc use_logit_bias <<< "$setting_entry"
+    IFS='|' read -r setting_id mode use_eoc use_logit_bias <<< "$setting_entry"
 
     trial_index=0
     for seed in "${TRIAL_SEEDS[@]}"; do
         trial_index=$((trial_index + 1))
-        trial_name="readme_myself_allmethods_setting${setting_id}_trial${trial_index}_${RUN_ID}"
+        trial_name="readme_myself_3methods_top1_100_10calls_setting${setting_id}_trial${trial_index}_${RUN_ID}"
         trial_dir="$TRIAL_ROOT/$trial_name"
         mkdir -p "$trial_dir"
 
@@ -94,14 +92,11 @@ for setting_entry in "${SETTINGS[@]}"; do
             --tensorboard
             --run_root_dir "$TRIAL_ROOT"
             --run_name "$trial_name"
-            --run_tag "readme_myself_allmethods_setting${setting_id}"
+            --run_tag "readme_myself_3methods_top1_100_10calls_setting${setting_id}"
         )
 
         if [[ "$use_eoc" == "1" ]]; then
             cmd+=(--use_eoc)
-        fi
-        if [[ "$use_js_trunc" == "1" ]]; then
-            cmd+=(--use_js_trunc)
         fi
         if [[ "$use_logit_bias" == "1" ]]; then
             cmd+=(--use_logit_bias)
@@ -109,13 +104,13 @@ for setting_entry in "${SETTINGS[@]}"; do
 
         {
             printf '=== setting %s trial %s ===\n' "$setting_id" "$trial_index"
-            printf 'mode=%s seed=%s use_eoc=%s use_js_trunc=%s use_logit_bias=%s\n' \
-                "$mode" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias"
+            printf 'mode=%s seed=%s use_eoc=%s use_logit_bias=%s\n' \
+                "$mode" "$seed" "$use_eoc" "$use_logit_bias"
             "${cmd[@]}"
         } 2>&1 | tee "$trial_dir/stdout.log"
 
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_js_trunc" "$use_logit_bias" \
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            "$setting_id" "$mode" "$trial_index" "$seed" "$use_eoc" "$use_logit_bias" \
             "$trial_name" "$trial_dir" "$trial_dir/evaluation_results.json" "$trial_dir/training_summary.json" \
             >> "$MANIFEST_FILE"
     done
@@ -124,6 +119,7 @@ done
 python - "$MANIFEST_FILE" "$SUMMARY_FILE" "$ARTIFACTS_FILE" "$README_FILE" "$RUN_NAME" "$EPOCHS" "$LR" <<'PY'
 import csv
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -150,6 +146,10 @@ loss_fields = (
     ("avg_ar_loss", "avg AR loss"),
     ("avg_logit_bias_loss", "avg Logit bias loss"),
 )
+
+FALLBACK_HEADER = "| 实验编号 | 模式 | epochs | lr | eoc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
+FALLBACK_SEPARATOR = "| --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+SEPARATOR_PATTERN = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+$")
 
 
 def as_bool_text(value):
@@ -189,18 +189,29 @@ def load_run_hparams(row):
     return format_hparam(args.get("epochs", launcher_epochs)), format_hparam(args.get("lr", launcher_lr))
 
 
-def replace_or_insert_block(text, begin_marker, end_marker, replacement, anchor_text):
+def replace_or_append_block(text, begin_marker, end_marker, replacement):
     if begin_marker in text and end_marker in text:
         start = text.index(begin_marker)
         end = text.index(end_marker) + len(end_marker)
         return text[:start] + replacement + text[end:]
-    insertion = replacement + "\n\n"
-    if anchor_text in text:
-        anchor_index = text.index(anchor_text)
-        return text[:anchor_index] + insertion + text[anchor_index:]
-    if not text.endswith("\n"):
-        text += "\n"
-    return text + "\n" + replacement + "\n"
+    text = text.rstrip() + "\n\n" if text else ""
+    return text + replacement + "\n"
+
+
+def load_last_table_header(readme_text):
+    last_pair = None
+    lines = readme_text.splitlines()
+    for index in range(len(lines) - 1):
+        if not lines[index].startswith("|"):
+            continue
+        if not lines[index + 1].startswith("|"):
+            continue
+        if not SEPARATOR_PATTERN.fullmatch(lines[index + 1]):
+            continue
+        last_pair = (lines[index], lines[index + 1])
+    if last_pair is None:
+        return FALLBACK_HEADER, FALLBACK_SEPARATOR
+    return last_pair
 
 
 rows = list(csv.DictReader(manifest_path.open("r", encoding="utf-8"), delimiter="\t"))
@@ -221,14 +232,14 @@ artifacts = {
     "settings": [],
 }
 
-header = "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | Tool Acc | Tool F1 | Arguments F1 | Tool Exact Match Acc | Exact Match Acc | Parse Error Rate |"
-separator = "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+header, separator = FALLBACK_HEADER, FALLBACK_SEPARATOR
 summary_lines = [
-    f"# README_MYSELF 全方法对比（{trial_count} 次重复均值）",
+    f"# README_MYSELF 三种维护方法对比（top1-100 / 10 calls, {trial_count} 次重复均值）",
     "",
     f"- run: `{run_name}`",
     f"- trials per setting: `{trial_count}`",
-    "- methods: `baseline`, `eoc-only`, `eoc+js_trunc`, `eoc+logit_bias`, `eoc+js_trunc+logit_bias`",
+    "- methods: `baseline`, `eoc-only`, `eoc+logit_bias`",
     "- defaults: `logit_bias_network=linear`, `logit_bias_loss_weight=0.1`, `logit_bias_scale=1.0`",
     "",
     header,
@@ -266,7 +277,7 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
 
     row_text = (
         f"| `{setting_id}` | {first_row['mode']} | {epochs} | {lr} | "
-        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_js_trunc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
+        f"{as_bool_text(first_row['use_eoc'])} | {as_bool_text(first_row['use_logit_bias'])} | "
         + " | ".join(format_metric(mean_or_none(metric_values[key])) for key, _ in metric_fields)
         + " |"
     )
@@ -281,7 +292,6 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
             "lr": lr,
             "flags": {
                 "use_eoc": first_row["use_eoc"] == "1",
-                "use_js_trunc": first_row["use_js_trunc"] == "1",
                 "use_logit_bias": first_row["use_logit_bias"] == "1",
             },
             "metrics": {key: mean_or_none(metric_values[key]) for key, _ in metric_fields},
@@ -292,14 +302,14 @@ for setting_id in sorted(grouped, key=lambda value: int(value)):
 summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False), encoding="utf-8")
 
-begin_marker = "<!-- README_MYSELF_ALLMETHODS_TABLE:BEGIN -->"
-end_marker = "<!-- README_MYSELF_ALLMETHODS_TABLE:END -->"
+begin_marker = "<!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:BEGIN -->"
+end_marker = "<!-- README_MYSELF_3METHODS_TOP1_100_10CALLS_TABLE:END -->"
 replacement_lines = [
     begin_marker,
-    f"## Compositional maintained methods（{trial_count} 次重复均值）",
+    f"## Compositional baseline / eoc / logit bias（top1-100 / 10 calls, {trial_count} 次重复均值）",
     "",
     f"- run: `{run_name}`",
-    "- 模式只保留当前维护方法：`baseline`、`eoc-only`、`eoc+js_trunc`、`eoc+logit_bias`、`eoc+js_trunc+logit_bias`。",
+    "- 模式只保留 `baseline`、`eoc-only`、`eoc+logit_bias`。",
     "- 默认 `logit_bias_network=linear`、`logit_bias_loss_weight=0.1`、`logit_bias_scale=1.0`。",
     "",
     *readme_table_lines,
@@ -307,13 +317,6 @@ replacement_lines = [
 ]
 replacement = "\n".join(replacement_lines)
 
-if readme_path.exists():
-    updated = replace_or_insert_block(
-        readme_path.read_text(encoding="utf-8"),
-        begin_marker,
-        end_marker,
-        replacement,
-        "## Readme Myself",
-    )
-    readme_path.write_text(updated, encoding="utf-8")
+updated_readme = replace_or_append_block(readme_text, begin_marker, end_marker, replacement)
+readme_path.write_text(updated_readme, encoding="utf-8")
 PY

@@ -348,33 +348,42 @@ def calculate_tool_metrics(
         "candidate_tools": sorted(candidate_tool_set),
     }
 
-def calculate_tool_selection_accuracy(output_calls: List[Union[str, Dict]], 
-                                    target_calls: List[Union[str, Dict]]) -> Dict[str, float]:
-    """Calculate nuanced tool selection accuracy metrics"""
-    
-    # Extract tool names
-    output_tools = extract_tool_names(output_calls)
-    target_tools = extract_tool_names(target_calls)
-    
+def calculate_tool_selection_accuracy(
+    output_calls: Optional[List[Union[str, Dict]]] = None,
+    target_calls: Optional[List[Union[str, Dict]]] = None,
+    predicted_tools: Optional[List[str]] = None,
+    expected_tools: Optional[List[str]] = None,
+) -> Dict[str, float]:
+    """Calculate nuanced tool selection accuracy metrics."""
+
+    if predicted_tools is None:
+        predicted_tools = extract_tool_names(output_calls or [])
+    if expected_tools is None:
+        expected_tools = extract_tool_names(target_calls or [])
+
     # Calculate basic F1 for tool selection
-    tool_f1_results = calculate_f1_score(output_tools, target_tools)
-    
+    tool_f1_results = calculate_f1_score(predicted_tools, expected_tools)
+
     # Calculate additional metrics
-    output_tool_set = set(output_tools)
-    target_tool_set = set(target_tools)
+    output_tool_set = set(predicted_tools)
+    target_tool_set = set(expected_tools)
     
     # Tool coverage: what percentage of required tools were selected
-    tool_coverage = len(output_tool_set & target_tool_set) / len(target_tool_set) if target_tools else 1.0
-    
+    tool_coverage = len(output_tool_set & target_tool_set) / len(target_tool_set) if expected_tools else 1.0
+
     # Tool precision: what percentage of selected tools were correct
-    tool_precision = len(output_tool_set & target_tool_set) / len(output_tool_set) if output_tools else 0.0
-    
+    tool_precision = len(output_tool_set & target_tool_set) / len(output_tool_set) if predicted_tools else 0.0
+
     # Over-selection penalty: penalize selecting too many tools
-    over_selection_ratio = len(output_tool_set) / len(target_tool_set) if target_tools else (1.0 if not output_tools else float('inf'))
+    over_selection_ratio = (
+        len(output_tool_set) / len(target_tool_set)
+        if expected_tools
+        else (1.0 if not predicted_tools else float('inf'))
+    )
     over_selection_penalty = max(0.0, 1.0 - (over_selection_ratio - 1.0)) if over_selection_ratio > 1.0 else 1.0
-    
+
     # Under-selection penalty: penalize selecting too few tools  
-    under_selection_ratio = len(target_tool_set) / len(output_tool_set) if output_tools else float('inf')
+    under_selection_ratio = len(target_tool_set) / len(output_tool_set) if predicted_tools else float('inf')
     under_selection_penalty = max(0.0, 1.0 - (under_selection_ratio - 1.0)) if under_selection_ratio > 1.0 else 1.0
     
     # Combined selection accuracy with penalties

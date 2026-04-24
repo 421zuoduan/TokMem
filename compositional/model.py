@@ -17,24 +17,6 @@ def build_logit_bias_head(hidden_size, num_tools, network_type):
         )
     raise ValueError(f"Unsupported logit_bias_network: {network_type}")
 
-JS_TRUNCATION_THRESHOLD = 0.6
-
-
-def compute_js_divergence_against_final(logits_by_layer, eps=1e-12):
-    logits_by_layer = logits_by_layer.float()
-    log_probs = torch.log_softmax(logits_by_layer, dim=-1)
-    probs = log_probs.exp()
-
-    final_probs = probs[-1:].expand_as(probs)
-    final_log_probs = log_probs[-1:].expand_as(log_probs)
-
-    mixture = 0.5 * (probs + final_probs)
-    log_mixture = torch.log(mixture.clamp_min(eps))
-
-    kl_layer = (probs * (log_probs - log_mixture)).sum(dim=-1)
-    kl_final = (final_probs * (final_log_probs - log_mixture)).sum(dim=-1)
-    return 0.5 * (kl_layer + kl_final)
-
 def count_parameters(model):
     """Count trainable and total parameters in a model"""
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -59,7 +41,7 @@ class FunctionCallingModel(nn.Module):
     of the base model for hybrid tokenized memory + LoRA approach.
     
     Args:
-        model_name: HuggingFace model name/path (default: "meta-llama/Llama-3.2-1B-Instruct")
+        model_name: Local model path
         num_tools: Number of tool tokens to use (max 248, default: 100)
         tool_names: List of tool names (default: auto-generated)
         tokenizer: Pre-loaded tokenizer (required)
@@ -72,19 +54,16 @@ class FunctionCallingModel(nn.Module):
                              "layer_indices": [21, 22]}  # Optional: specific layers to apply LoRA to
     """
     
-    def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct",
+    def __init__(self, model_name,
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
-                 decouple_embeddings=False, lora_config=None, use_eoc=False, use_js_trunc=False,
+                 decouple_embeddings=False, lora_config=None, use_eoc=False,
                  use_logit_bias=False, logit_bias_network="linear", logit_bias_scale=1.0):
         super().__init__()
-        self.config = AutoConfig.from_pretrained(model_name)
+        self.config = AutoConfig.from_pretrained(model_name, local_files_only=True)
         self.use_eoc = use_eoc
-        self.use_js_trunc = use_js_trunc
         self.use_logit_bias = use_logit_bias
         self.logit_bias_network = logit_bias_network
         self.logit_bias_scale = logit_bias_scale
-        if self.use_js_trunc and not self.use_eoc:
-            raise ValueError("--use_js_trunc requires --use_eoc")
         if self.use_logit_bias and not self.use_eoc:
             raise ValueError("--use_logit_bias requires --use_eoc")
         if self.logit_bias_network not in {"linear", "mlp"}:
@@ -110,7 +89,11 @@ class FunctionCallingModel(nn.Module):
         self._setup_reserved_tokens()
         
         # Load base model
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            local_files_only=True,
+        ).to(device)
         
         # Apply LoRA if configured
         if self.lora_config:
@@ -433,22 +416,15 @@ class FunctionCallingModel(nn.Module):
         logits[active_indices[:, None], tool_token_ids[None, :]] += tool_bias
         return logits
 
-    def _get_js_core_model(self):
-        """Return the underlying causal LM used for JS-style logit lens scoring."""
+    def _get_core_model(self):
+        """Return the underlying causal LM."""
         if hasattr(self.model, "get_base_model"):
             return self.model.get_base_model()
         return self.model
 
-    def _get_final_norm_module(self):
-        """Locate the model's final norm module."""
-        core_model = self._get_js_core_model()
-        if hasattr(core_model, "model") and hasattr(core_model.model, "norm"):
-            return core_model.model.norm
-        return None
-
     def _get_lm_head_module(self):
         """Locate the model's lm_head or output embeddings."""
-        core_model = self._get_js_core_model()
+        core_model = self._get_core_model()
         if hasattr(core_model, "lm_head"):
             return core_model.lm_head
         if hasattr(core_model, "get_output_embeddings"):
@@ -456,36 +432,6 @@ class FunctionCallingModel(nn.Module):
             if output_embeddings is not None:
                 return output_embeddings
         raise ValueError("Unable to locate lm_head / output embeddings on the model")
-
-    def _prepare_js_layer_hidden_states(self, hidden_states, final_norm_module):
-        """Stack per-layer last-token states with js_explore's final-norm semantics."""
-        if len(hidden_states) < 2:
-            raise ValueError("Expected hidden_states to include embeddings and layer outputs")
-
-        layer_outputs = list(hidden_states[1:])
-        if final_norm_module is None or len(layer_outputs) <= 1:
-            return torch.stack([tensor[:, -1, :] for tensor in layer_outputs], dim=0)
-
-        intermediate_layers = layer_outputs[:-1]
-        final_layer = layer_outputs[-1][:, -1, :].unsqueeze(0)
-        if intermediate_layers:
-            intermediate_tensor = torch.stack([tensor[:, -1, :] for tensor in intermediate_layers], dim=0)
-            intermediate_tensor = final_norm_module(intermediate_tensor)
-            return torch.cat([intermediate_tensor, final_layer], dim=0)
-        return final_layer
-
-    def _compute_js_curve_from_hidden_states(self, hidden_states):
-        """Compute the layer-to-final JS curve for the last generated position."""
-        final_norm_module = self._get_final_norm_module()
-        lm_head_module = self._get_lm_head_module()
-        layer_hidden_states = self._prepare_js_layer_hidden_states(hidden_states, final_norm_module)
-        logits_by_layer = lm_head_module(layer_hidden_states)
-        return compute_js_divergence_against_final(logits_by_layer)
-
-    def _compute_js_mean_from_hidden_states(self, hidden_states):
-        """Compute the per-example mean JS divergence against the final layer."""
-        js_curve = self._compute_js_curve_from_hidden_states(hidden_states)
-        return js_curve.mean(dim=0)
 
     def _sample_next_tokens(self, logits, temperature=0.6, top_p=0.9, do_sample=False):
         """Sample or decode greedily from a batch of logits."""
@@ -516,21 +462,8 @@ class FunctionCallingModel(nn.Module):
         attention_mask,
         past_key_values=None,
         use_cache=False,
-        capture_all_hidden_states=False,
     ):
-        """Run the LM and capture final-layer hidden states without returning every layer unless requested."""
-        if capture_all_hidden_states:
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            final_hidden_states = outputs.hidden_states[-1]
-            return outputs, final_hidden_states, outputs.hidden_states
-
+        """Run the LM and capture final-layer hidden states for logit-bias scoring."""
         lm_head_module = self._get_lm_head_module()
         captured = {}
 
@@ -552,15 +485,14 @@ class FunctionCallingModel(nn.Module):
             handle.remove()
 
         final_hidden_states = captured.get("final_hidden_states")
-        return outputs, final_hidden_states, None
+        return outputs, final_hidden_states
 
     def forward_with_final_hidden_states(self, input_ids, attention_mask):
         """Return logits plus final-layer hidden states without materializing all transformer layers."""
-        outputs, final_hidden_states, _ = self._forward_with_captured_final_hidden_states(
+        outputs, final_hidden_states = self._forward_with_captured_final_hidden_states(
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_cache=False,
-            capture_all_hidden_states=False,
         )
         return outputs.logits, final_hidden_states
 
@@ -570,25 +502,23 @@ class FunctionCallingModel(nn.Module):
         attention_mask,
         past_key_values=None,
         return_last_hidden_state=False,
-        return_all_hidden_states=False,
     ):
         """Run one cached generation step and return only the newest position outputs."""
-        outputs, final_hidden_states, hidden_states = self._forward_with_captured_final_hidden_states(
+        outputs, final_hidden_states = self._forward_with_captured_final_hidden_states(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=True,
-            capture_all_hidden_states=return_all_hidden_states,
         )
 
         next_logits = outputs.logits[:, -1, :]
         last_hidden_states = None
-        if return_all_hidden_states or return_last_hidden_state:
+        if return_last_hidden_state:
             if final_hidden_states is None:
                 raise ValueError("Final hidden states were requested but not captured")
             last_hidden_states = final_hidden_states[:, -1, :]
 
-        return next_logits, last_hidden_states, outputs.past_key_values, hidden_states
+        return next_logits, last_hidden_states, outputs.past_key_values
 
     def _build_decision_context(self, input_ids, batch_size, device, step, use_eoc=True):
         """Return rows whose current token should use routing-probe logic."""
@@ -615,7 +545,7 @@ class FunctionCallingModel(nn.Module):
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         with torch.no_grad():
-            if not (self.use_js_trunc or resolved_use_logit_bias):
+            if not resolved_use_logit_bias:
                 # Use native generation - our overrides make the custom embeddings/logits transparent
                 generated = self.model.generate(
                     input_ids=user_tokens,
@@ -645,16 +575,14 @@ class FunctionCallingModel(nn.Module):
                     step=step,
                 )
                 active_decision_rows = decision_context & ~finished
-                need_all_hidden_states = bool(self.use_js_trunc and active_decision_rows.any())
                 need_last_hidden_state = bool(
                     resolved_use_logit_bias and active_decision_rows.any()
                 )
-                next_logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
+                next_logits, last_hidden_states, past_key_values = self._generation_forward_step(
                     input_ids=step_input_ids,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     return_last_hidden_state=need_last_hidden_state,
-                    return_all_hidden_states=need_all_hidden_states,
                 )
                 next_logits = next_logits.clone()
 
@@ -665,15 +593,6 @@ class FunctionCallingModel(nn.Module):
                         hidden_states=last_hidden_states,
                         active_decision_rows=active_decision_rows,
                     )
-                if self.use_js_trunc:
-                    if active_decision_rows.any():
-                        active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
-                        active_hidden_states = tuple(layer_hidden[active_indices] for layer_hidden in hidden_states)
-                        js_mean = self._compute_js_mean_from_hidden_states(active_hidden_states)
-                        js_positive = js_mean > JS_TRUNCATION_THRESHOLD
-                        if js_positive.any():
-                            positive_indices = active_indices[js_positive]
-                            selection_logits[positive_indices] = self.mask_logits_to_tool_tokens(selection_logits[positive_indices])
                 next_tokens = self._sample_next_tokens(
                     selection_logits,
                     temperature=temperature,
@@ -702,7 +621,6 @@ class FunctionCallingModel(nn.Module):
         temperature=0.6,
         top_p=0.9,
         do_sample=False,
-        use_js_trunc=None,
         use_eoc=None,
         use_logit_bias=None,
     ):
@@ -710,7 +628,6 @@ class FunctionCallingModel(nn.Module):
         self.eval()
 
         resolved_use_eoc = self.use_eoc if use_eoc is None else use_eoc
-        resolved_use_js_trunc = self.use_js_trunc if use_js_trunc is None else use_js_trunc
         resolved_use_logit_bias = self.use_logit_bias if use_logit_bias is None else use_logit_bias
         
         # Convert ground truth tool names to token IDs
@@ -750,16 +667,14 @@ class FunctionCallingModel(nn.Module):
                         force_ground_truth_rows[i] = True
 
                 analysis_rows = active_decision_rows & ~force_ground_truth_rows
-                need_all_hidden_states = bool(resolved_use_js_trunc and analysis_rows.any())
                 need_last_hidden_state = bool(
                     resolved_use_logit_bias and analysis_rows.any()
                 )
-                logits, last_hidden_states, past_key_values, hidden_states = self._generation_forward_step(
+                logits, last_hidden_states, past_key_values = self._generation_forward_step(
                     input_ids=step_input_ids,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     return_last_hidden_state=need_last_hidden_state,
-                    return_all_hidden_states=need_all_hidden_states,
                 )
                 logits = logits.clone()
 
@@ -771,12 +686,6 @@ class FunctionCallingModel(nn.Module):
                         hidden_states=last_hidden_states,
                         active_decision_rows=analysis_rows,
                     )
-                if resolved_use_js_trunc and analysis_rows.any():
-                    active_indices = analysis_rows.nonzero(as_tuple=False).squeeze(-1)
-                    active_hidden_states = tuple(layer_hidden[active_indices] for layer_hidden in hidden_states)
-                    js_mean = self._compute_js_mean_from_hidden_states(active_hidden_states)
-                    js_positive = js_mean > JS_TRUNCATION_THRESHOLD
-                    force_ground_truth_rows[active_indices] = js_positive
                 
                 # Sample/select next tokens
                 if next_tokens is None:

@@ -1,5 +1,7 @@
 # TokMem 个人备忘
 
+> Archived note: this file records older local atomic workflows, including historical `atomic/runs/` layouts and watchdog notes. The current maintained atomic entrypoints are `atomic/main_in_domain.py`, `atomic/main_tokmem.sh`, and `atomic/main_tokmem_fixed_split.sh`.
+
 这份文档用于记录我自己后续最常需要回忆的内容：
 
 - 这个项目怎么跑 `atomic` 的 tokmem 实验

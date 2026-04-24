@@ -17,28 +17,20 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from datetime import datetime
 
+from generation_baseline_utils import (
+    ensure_tokenizer_padding,
+    load_generation_split,
+    prepare_run_dir,
+    set_random_seed,
+    write_json,
+)
+
 # Import data loading functions from existing modules
 from task_dataset import (
-    sample_natural_instructions_tasks,
     NaturalInstructionsTaskDataset
 )
 from task_training import setup_logging
 from natural_instructions_eval import evaluate_predictions, print_evaluation_results
-
-def set_random_seed(seed):
-    """Set random seed for reproducibility across all libraries"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
-    print(f"Random seed set to: {seed}")
 
 def lora_collate_fn(batch, tokenizer):
     """Custom collate function for LoRA training"""
@@ -338,19 +330,25 @@ def train_lora_model(model, train_dataloader, val_dataloader=None,
         if logger:
             logger.info(f"Epoch {epoch+1}: avg_loss={avg_epoch_loss:.4f}, steps={epoch_steps}")
     
-    # Save model if path provided
-    if save_path and best_model_state:
-        model.load_state_dict(best_model_state)
+    saved_model_path = None
+    if save_path:
+        if best_model_state:
+            model.load_state_dict(best_model_state)
+            print(f"Best model selected for saving (validation loss: {best_val_loss:.4f})")
         model.save_pretrained(save_path)
-        print(f"Best model saved to {save_path}")
+        saved_model_path = save_path
+        print(f"LoRA weights saved to {save_path}")
         
         if logger:
-            logger.info(f"Model saved to {save_path}, final_loss={avg_epoch_loss:.4f}, best_val_loss={best_val_loss:.4f}")
+            logger.info(
+                f"Model saved to {save_path}, final_loss={avg_epoch_loss:.4f}, best_val_loss={best_val_loss:.4f}"
+            )
     
     return {
         'avg_loss': avg_epoch_loss,
         'best_val_loss': best_val_loss,
-        'best_model_state': best_model_state
+        'best_model_state': best_model_state,
+        'saved_model_path': saved_model_path,
     }
 
 def evaluate_model(model, dataloader, device="cuda"):
@@ -443,6 +441,10 @@ def evaluate_with_generation(model, tokenizer, test_examples, device="cuda", max
         references=all_references,
         task_names=all_task_names
     )
+
+    # Align with the maintained atomic suite summary schema.
+    results["exact_accuracy"] = round(results["exact_match"] / 100.0, 4)
+    results["avg_response_score"] = round(results["rougeL"] / 100.0, 4)
     
     return results, all_predictions
 
@@ -525,6 +527,9 @@ def main():
     parser.add_argument('--num_epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--device', type=str, default="cuda", help='Device to use')
+    parser.add_argument('--device_map', type=str, default=None,
+                        choices=["auto", "balanced", "balanced_low_0", "sequential"],
+                        help='Optional Hugging Face device_map for model placement')
     parser.add_argument('--max_instruction_tokens', type=int, default=1024, 
                         help='Maximum token length for instructions')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -551,6 +556,10 @@ def main():
     parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout')
     parser.add_argument('--target_modules', type=str, default="q_proj,v_proj", 
                         help='Target modules for LoRA (comma-separated)')
+    parser.add_argument('--split_cache_path', type=str, default=None,
+                        help='Path to a cached train/val/test split')
+    parser.add_argument('--run_dir', type=str, default=None,
+                        help='Directory where logs and results will be written')
     
     args = parser.parse_args()
     # Simplified mode: continual replay implies no shuffle
@@ -559,6 +568,17 @@ def main():
     
     # Set random seed
     set_random_seed(args.seed)
+    run_dir = prepare_run_dir(
+        run_dir=args.run_dir,
+        experiment_tag="lora_baseline",
+        model_name=args.model_name,
+        num_tasks=args.num_tasks,
+    )
+    lora_weights_dir = (
+        os.path.abspath(args.save_path)
+        if args.save_path
+        else os.path.join(run_dir, "lora_adapter")
+    )
     print()
     
     print("=" * 60)
@@ -566,16 +586,19 @@ def main():
     print("=" * 60)
     print(f"Model: {args.model_name}")
     print(f"Device: {args.device}")
+    print(f"Device map: {args.device_map}")
     print(f"Number of tasks: {args.num_tasks}")
     print(f"Validation batch size: {args.val_batch_size}")
     print(f"Test batch size: {args.test_batch_size}")
     print(f"LoRA config: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
     print(f"Target modules: {args.target_modules}")
+    print(f"Run directory: {run_dir}")
+    print(f"LoRA weights directory: {lora_weights_dir}")
     print()
     
     # Set up logging
     print("Setting up logging...")
-    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging()
+    training_logger, eval_logger, training_log, evaluation_log, timestamp = setup_logging(log_dir=run_dir)
     print(f"   Training log: {training_log}")
     print(f"   Evaluation log: {evaluation_log}")
     print()
@@ -583,42 +606,86 @@ def main():
     # Load tokenizer
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.bos_token
-    # Set left padding for causal language models
-    tokenizer.padding_side = "left"
+    tokenizer = ensure_tokenizer_padding(tokenizer)
     print(f"Tokenizer loaded. Vocab size: {len(tokenizer)}, padding side: {tokenizer.padding_side}")
     print()
     
-    # Sample tasks from Natural Instructions dataset
-    print(f"Sampling {args.num_tasks} tasks from Natural Instructions dataset...")
-    train_data, val_data, test_data, _ = sample_natural_instructions_tasks(
-        tasks_dir=args.tasks_dir,
-        num_tasks=args.num_tasks,
-        max_instruction_tokens=args.max_instruction_tokens,
-        tokenizer=tokenizer,
-        stable_test_split=True,
-        train_size=args.train_size,
-        val_size=args.val_size,
-        test_size=args.test_size,
+    args.tokenizer_for_sampling = tokenizer
+    train_data, val_data, test_data, task_names, split_source, resolved_tasks_dir = load_generation_split(
+        args,
         few_shot=args.few_shot,
+    )
+    print(f"Tasks directory: {resolved_tasks_dir}")
+    print(f"Split source: {split_source}")
+    print(
+        f"Dataset summary - Train: {len(train_data)}, Val: {len(val_data)}, "
+        f"Test: {len(test_data)}, Tasks: {len(task_names)}"
+    )
+    print()
+
+    write_json(
+        os.path.join(run_dir, "run_config.json"),
+        {
+            "mode": "lora_baseline",
+            "model_name": args.model_name,
+            "tasks_dir": resolved_tasks_dir,
+            "num_tasks": args.num_tasks,
+            "train_size": args.train_size,
+            "val_size": args.val_size,
+            "test_size": args.test_size,
+            "batch_size": args.batch_size,
+            "val_batch_size": args.val_batch_size,
+            "test_batch_size": args.test_batch_size,
+            "max_length": args.max_length,
+            "max_instruction_tokens": args.max_instruction_tokens,
+            "num_epochs": args.num_epochs,
+            "lr": args.lr,
+            "device": args.device,
+            "device_map": args.device_map,
+            "seed": args.seed,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "validate_every_n_steps": args.validate_every_n_steps,
+            "few_shot": args.few_shot,
+            "shuffle_train": args.shuffle_train,
+            "continual_replay": args.continual_replay,
+            "continual_replay_ratio": args.continual_replay_ratio,
+            "block_size": args.block_size,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "target_modules": args.target_modules,
+            "load_model": os.path.abspath(args.load_model) if args.load_model else None,
+            "split_cache_path": os.path.abspath(args.split_cache_path) if args.split_cache_path else None,
+            "run_dir": run_dir,
+            "lora_weights_dir": lora_weights_dir,
+            "timestamp": timestamp,
+            "split_source": split_source,
+            "dataset_summary": {
+                "train_examples": len(train_data),
+                "val_examples": len(val_data),
+                "test_examples": len(test_data),
+                "task_count": len(task_names),
+            },
+        },
     )
     
     # Load base model
     print("Loading base model...")
+    model_load_kwargs = {"torch_dtype": torch.bfloat16}
+    if args.device_map is not None:
+        model_load_kwargs["device_map"] = args.device_map
     if args.load_model:
         # Load fine-tuned model
-        model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_load_kwargs)
         model = PeftModel.from_pretrained(model, args.load_model)
-        model = model.to(args.device)
+        if args.device_map is None:
+            model = model.to(args.device)
         print(f"Loaded fine-tuned model from {args.load_model}")
     else:
         # Load base model and add LoRA
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            torch_dtype=torch.bfloat16,
-            device_map=args.device
-        )
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_load_kwargs)
+        if args.device_map is None:
+            model = model.to(args.device)
         
         # Configure LoRA
         target_modules = args.target_modules.split(',')
@@ -677,7 +744,7 @@ def main():
             device=args.device,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             validate_every_n_steps=args.validate_every_n_steps,
-            save_path=args.save_path or f"lora_model_{timestamp}",
+            save_path=lora_weights_dir,
             logger=training_logger
         )
         print(f"Training completed with average loss: {train_results['avg_loss']:.4f}")
@@ -741,6 +808,9 @@ def main():
         
         eval_logger.info("=" * 60)
         print()
+    else:
+        eval_results = None
+        predictions = []
     
     # Demo generation
     if args.demo and test_examples:
@@ -751,6 +821,51 @@ def main():
         # Calculate simple accuracy (exact match)
         exact_matches = sum(1 for r in demo_results if r['expected'].strip() == r['generated'].strip())
         print(f"Demo exact match: {exact_matches}/{len(demo_results)} = {exact_matches/len(demo_results):.2%}")
+
+    training_summary = None
+    if 'train_results' in locals():
+        training_summary = {
+            "avg_loss": train_results.get("avg_loss"),
+            "best_val_loss": train_results.get("best_val_loss"),
+            "saved_model_path": train_results.get("saved_model_path"),
+        }
+
+    evaluation_results_path = os.path.join(run_dir, "evaluation_results.json")
+    write_json(
+        evaluation_results_path,
+        eval_results if eval_results is not None else {
+            "status": "skipped",
+            "reason": "no_test_examples",
+        },
+    )
+    write_json(
+        os.path.join(run_dir, "run_summary.json"),
+        {
+            "mode": "lora_baseline",
+            "run_dir": run_dir,
+            "model_name": args.model_name,
+            "split_source": split_source,
+            "dataset_summary": {
+                "train_examples": len(train_data),
+                "val_examples": len(val_data),
+                "test_examples": len(test_data),
+                "task_count": len(task_names),
+            },
+            "training": training_summary,
+            "metrics": eval_results,
+            "artifacts": {
+                "training_log": training_log,
+                "evaluation_log": evaluation_log,
+                "run_config": os.path.join(run_dir, "run_config.json"),
+                "evaluation_results": evaluation_results_path,
+                "lora_weights_dir": (
+                    train_results.get("saved_model_path")
+                    if 'train_results' in locals() and train_results.get("saved_model_path")
+                    else (os.path.abspath(args.load_model) if args.load_model else None)
+                ),
+            },
+        },
+    )
     
     print("\nLoRA baseline pipeline completed!")
 

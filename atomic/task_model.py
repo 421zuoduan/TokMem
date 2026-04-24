@@ -239,6 +239,33 @@ class TaskCallingModel(nn.Module):
                 f"Logit-bias head: {self.logit_bias_network}, "
                 f"scale={self.logit_bias_scale}"
             )
+
+    def forward_with_final_hidden_states(self, input_ids, attention_mask, use_cache=False):
+        """Return logits plus final hidden states without materializing every layer."""
+        captured = {}
+
+        def _capture_hidden_states(module, args):
+            if args:
+                captured["final_hidden_states"] = args[0]
+
+        handle = self.model.lm_head.register_forward_pre_hook(_capture_hidden_states)
+        try:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                return_dict=True,
+                output_hidden_states=False,
+            )
+        finally:
+            handle.remove()
+
+        final_hidden_states = captured.get("final_hidden_states")
+        if final_hidden_states is None:
+            raise RuntimeError("Failed to capture final hidden states from lm_head input")
+        if final_hidden_states.device != outputs.logits.device:
+            final_hidden_states = final_hidden_states.to(outputs.logits.device)
+        return outputs.logits, final_hidden_states
     
     def forward(self, input_ids, attention_mask, return_hidden_states=False):
         """
@@ -246,18 +273,20 @@ class TaskCallingModel(nn.Module):
         
         Sequence: [Instruction] [Reserved_Task_Token] [Response] <|eot_id|>
         """
+        if return_hidden_states:
+            return self.forward_with_final_hidden_states(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_cache=False,
             return_dict=True,
-            output_hidden_states=return_hidden_states,
+            output_hidden_states=False,
         )
-        if return_hidden_states:
-            last_hidden_state = outputs.hidden_states[-1]
-            if last_hidden_state.device != outputs.logits.device:
-                last_hidden_state = last_hidden_state.to(outputs.logits.device)
-            return outputs.logits, last_hidden_state
         return outputs.logits
 
     def get_task_bias_targets(self, token_ids):
@@ -325,17 +354,13 @@ class TaskCallingModel(nn.Module):
         
         with torch.no_grad():
             if self.use_logit_bias and max_new_tokens > 0:
-                outputs = self.model(
+                logits, final_hidden_states = self.forward_with_final_hidden_states(
                     input_ids=instruction_tokens,
                     attention_mask=instruction_mask,
-                    return_dict=True,
-                    output_hidden_states=True,
                     use_cache=False,
                 )
-                next_token_logits = outputs.logits[:, -1, :]
-                last_hidden_states = outputs.hidden_states[-1][:, -1, :]
-                if last_hidden_states.device != next_token_logits.device:
-                    last_hidden_states = last_hidden_states.to(next_token_logits.device)
+                next_token_logits = logits[:, -1, :]
+                last_hidden_states = final_hidden_states[:, -1, :]
                 next_token_logits = self._apply_first_step_logit_bias(
                     next_token_logits,
                     last_hidden_states,

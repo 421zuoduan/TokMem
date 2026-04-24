@@ -1,10 +1,12 @@
 # TokMem 当前备忘
 
-旧的长篇个人备忘已经迁到：
+> Archived note: this file records older local atomic experiments. The current maintained atomic entrypoints are `atomic/main_in_domain.py`, `atomic/main_tokmem.sh`, and `atomic/main_tokmem_fixed_split.sh`.
+
+旧的长篇个人备忘位置：
 
 - [BASELINE_MYSELF.md](/data/ruochen/tokmem/BASELINE_MYSELF.md)
 
-这个文件从现在开始只记录“当前最需要记住的实现变化”。
+这个文件保留旧 atomic 分支的实验记录和分析口径。
 
 ## 0. 2026-04-04 HN 多 task token 问题
 
@@ -150,17 +152,17 @@ task_match = set(predicted_tasks) == set(expected_tasks)
 
 因为如果“多 task token / 空响应”这个接口问题不先解决，很多 sweep 只是在反复调这个副作用的强弱。
 
-## 0. 当前结果分析脚本
+## 0. Archived 结果分析脚本
 
-当前归档实验的低 routing task 分析，统一用：
+Archived local low-routing-task analysis used:
 
-- [atomic/analyze_baseline_failures.py](/data/ruochen/tokmem/atomic/analyze_baseline_failures.py)
+- [atomic/archive/current_local/analyze_baseline_failures.py](/data/shilong/tokmem/atomic/archive/current_local/analyze_baseline_failures.py)
 
-这不是只给某一个 baseline run 用的脚本，而是面向 `atomic` archived runs 的通用结果分析入口。
+这个 archived 脚本面向 `atomic` archived runs 的通用结果分析入口。
 
 默认约定：
 
-- 只按标准 `instruction + query` 评测格式分析，不再单独暴露 prompt-mode 开关
+- 按标准 `instruction + query` 评测格式分析
 - 重点看 `routing acc` 低于阈值的 task
 - 对每个低 routing task，统计最容易被误路由到的目标 task
 - 误路由目标完全从最终评测结果里统计，不依赖 confusion memory 本身
@@ -169,7 +171,7 @@ task_match = set(predicted_tasks) == set(expected_tasks)
 常用命令：
 
 ```bash
-python atomic/analyze_baseline_failures.py \
+python atomic/archive/current_local/analyze_baseline_failures.py \
   --run-dir results/<run_folder>
 ```
 

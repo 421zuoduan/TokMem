@@ -229,8 +229,8 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Sequential Function Calling Training with Tool Progression")
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
-                        help="Base model name")
+    parser.add_argument("--model_name", type=str, required=True,
+                        help="Local base model path")
     
     # Sequential training arguments
     parser.add_argument("--training_rounds", type=str, required=True,
@@ -263,8 +263,6 @@ def build_parser():
                         help="Force gold tool ids at assistant-start and each explicit eoc boundary during inference")
     parser.add_argument("--use_eoc", action="store_true",
                         help="Insert an explicit end-of-control token after each tool-controlled span")
-    parser.add_argument("--use_js_trunc", action="store_true",
-                        help="Enable JS truncation decode-only routing at decision positions")
     parser.add_argument("--use_logit_bias", action="store_true",
                         help="Train an external detached tool prior head and use it as a soft decode-time logit bias")
     parser.add_argument("--logit_bias_loss_weight", type=float, default=0.1,
@@ -334,8 +332,6 @@ def build_parser():
 
 
 def validate_args(args, parser):
-    if args.use_js_trunc and not args.use_eoc:
-        parser.error("--use_js_trunc requires --use_eoc")
     if args.use_logit_bias and not args.use_eoc:
         parser.error("--use_logit_bias requires --use_eoc")
     if args.max_length <= 0:
@@ -476,7 +472,6 @@ def main():
     print(f"Training rounds: {len(rounds)}")
     print(f"LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
-    print(f"JS truncation: {'Enabled' if args.use_js_trunc else 'Disabled'}")
     print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
     if args.use_logit_bias:
         print(f"Logit bias network: {args.logit_bias_network}")
@@ -490,7 +485,7 @@ def main():
     print()
     
     # Create tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.bos_token
     
@@ -615,7 +610,6 @@ def main():
                 decouple_embeddings=args.decouple_embeddings,
                 lora_config=lora_config,
                 use_eoc=args.use_eoc,
-                use_js_trunc=args.use_js_trunc,
                 use_logit_bias=args.use_logit_bias,
                 logit_bias_network=args.logit_bias_network,
                 logit_bias_scale=args.logit_bias_scale,
@@ -683,7 +677,6 @@ def main():
             active_tool_ids=active_tool_ids,
             renorm_active_rows=(args.renorm_active_tools and round_num > 2),
             use_eoc=args.use_eoc,
-            use_js_trunc=args.use_js_trunc,
             use_logit_bias=args.use_logit_bias,
             logit_bias_loss_weight=args.logit_bias_loss_weight,
             plot_history=plot_history,
@@ -735,7 +728,6 @@ def main():
                         max_new_tokens=args.max_new_tokens,
                         use_ground_truth_tools=args.use_ground_truth_tools,
                         use_eoc=args.use_eoc,
-                        use_js_trunc=args.use_js_trunc,
                         use_logit_bias=args.use_logit_bias,
                     )
                 )
@@ -778,7 +770,6 @@ def main():
                                 max_new_tokens=args.max_new_tokens,
                                 use_ground_truth_tools=args.use_ground_truth_tools,
                                 use_eoc=args.use_eoc,
-                                use_js_trunc=args.use_js_trunc,
                                 use_logit_bias=args.use_logit_bias,
                             )
                         )
@@ -839,7 +830,6 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 use_ground_truth_tools=args.use_ground_truth_tools,
                 use_eoc=args.use_eoc,
-                use_js_trunc=args.use_js_trunc,
                 use_logit_bias=args.use_logit_bias,
             )
         )

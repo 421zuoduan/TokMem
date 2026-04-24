@@ -10,7 +10,7 @@ RUN_DIR="$ROOT_DIR/compositional/runs/$RUN_NAME"
 mkdir -p "$RUN_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
-source /data/ruochen/anaconda/etc/profile.d/conda.sh
+source /home/shilong/anaconda3/etc/profile.d/conda.sh
 conda activate tokmem
 
 export CUDA_VISIBLE_DEVICES=0

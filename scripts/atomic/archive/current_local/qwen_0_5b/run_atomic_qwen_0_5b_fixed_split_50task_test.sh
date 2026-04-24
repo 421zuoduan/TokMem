@@ -21,11 +21,7 @@ mkdir -p "$RUN_DIR"
 cp "$SCRIPT_PATH" "$RUN_DIR/$(basename "$SCRIPT_PATH")"
 
 export CUDA_VISIBLE_DEVICES=4,5,6
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_LAUNCH_BLOCKING=1
-export TORCH_SHOW_CPP_STACKTRACES=1
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_DEBUG=INFO
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 while true; do
     {

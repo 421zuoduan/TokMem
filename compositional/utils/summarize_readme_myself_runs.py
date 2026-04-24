@@ -8,11 +8,11 @@ from pathlib import Path
 
 
 TABLE_HEADER = (
-    "| 实验编号 | 模式 | epochs | lr | eoc | js trunc | logit bias | "
+    "| 实验编号 | 模式 | epochs | lr | eoc | logit bias | "
     "Tool Acc | Tool Exact Match Acc | Tool F1 | Arguments F1 | Exact Match Acc | Parse Error Rate |"
 )
 TABLE_RULE = (
-    "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
 )
 
 METRIC_FIELDS = (
@@ -173,7 +173,6 @@ def summarize_rows(rows):
                 "trial_count": len(setting_rows),
                 "flags": {
                     "use_eoc": first_row["use_eoc"],
-                    "use_js_trunc": first_row["use_js_trunc"],
                     "use_logit_bias": first_row["use_logit_bias"],
                 },
                 "metrics": {field: mean_or_none(values) for field, values in metrics.items()},
@@ -211,7 +210,6 @@ def render_summary(run_dir, rows, settings, completed_trials):
         lines.append(
         f"| `{setting['setting_id']}` | {setting['mode']} | {setting['epochs']} | {setting['lr']} | "
         f"{as_bool_text(setting['flags']['use_eoc'])} | "
-        f"{as_bool_text(setting['flags']['use_js_trunc'])} | "
         f"{as_bool_text(setting['flags']['use_logit_bias'])} | "
         f"{format_metric(setting['metrics']['tool_accuracy'])} | "
         f"{format_metric(setting['metrics']['tool_exact_match_acc'])} | "

@@ -564,8 +564,9 @@ is_valid_parentheses
 | 论文附录 A.3 | 50 个 benchmark tools | 主评测集 |
 | 论文附录 A.4 | 额外 50 个 adaptation tools | TokMem 的 held-out adaptation set |
 | `compositional/README.md` | 1-50 adaptation，51-100 evaluation | 仓库层面的 100-tool 组织方式 |
-| `run_compositional_tokmem_llama_1b.sh` | `1-50:1,51-100:3` | 先 adaptation，再在 benchmark tools 上继续训练 |
-| `run_compositional_icl_llama_1b.sh` | 只加载 `51-100` | ICL baseline 只在主 benchmark 上评测 |
+| `scripts/compositional/llama_1b/tokmem_*.sh` | `51-100:1` | 当前维护的单轮 benchmark tools 训练 |
+| `scripts/compositional/llama_1b/adaptation/run_compositional_tokmem_llama_1b.sh` | `1-50:1,51-100:3` | adaptation 旧实验入口，先 adaptation，再在 benchmark tools 上继续训练 |
+| `scripts/compositional/llama_1b/adaptation/run_compositional_icl_llama_1b.sh` | 只加载 `51-100` | ICL baseline 旧实验入口，只在主 benchmark 上评测 |
 
 #### 9.1 论文里 compositional adaptation 与正式训练各用了多少数据
 

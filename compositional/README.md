@@ -4,33 +4,28 @@ This directory contains the compositional TokMem experiments on XLAM/APIGen.
 
 ## Current Maintained Method Surface
 
-The maintained compositional path now keeps only three method switches:
+The maintained compositional path now keeps two method switches:
 
 - `--use_eoc`
-- `--use_js_trunc`
 - `--use_logit_bias`
 
-Historical archived runs still exist under `compositional/runs/`. Current code, launchers, and docs only describe the maintained `eoc/js_trunc/logit_bias` family.
+Historical archived runs still exist under `compositional/runs/`. Current code, launchers, and docs describe the maintained `eoc/logit_bias` family.
 
 ## Modes
 
-| Mode | `--use_eoc` | `--use_js_trunc` | `--use_logit_bias` | Behavior |
-| --- | --- | --- | --- | --- |
-| Baseline | off | off | off | Original TokMem decoding and training |
-| EOC token only | on | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
-| EOC + JS truncation | on | on | off | Uses boundary-time JS divergence to decide whether the next step should enter tool-only decoding |
-| EOC + logit bias | on | off | on | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
-| EOC + JS truncation + logit bias | on | on | on | Applies logit-bias reweighting first, then runs JS-based tool-only truncation on active boundary rows |
+| Mode | `--use_eoc` | `--use_logit_bias` | Behavior |
+| --- | --- | --- | --- |
+| Baseline | off | off | Original TokMem decoding and training |
+| EOC token only | on | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
+| EOC + logit bias | on | on | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
 
 Constraint summary:
 
-- `--use_js_trunc` requires `--use_eoc`
 - `--use_logit_bias` requires `--use_eoc`
 
 Useful flags:
 
 - `--use_eoc`
-- `--use_js_trunc`
 - `--use_logit_bias`
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
@@ -49,17 +44,6 @@ When `--use_eoc` is enabled, each gold tool span becomes:
 ```
 
 `eoc` is a reserved special token that marks the end of one tool-controlled span and the next boundary decision point.
-
-### JS truncation
-
-`--use_js_trunc` is a decode-time routing method. At assistant-start and after each generated `eoc`, the model:
-
-1. reads hidden states from all transformer layers for the current boundary step
-2. compares each layer's tool-token distribution against the final-layer distribution with JS divergence
-3. averages that JS curve per example
-4. if the mean JS exceeds the fixed threshold, masks logits to the tool-token subset for that step
-
-Training stays plain autoregressive teacher forcing. `js_trunc` changes decoding only.
 
 `--max_new_tokens` controls only the training-time evaluation and demo decode budget in `main_sequential.py`. It does not change teacher-forcing supervision length during training.
 
@@ -88,26 +72,52 @@ This means an informative prior only reweights relative preference among tool to
 
 Single-round maintained launchers for tools `51-100`:
 
-- `scripts/compositional/llama_1b/tokmem_baseline_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
-- `scripts/compositional/llama_1b/tokmem_eoc_js_trunc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
-- `scripts/compositional/llama_1b/tokmem_eoc_js_trunc_logit_bias_llama_1b.sh`
+
+Single-round comparison launchers with the same Llama-1B data split settings:
+
+- `scripts/compositional/llama_1b/baseline_llama_1b.sh`: direct tool-description prompting over all 50 benchmark tools through `icl_baseline.py`
+- `scripts/compositional/llama_1b/icl_llama_1b.sh`: explicit ICL launcher over all 50 benchmark tools through `icl_baseline.py`
+- `scripts/compositional/llama_1b/rag_llama_1b.sh`: ICL launcher with top-5 tool retrieval through `--use_rag --retrieval_k 5`
+- `scripts/compositional/llama_1b/lora_llama_1b.sh`: standard LoRA finetuning through `lora_sequential.py`
+
+These comparison launchers use tools `51-100`, `train_size=5000`, `test_size=500`, max calls `4`, multi-tool ratios `0.5,0.5`, seed `42`, model `models/Llama-3.2-1B-Instruct`, and write under `compositional/runs/`.
+
+Python entrypoints now expect explicit local model paths through `--model_name`. The RAG launcher also passes a local sentence-transformer path through `--retriever_model_name`, with the retriever model stored at `models/all-MiniLM-L6-v2`.
 
 README 汇总复现实验的 maintained launcher:
 
-- `scripts/compositional/llama_1b/run_readme_myself_7settings_llama_1b.sh`
-- `scripts/compositional/llama_1b/run_readme_myself_allmethods_llama_1b.sh`
-- `scripts/compositional/llama_1b/run_readme_myself_logit_bias_methods_llama_1b.sh`
-- `scripts/compositional/llama_1b/run_readme_myself_3methods_top1_100_10calls_llama_1b.sh`
+- `scripts/compositional/llama_1b/run_readme_myself_3methods_llama_1b.sh`
+- `scripts/compositional/llama_1b/run_readme_myself_3methods_10calls_llama_1b.sh`
+
+Paper-level compositional suite launcher:
+
+- `scripts/compositional/run_paper_compositional_suite.sh`
+
+This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`.
+
+It uses one scheduling unit per `model × method × trial`, keeps the 5 trials independently schedulable across GPUs, writes archived outputs under `results/compositional/<suite_name>/`, and produces:
+
+- `runs/<task_name>/` per trial
+- `task_manifest.tsv`
+- `task_status.json`
+- `summary.md`
+- `summary.json`
+- `scheduler.log`
+
+When the suite is resumed with `--rerun-failed --suite-name <existing-suite>`, the launcher keeps the existing suite-level `run_paper_compositional_suite.sh`, `suite_config.json`, and `task_manifest.tsv` in place. The current rerun invocation is snapshotted under:
+
+- `reruns/<rerun_id>/run_paper_compositional_suite.sh`
+- `reruns/<rerun_id>/suite_config.json`
+- `reruns/<rerun_id>/task_manifest.tsv`
 
 Current maintained comparison tables only include:
 
 - `baseline`
 - `eoc-only`
-- `eoc+js_trunc`
 - `eoc+logit_bias`
-- `eoc+js_trunc+logit_bias`
 
 ## Run Layout
 
@@ -123,20 +133,31 @@ Maintained runs keep:
 - `evaluation_results.json`
 - `training_summary.json`
 - `evaluation.log`
-- round checkpoints
-- launcher script snapshot
-- optional `loss_step.png`
-- optional `lr_step.png`
+- `round_<round>_tools_<range>.pt` when `--save_checkpoints` is passed
+- launcher script snapshot when the shell launcher copies itself into the run directory
+- `loss_step.png` when `--tensorboard` is passed
+- `lr_step.png` when `--tensorboard` is passed
 
-Top-level metrics in `evaluation_results.json`, including `tool_accuracy`, `tool_exact_match_acc`, `arguments_accuracy`, and `full_correctness`, are overall values over the full evaluation set. `tool_accuracy` is the binary per-sample-tool accuracy over TP/TN/FP/FN, `tool_exact_match_acc` is the sample rate where the full tool set is predicted exactly, and `avg_tool_f1_score` keeps the existing Tool F1 definition. Per-call-count breakdowns are printed in `evaluation.log`.
+Training methods keep metrics in `evaluation_results.json` under the latest round payload:
+
+```text
+rounds[-1].eval_results
+```
+
+ICL/RAG baselines save the same maintained metric names under the top-level `metrics` field in `evaluation_results.json`.
+
+For ICL/RAG, `function_calls` on the maintained compositional dataset store argument JSON only. The saved tool metrics therefore first map each predicted argument object back to a tool id from the active prompt tool schemas, and ambiguous calls stay unresolved. Fields including `tool_accuracy`, `tool_exact_match_acc`, `avg_tool_f1_score`, `avg_f1_score`, `exact_accuracy`, and `parse_error_rate` are overall values over the full evaluation set. `tool_accuracy` is the binary per-sample-tool accuracy over TP/TN/FP/FN, `tool_exact_match_acc` is the sample rate where the full tool set is predicted exactly, and `avg_tool_f1_score` keeps the existing Tool F1 definition. Per-call-count breakdowns are printed in `evaluation.log`.
 
 `training_summary.json` is intentionally compact. It keeps:
 
+- `round`
+- `tools`
+- `epochs`
 - `avg_total_loss`
 - `avg_ar_loss`
 - `avg_logit_bias_loss` when `use_logit_bias=true`
 
-It also keeps lightweight counters such as total supervised positions and logit-bias boundary counts. It does not keep step-level or batch-level traces.
+Detailed position counters are available in the per-round training `results` payload and training logs. The saved `training_summary.json` stays a run-level loss summary.
 
 Passing `--tensorboard` on the maintained TokMem path saves two static PNG trend plots under the run directory:
 
@@ -153,13 +174,23 @@ These older shell entrypoints remain in the repository for reference but are not
 
 ## Dataset Inspection
 
-For quick manual inspection of newly synthesized compositional data over tools `1-100`, use:
+For quick manual inspection of newly synthesized compositional data over tools `1-100`, run the generator directly:
 
 ```bash
-bash scripts/compositional/datasets/inspect_synth_data_tools1_100.sh
+cd compositional
+python xlam_datasets.py \
+  --top_k "1-100" \
+  --max_samples_per_tool 50 \
+  --train_size 12000 \
+  --test_size 1200 \
+  --train_max_function_calls 10 \
+  --test_max_function_calls 10 \
+  --train_multi_tool_ratios "0.125,0.125,0.125,0.125,0.125,0.125,0.125,0.125" \
+  --test_multi_tool_ratios "0.125,0.125,0.125,0.125,0.125,0.125,0.125,0.125" \
+  --output_dir data
 ```
 
-This script regenerates the synthetic data files under `compositional/data/` with fixed settings and prints:
+This regenerates the synthetic data files under `compositional/data/` with fixed settings and prints:
 
 - train/test file locations
 - training-set `function_calls` distribution
@@ -172,7 +203,7 @@ This script regenerates the synthetic data files under `compositional/data/` wit
 ## Key Components
 
 - `main_sequential.py`: maintained TokMem entrypoint
-- `model.py`: reserved-tool-token model, EOC boundary logic, JS truncation, logit-bias decoding
+- `model.py`: reserved-tool-token model, EOC boundary logic, logit-bias decoding
 - `training.py`: autoregressive training loop plus detached logit-bias auxiliary loss
 - `dataset.py`: XLAM/APIGen data loading and EOC target formatting
 - `tool_retrieval.py`: RAG tool retrieval for ICL and related baselines

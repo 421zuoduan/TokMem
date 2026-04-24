@@ -24,20 +24,21 @@ Focuses on learning individual, distinct tasks using reserved special tokens as 
 - **Archive Note**: Older locally evolved atomic TokMem implementations now live under `atomic/archive/current_local/` and `scripts/atomic/archive/current_local/`.
 - **Quick Start**:
   ```bash
-  cd atomic && bash main_tokmem_fixed_split.sh
+  cd atomic && bash main_tokmem.sh
   ```
+- **Fixed Split**: `main_tokmem_fixed_split.sh` uses `models/Qwen2.5-0.5B-Instruct` and the cached split at `atomic/cached_splits/task50-500-10-50-seed42/tokmem_atomic_fixed_split_maxlen1024.pt`.
 
 ### 2. Compositional Memory Recall (`compositional/`)
 Evaluates the model's ability to learn and compose multiple tool-calling functions sequentially.
 - **Dataset**: **XLAM (APIGen)**. Uses tools 1-50 for adaptation and tools 51-100 for evaluation.
 - **Goal**: Assess how well the model can learn new tool-calling capabilities across disjoint training rounds.
 - **Key Methods**:
-  - `TokMem`: Sequential training with an initial adaptation phase.
-  - `LoRA Baseline`: Standard sequential fine-tuning with optional replay buffers.
-  - `ICL Baseline`: Zero-shot/Few-shot evaluation with RAG-based tool retrieval.
+  - `TokMem`: Maintained sequential training through the `use_eoc` and `use_logit_bias` method family.
+  - `EOC token only`: Explicit boundary-token formulation for tool-controlled spans.
+  - `EOC + logit bias`: Detached boundary-time tool prior that softly reweights tool-token logits.
 - **Quick Start**:
   ```bash
-  cd compositional && bash run_n_rounds_main.sh
+  bash scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh
   ```
 
 ### 3. Embedding Capacity Ablation (`memorization/`)

@@ -163,7 +163,9 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     trainable_params = model.get_trainable_parameters()
     optimizer = AdamW(trainable_params, lr=lr, weight_decay=0.01)
     
-    total_steps = len(dataloader) * num_epochs
+    gradient_accumulation_steps = max(1, int(gradient_accumulation_steps))
+    total_batches = len(dataloader) * num_epochs
+    total_steps = ((len(dataloader) + gradient_accumulation_steps - 1) // gradient_accumulation_steps) * num_epochs
     
     # Create linear learning rate scheduler
     scheduler = get_linear_schedule_with_warmup(
@@ -173,7 +175,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     )
     
     print(f"Training for {num_epochs} epochs, {len(dataloader)} batches per epoch")
-    print(f"Total steps: {total_steps}")
+    print(f"Total optimizer steps: {total_steps}")
+    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     print(f"Learning rate: {lr} (with linear schedule + warmup)")
     print(f"Warmup steps: {total_steps // 10}")
     print(f"Use logit bias: {use_logit_bias}")
@@ -188,7 +191,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print()
     
     # Log training configuration
-    training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total steps: {total_steps}")
+    training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total optimizer steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
     training_logger.info(f"Logit bias enabled: {use_logit_bias}, Weight: {logit_bias_loss_weight}")
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
@@ -264,10 +267,20 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             batch_logit_bias_loss += logit_bias_loss.item()
             loss = loss + logit_bias_loss_weight * logit_bias_loss
             
-            # Backward pass
-            loss.backward()
+            # Backward pass. Scale by the actual accumulation window so a final
+            # partial window keeps the same effective gradient magnitude.
+            accumulation_window_start = (batch_idx // gradient_accumulation_steps) * gradient_accumulation_steps
+            current_accumulation_steps = min(
+                gradient_accumulation_steps,
+                len(dataloader) - accumulation_window_start,
+            )
+            (loss / current_accumulation_steps).backward()
             
-            if (step + 1) % gradient_accumulation_steps == 0:
+            should_step_optimizer = (
+                (step + 1) % gradient_accumulation_steps == 0
+                or (batch_idx + 1) == len(dataloader)
+            )
+            if should_step_optimizer:
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
@@ -370,8 +383,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 best_model_path = save_trained_model(model, timestamp=timestamp, suffix='best')
                 training_logger.info(f"NEW BEST VALIDATION LOSS: {best_val_loss:.4f} | Saved: {best_model_path}")
     
-    avg_total_loss = total_loss / (len(dataloader) * num_epochs)
-    avg_total_logit_bias_loss = total_logit_bias_loss / (len(dataloader) * num_epochs)
+    avg_total_loss = total_loss / total_batches
+    avg_total_logit_bias_loss = total_logit_bias_loss / total_batches
     
     if task_token_count > 0:
         avg_task_loss = total_task_loss / task_loss_batches  # Average task loss across batches that had task tokens
