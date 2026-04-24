@@ -76,6 +76,16 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
 
+Additional Llama-1B adaptation launchers over `1-50 -> 51-100`:
+
+- `scripts/compositional/llama_1b/adap_tokmem_llama_1b.sh`
+- `scripts/compositional/llama_1b/adap_tokmem_eoc_llama_1b.sh`
+- `scripts/compositional/llama_1b/adap_tokmem_eoc_logit_bias_llama_1b.sh`
+
+These launchers use `1-50:1,51-100:3` with `--use_lora --freeze_lora_after_first`, so the first round adapts LoRA on held-out tools and later rounds continue TokMem-side training on `51-100`.
+
+`main_sequential.py` now accepts `--batch_size_per_round` for multi-round TokMem runs. The current Llama-1B adaptation launchers use `16,32`, so the adaptation round matches the suite LoRA train batch size and the later TokMem round matches the suite TokMem train batch size. The shell launchers keep `BATCH_SIZE_PER_ROUND` overridable for smoke tests.
+
 Single-round comparison launchers with the same Llama-1B data split settings:
 
 - `scripts/compositional/llama_1b/baseline_llama_1b.sh`: direct tool-description prompting over all 50 benchmark tools through `icl_baseline.py`

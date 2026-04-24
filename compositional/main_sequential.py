@@ -241,6 +241,8 @@ def build_parser():
     # Training arguments  
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Training batch size")
+    parser.add_argument("--batch_size_per_round", type=str, default=None,
+                        help="Comma-separated training batch sizes per round (overrides --batch_size)")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override the epoch count for a single no-adaptation training round")
     parser.add_argument("--lr", type=float, default=5e-3,
@@ -453,6 +455,12 @@ def main():
         "train_max_function_calls_per_round"
     )
 
+    batch_size_by_round = expand_per_round_values(
+        args.batch_size_per_round,
+        args.batch_size,
+        "batch_size_per_round"
+    )
+
     test_max_calls_by_round = expand_per_round_values(
         args.test_max_function_calls_per_round,
         args.test_max_function_calls,
@@ -637,7 +645,7 @@ def main():
             train_data_path=train_data_file,
             test_data_path=test_data_file,
             tokenizer=tokenizer,
-            batch_size=args.batch_size,
+            batch_size=batch_size_by_round[round_idx],
             max_length=args.max_length,
             eval_batch_size=args.eval_batch_size,
             curriculum_learning=args.curriculum_learning,
@@ -655,6 +663,7 @@ def main():
         
         # Train this round
         print(f"\nTraining round {round_num} for {epochs} epochs...")
+        print(f"Training batch size: {batch_size_by_round[round_idx]}")
         if train_lora:
             print("Training: Embeddings + LoRA")
         else:

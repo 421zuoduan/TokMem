@@ -72,7 +72,7 @@ bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_ra
 The Python entrypoint is `main_rag_baseline.py`. It can reuse a saved SBERT corpus through `--corpus_cache_path` and records both generation metrics and retrieval top-1 / top-k accuracy in `evaluation_results.json`.
 
 ### Paper suite launcher
-This launcher schedules the maintained fixed-split atomic comparison suite across the local `Qwen 0.5B`, `Llama 3B`, and `Llama 8B` checkpoints. The default scope is the existing `700-task` cached split with four methods: `base`, `rag`, `tokmem`, and `tokmem_logit_bias`.
+This launcher schedules the maintained fixed-split atomic comparison suite across the local `Qwen 0.5B`, `Llama 3B`, and `Llama 8B` checkpoints. The default scope is the existing `700-task` cached split with five methods: `base`, `rag`, `lora`, `tokmem`, and `tokmem_logit_bias`.
 
 ```bash
 bash ../scripts/atomic/run_paper_atomic_suite.sh --gpus 0,1,2,3
@@ -89,8 +89,8 @@ Default `700-task` batch settings in the launcher:
 
 | Model | LoRA train | LoRA eval | TokMem train | TokMem eval | base test | rag test |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `Qwen 0.5B` | `32` | `64` | `64` | `256` | `1024` | `512` |
-| `Llama 3B` | `16` | `64` | `48` | `128` | `512` | `256` |
+| `Qwen 0.5B` | `16` | `64` | `16` | `256` | `1024` | `512` |
+| `Llama 3B` | `16` | `64` | `32` | `128` | `512` | `256` |
 | `Llama 8B` | `8` | `48` | `16` | `64` | `256` | `128` |
 
 Use `--suite-name <existing-suite> --rerun-failed` to rerun only failed tasks inside an existing suite directory.

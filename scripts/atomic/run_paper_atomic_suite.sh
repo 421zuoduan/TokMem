@@ -124,7 +124,7 @@ declare -A MODEL_PATHS=(
 )
 
 declare -A LORA_TRAIN_BATCH_SIZES=(
-    [qwen0_5b]=32
+    [qwen0_5b]=16
     [llama3b]=16
     [llama8b]=8
 )
@@ -136,7 +136,7 @@ declare -A LORA_EVAL_BATCH_SIZES=(
 )
 
 declare -A TOKMEM_TRAIN_BATCH_SIZES=(
-    [qwen0_5b]=32
+    [qwen0_5b]=16
     [llama3b]=32
     [llama8b]=16
 )
@@ -205,10 +205,10 @@ payload = {
     },
     "trial_count": 5,
     "trial_seeds": [42, 42, 42, 42, 42],
-    "batch_settings": {
-        "qwen0_5b": {
-            "lora": {"train_batch_size": 32, "eval_batch_size": 64},
-            "tokmem_family": {"train_batch_size": 32, "eval_batch_size": 256},
+        "batch_settings": {
+            "qwen0_5b": {
+            "lora": {"train_batch_size": 16, "eval_batch_size": 64},
+            "tokmem_family": {"train_batch_size": 16, "eval_batch_size": 256},
             "base": {"test_batch_size": 1024},
             "rag": {"test_batch_size": 512, "retrieval_top_k": 3},
         },
@@ -879,7 +879,7 @@ summary_lines = [
     "",
     "| Model | LoRA train | LoRA eval | TokMem train | TokMem eval | base test | rag test |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-    "| qwen0_5b | 32 | 64 | 32 | 256 | 1024 | 512 |",
+    "| qwen0_5b | 16 | 64 | 16 | 256 | 1024 | 512 |",
     "| llama3b | 16 | 64 | 32 | 128 | 512 | 256 |",
     "| llama8b | 8 | 48 | 16 | 64 | 256 | 128 |",
     "",

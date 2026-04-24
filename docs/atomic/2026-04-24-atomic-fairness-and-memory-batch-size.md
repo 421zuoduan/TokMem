@@ -396,22 +396,22 @@
 
 ## 10. 当前采用参数
 
-这一节记录当前准备采用的固定 batch 配置，便于后续 `700task` 实验直接对照使用。
+这一节记录当前已经同步到 `scripts/atomic/run_paper_atomic_suite.sh` 的固定 batch 配置，便于后续 `700task` 实验直接对照使用。
 
 ### 10.1 Qwen 0.5B
 
-- `LoRA train bs=32`
+- `LoRA train bs=16`
 - `LoRA eval bs=64`
-- `TokMem` 系列 `train bs=64`
+- `TokMem` 系列 `train bs=16`
 - `TokMem` 系列 `eval bs=256`
 - `base test bs=1024`
-- `rag test bs=1024`
+- `rag test bs=512`
 
 ### 10.2 Llama 3B
 
 - `LoRA train bs=16`
 - `LoRA eval bs=64`
-- `TokMem` 系列 `train bs=48`
+- `TokMem` 系列 `train bs=32`
 - `TokMem` 系列 `eval bs=128`
 - `base test bs=512`
 - `rag test bs=256`
@@ -421,6 +421,6 @@
 - `LoRA train bs=8`
 - `LoRA eval bs=48`
 - `TokMem` 系列 `train bs=16`
-- `TokMem` 系列 `eval bs=128`
-- `base test bs=128`
+- `TokMem` 系列 `eval bs=64`
+- `base test bs=256`
 - `rag test bs=128`
