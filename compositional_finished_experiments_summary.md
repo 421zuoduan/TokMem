@@ -1,14 +1,15 @@
 # Compositional 已完成实验汇总
 
-生成时间：2026-04-25
+生成时间：2026-04-26 01:20 CST
 
 ## 数据来源与判定
 
-- `results/compositional/all_methods/`：当前主结果目录。`task_status.json` 记录 255 个任务，其中 192 个 `success`，63 个 `pending`。
+- `results/compositional/all_methods/`：当前主结果目录，也是 `scripts/compositional/run_paper_compositional_suite.sh --suite-name all_methods` 的最新运行目录。`task_status.json` 记录 255 个任务，其中 225 个 `success`，30 个 `pending`；4calls 为 165/165 success，10calls 为 60/90 success。
+- 当前 suite 仍在运行。进程观察到 3 个 10calls 训练任务正在跑：`llama3b_tokmem_10calls_trial4_seed42`、`llama3b_tokmem_eoc_logit_bias_10calls_trial4_seed42`、`llama3b_tokmem_eoc_replace_head_10calls_trial4_seed42`。这些任务在 `task_status.json` 中仍计入 `pending`。
 - `results/compositional/paper_compositional_mainline_bs/`：上一轮 mainline batch-size suite。`task_status.json` 记录 135 个任务，其中 130 个 `success`，5 个 `failed`。
-- `compositional/runs/bs_probe_*`：当前只有 `run_config.json` 和 3 行启动日志，作为启动记录看待；该目录下暂无 `SUCCESS`、`evaluation_results.json`、checkpoint 或最终指标。
+- `compositional/runs/bs_probe_*`：当前只有 `run_config.json` 和 `evaluation.log` 启动记录，作为 batch-size probe 启动记录看待；该目录下没有 `SUCCESS`、`evaluation_results.json`、checkpoint 或最终指标。
 
-指标取自每个成功 run 的 `evaluation_results.json` 最后一轮结果。表里的 `Train Params` 对应最后一个训练 round 的 active trainable parameter count；对 adaptation 方法，这是 tools 51-100 round 里 LoRA 冻结后的可训练参数量；ICL/RAG 为 0。`Tool Acc` 对应工具选择准确率，`Tool EM` 对应工具集合完全匹配，`Exact Acc` 对应完整调用 exact match，`Arg F1` 对应参数 F1，`Parse Err` 对应解析错误率。
+指标取自每个成功 run 的 `evaluation_results.json` 最后一轮结果。表里的 `Train Params` 对应最后一个训练 round 的 active trainable parameter count；对 adaptation 方法，这是 tools 51-100 round 里 LoRA 冻结后的可训练参数量；ICL/RAG 为 0。`Tool Acc` 对应工具选择准确率，`Tool EM` 对应工具集合完全匹配，`Exact Acc` 对应完整调用 exact match，`Tool F1` 对应工具选择 F1，4calls/mainline 表里的 `Arg F1` 对应 `avg_f1_score`，10calls 快照沿用原列名且对应 `arguments_accuracy`，`Parse Err` 对应解析错误率。
 
 ## 当前 all_methods：4calls 完整组
 
@@ -92,28 +93,28 @@
 
 ## 当前 all_methods：10calls 已完成 trial 快照
 
-这些组仍在 suite 计划内推进；表中均值只基于当前已成功 trials。范围是 tools 1-50 / 4 calls 后接 tools 51-100 / 10 calls，表中指标取最后一轮 tools 51-100 / 10 calls。
+这些组仍在 suite 计划内推进；表中均值只基于当前已成功 trials。范围是 tools 1-50 / 4 calls 后接 tools 51-100 / 10 calls，表中指标取最后一轮 tools 51-100 / 10 calls。当前 10calls 已完成 60/90 trials。
 
 | Model | Method | Done | Tool Acc | Tool EM | Exact Acc | Tool F1 | Arg F1 | Parse Err |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| llama1b | adap_tokmem | 2/5 | 0.997 | 0.791 | 0.384 | 0.976 | 0.827 | 0.405 |
-| llama1b | adap_tokmem_eoc_logit_bias | 2/5 | 0.998 | 0.835 | 0.401 | 0.984 | 0.836 | 0.748 |
-| llama1b | adap_tokmem_eoc_replace_head | 2/5 | 0.998 | 0.849 | 0.422 | 0.987 | 0.847 | 0.076 |
-| llama1b | tokmem | 2/5 | 0.977 | 0.478 | 0.250 | 0.886 | 0.738 | 0.626 |
-| llama1b | tokmem_eoc_logit_bias | 2/5 | 0.984 | 0.571 | 0.298 | 0.923 | 0.777 | 0.949 |
-| llama1b | tokmem_eoc_replace_head | 2/5 | 0.984 | 0.579 | 0.291 | 0.920 | 0.768 | 1.070 |
-| llama3b | adap_tokmem | 1/5 | 0.999 | 0.874 | 0.449 | 0.987 | 0.854 | 0.064 |
-| llama3b | adap_tokmem_eoc_logit_bias | 1/5 | 0.999 | 0.917 | 0.476 | 0.994 | 0.869 | 0.019 |
-| llama3b | adap_tokmem_eoc_replace_head | 1/5 | 0.999 | 0.900 | 0.475 | 0.993 | 0.865 | 0.054 |
-| llama3b | tokmem | 2/5 | 0.965 | 0.341 | 0.185 | 0.818 | 0.678 | 3.042 |
-| llama3b | tokmem_eoc_logit_bias | 2/5 | 0.979 | 0.461 | 0.245 | 0.893 | 0.760 | 2.527 |
-| llama3b | tokmem_eoc_replace_head | 2/5 | 0.978 | 0.459 | 0.236 | 0.888 | 0.749 | 3.272 |
-| llama8b | adap_tokmem | 1/5 | 0.999 | 0.884 | 0.403 | 0.987 | 0.833 | 0.052 |
-| llama8b | adap_tokmem_eoc_logit_bias | 1/5 | 0.998 | 0.875 | 0.391 | 0.984 | 0.831 | 0.049 |
-| llama8b | adap_tokmem_eoc_replace_head | 1/5 | 0.998 | 0.858 | 0.400 | 0.983 | 0.836 | 0.030 |
-| llama8b | tokmem | 1/5 | 0.968 | 0.296 | 0.145 | 0.835 | 0.617 | 1.242 |
-| llama8b | tokmem_eoc_logit_bias | 1/5 | 0.977 | 0.421 | 0.186 | 0.888 | 0.705 | 0.507 |
-| llama8b | tokmem_eoc_replace_head | 1/5 | 0.978 | 0.414 | 0.228 | 0.890 | 0.721 | 0.539 |
+| llama1b | tokmem | 4/5 | 0.977 | 0.473 | 0.245 | 0.885 | 0.741 | 0.794 |
+| llama1b | tokmem_eoc_logit_bias | 4/5 | 0.985 | 0.572 | 0.296 | 0.926 | 0.792 | 0.699 |
+| llama1b | tokmem_eoc_replace_head | 4/5 | 0.984 | 0.573 | 0.290 | 0.918 | 0.782 | 3.587 |
+| llama1b | adap_tokmem | 4/5 | 0.997 | 0.772 | 0.375 | 0.972 | 0.842 | 0.521 |
+| llama1b | adap_tokmem_eoc_logit_bias | 4/5 | 0.998 | 0.840 | 0.412 | 0.984 | 0.870 | 0.393 |
+| llama1b | adap_tokmem_eoc_replace_head | 4/5 | 0.998 | 0.849 | 0.418 | 0.986 | 0.869 | 0.105 |
+| llama3b | tokmem | 3/5 | 0.966 | 0.347 | 0.188 | 0.821 | 0.684 | 3.431 |
+| llama3b | tokmem_eoc_logit_bias | 3/5 | 0.978 | 0.448 | 0.245 | 0.887 | 0.778 | 4.802 |
+| llama3b | tokmem_eoc_replace_head | 3/5 | 0.979 | 0.465 | 0.238 | 0.890 | 0.778 | 3.891 |
+| llama3b | adap_tokmem | 3/5 | 0.999 | 0.887 | 0.467 | 0.988 | 0.867 | 0.057 |
+| llama3b | adap_tokmem_eoc_logit_bias | 3/5 | 0.999 | 0.909 | 0.463 | 0.993 | 0.881 | 0.027 |
+| llama3b | adap_tokmem_eoc_replace_head | 3/5 | 0.999 | 0.905 | 0.472 | 0.993 | 0.889 | 0.133 |
+| llama8b | tokmem | 3/5 | 0.969 | 0.313 | 0.172 | 0.845 | 0.648 | 1.226 |
+| llama8b | tokmem_eoc_logit_bias | 3/5 | 0.976 | 0.403 | 0.206 | 0.883 | 0.702 | 0.618 |
+| llama8b | tokmem_eoc_replace_head | 3/5 | 0.978 | 0.408 | 0.219 | 0.891 | 0.733 | 0.486 |
+| llama8b | adap_tokmem | 3/5 | 0.998 | 0.874 | 0.400 | 0.987 | 0.832 | 0.066 |
+| llama8b | adap_tokmem_eoc_logit_bias | 3/5 | 0.998 | 0.869 | 0.395 | 0.985 | 0.832 | 0.040 |
+| llama8b | adap_tokmem_eoc_replace_head | 3/5 | 0.998 | 0.872 | 0.402 | 0.985 | 0.831 | 0.030 |
 
 ## 上一轮 mainline_bs：完整结果索引
 
@@ -146,5 +147,6 @@
 
 - 当前 `all_methods` 里，4calls 的完整组已经覆盖 llama1b/3b/8b 的 `lora`、TokMem、EOC、EOC+logit-bias、replace-head、adaptation 变体。
 - 在 4calls 完整组里，`adap_tokmem_eoc_logit_bias` 的 Exact Acc 分别是 llama1b 0.646、llama3b 0.722、llama8b 0.694；同组 `tokmem_eoc_logit_bias` 分别是 0.469、0.326、0.506。
-- 10calls 当前完成的是部分 trial 快照，已完成 trial 中 adaptation 系列的 Exact Acc 高于同模型的 TokMem 系列。
+- 10calls 当前完成 60/90 trials。llama1b 各组已经到 4/5，llama3b 和 llama8b 各组大多到 3/5；当前仍在运行的 3 个训练任务推进 llama3b TokMem trial4。
+- 10calls 已完成 trial 中 adaptation 系列的 Exact Acc 高于同模型的 TokMem 系列；当前最高的 10calls Exact Acc 是 `llama3b_adap_tokmem_eoc_replace_head` 0.472，其次是 `llama3b_adap_tokmem` 0.467 和 `llama3b_adap_tokmem_eoc_logit_bias` 0.463。
 - `replace_head` 出现在当前结果中，属于额外对照组；维护路径解读仍应优先看 `eoc` 与 `logit_bias` 系列。

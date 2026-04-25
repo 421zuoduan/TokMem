@@ -416,7 +416,7 @@ def compute_logit_bias_loss(model, boundary_hidden_states, tool_targets, detach=
 
 
 def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_indices, time_indices, detach=True):
-    """Add detached auxiliary tool-prior bias to full-vocab logits at supervised boundary sites."""
+    """Add detached auxiliary tool-prior bias to tool logits at supervised boundary sites."""
     if boundary_hidden_states.numel() == 0:
         return shift_logits
 
@@ -440,9 +440,13 @@ def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_ind
     else:
         tool_token_ids_tensor = torch.tensor(tool_token_ids, dtype=torch.long, device=shift_logits.device)
 
-    biased_logits = shift_logits.clone()
-    biased_logits[batch_indices[:, None], time_indices[:, None], tool_token_ids_tensor[None, :]] += tool_bias
-    return biased_logits
+    tool_logit_indices = (
+        batch_indices[:, None],
+        time_indices[:, None],
+        tool_token_ids_tensor[None, :],
+    )
+    shift_logits[tool_logit_indices] = shift_logits[tool_logit_indices] + tool_bias
+    return shift_logits
 
 
 def _forward_with_optional_hidden_states(

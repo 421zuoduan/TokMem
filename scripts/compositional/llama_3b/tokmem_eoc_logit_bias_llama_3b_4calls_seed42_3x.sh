@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_REL="${SCRIPT_PATH#$ROOT_DIR/}"
-RESULTS_ROOT="$ROOT_DIR/scripts/tmp/results"
-SUITE_ID="$(date -u +%Y%m%d_%H%M%S)"
-METHOD_NAME="a_tokmem_eoc_logit_bias_detach_llama_1b"
-RUN_NAME_PREFIX="tokmem_eoc_logit_bias_detach_llama_1b_50tools"
-RUN_TAG="llama_1b_eoc_logit_bias_detach"
-SUITE_NAME="${METHOD_NAME}_seed42_5x_${SUITE_ID}"
+RESULTS_ROOT="${TOKMEM_RESULTS_ROOT:-$ROOT_DIR/results/compositional}"
+SUITE_ID="${TOKMEM_SUITE_ID:-$(date -u +%Y%m%d_%H%M%S)}"
+METHOD_NAME="tokmem_eoc_logit_bias_llama_3b"
+RUN_NAME_PREFIX="tokmem_eoc_logit_bias_llama_3b_4calls_seed42_3x"
+RUN_TAG="llama3b_tokmem_eoc_logit_bias_4calls"
+SUITE_NAME="${METHOD_NAME}_4calls_seed42_3x_${SUITE_ID}"
 SUITE_DIR="$RESULTS_ROOT/$SUITE_NAME"
 MANIFEST_FILE="$SUITE_DIR/manifest.tsv"
 SUMMARY_FILE="$SUITE_DIR/summary.md"
 ARTIFACTS_FILE="$SUITE_DIR/results.json"
-METHOD_FLAGS=(--use_eoc --use_logit_bias --detach)
+DATA_DIR="${TOKMEM_DATA_DIR:-$SUITE_DIR/data}"
+HF_CACHE_DIR="${TOKMEM_HF_CACHE_DIR:-$SUITE_DIR/hf-cache}"
+METHOD_FLAGS=(--use_eoc --use_logit_bias)
 METHOD_FLAGS_TEXT="${METHOD_FLAGS[*]}"
 
-mkdir -p "$SUITE_DIR"
+mkdir -p "$SUITE_DIR" "$HF_CACHE_DIR"
+cp "$SCRIPT_PATH" "$SUITE_DIR/$(basename "$SCRIPT_PATH")"
+if [[ -n "${TOKMEM_CHILD_SUITE_DIR_FILE:-}" ]]; then
+    printf "%s\n" "$SUITE_DIR" > "$TOKMEM_CHILD_SUITE_DIR_FILE"
+fi
 
 source /home/shilong/anaconda3/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6}"
+export HF_HOME="$HF_CACHE_DIR"
+export HF_DATASETS_CACHE="$HF_CACHE_DIR/datasets"
+export HUGGINGFACE_HUB_CACHE="$HF_CACHE_DIR/hub"
+export TOKENIZERS_PARALLELISM=false
 
 printf "trial\tseed\trun_name\trun_dir\tevaluation_results\ttraining_summary\tstdout_log\n" > "$MANIFEST_FILE"
 
-for trial in 1 2 3 4 5; do
+for trial in 1 2 3; do
     run_name="${RUN_NAME_PREFIX}_${SUITE_ID}_trial${trial}"
     run_dir="$ROOT_DIR/compositional/runs/$run_name"
     stdout_log="$SUITE_DIR/trial_${trial}.stdout.log"
@@ -34,34 +44,36 @@ for trial in 1 2 3 4 5; do
     mkdir -p "$run_dir"
     cp "$SCRIPT_PATH" "$run_dir/$(basename "$SCRIPT_PATH")"
 
-    echo "[trial $trial/5] running $run_name"
+    echo "[trial $trial/3] running $run_name on CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
     (
         cd "$ROOT_DIR/compositional"
 
-        python xlam_datasets.py \
-            --top_k "51-100" \
-            --max_samples_per_tool 50 \
-            --train_size 5000 \
-            --test_size 500 \
-            --train_max_function_calls 4 \
-            --test_max_function_calls 4 \
-            --train_multi_tool_ratios "0.5,0.5" \
-            --test_multi_tool_ratios "0.5,0.5" \
-            --output_dir "$ROOT_DIR/compositional/data"
+        if [[ "${SKIP_XLAM_DATASET:-0}" != "1" ]]; then
+            python xlam_datasets.py \
+                --top_k "51-100" \
+                --max_samples_per_tool 50 \
+                --train_size 5000 \
+                --test_size 500 \
+                --train_max_function_calls 4 \
+                --test_max_function_calls 4 \
+                --train_multi_tool_ratios "0.5,0.5" \
+                --test_multi_tool_ratios "0.5,0.5" \
+                --output_dir "$DATA_DIR"
+        fi
 
         python -u main_sequential.py \
             --training_rounds "51-100:1" \
             --epochs 3 \
-            --batch_size 24 \
+            --batch_size 16 \
             --train_max_function_calls 4 \
             --test_max_function_calls 4 \
-            --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \
+            --model_name "$ROOT_DIR/models/Llama-3.2-3B-Instruct" \
             --eval_after_each_round \
             --save_checkpoints \
-            --data_dir "$ROOT_DIR/compositional/data" \
+            --data_dir "$DATA_DIR" \
             --lr 5e-3 \
-            --eval_batch_size 256 \
-            --max_length 512 \
+            --eval_batch_size 192 \
+            --max_length 1024 \
             --seed 42 \
             --tensorboard \
             "${METHOD_FLAGS[@]}" \
@@ -202,20 +214,35 @@ artifacts = {
     "method": method_name,
     "script": script_rel,
     "method_flags": method_flags,
-    "trials_requested": 5,
+    "model": "Llama-3.2-3B-Instruct",
+    "scope": "tools 51-100 / 4 calls",
+    "training_rounds": "51-100:1",
+    "epochs": 3,
+    "batch_size": 16,
+    "eval_batch_size": 192,
+    "max_length": 1024,
+    "lr": 5e-3,
+    "logit_bias_network": "linear",
+    "logit_bias_loss_weight": 0.1,
+    "logit_bias_scale": 1.0,
+    "trials_requested": 3,
     "seed": 42,
     "metric_stats": metric_stats,
     "loss_stats": loss_stats,
     "trials": trial_summaries,
 }
-artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False), encoding="utf-8")
+artifacts_path.write_text(json.dumps(artifacts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 summary_lines = [
     f"# {suite_name}",
     "",
     f"- method: `{method_name}`",
-    "- trials: `5`",
+    "- model: `Llama-3.2-3B-Instruct`",
+    "- scope: `tools 51-100 / 4 calls`",
+    "- trials: `3`",
     "- seed: `42` for every trial",
+    "- paper-suite aligned settings: `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=192`, `max_length=1024`, `lr=5e-3`",
+    "- logit-bias defaults: `logit_bias_network=linear`, `logit_bias_loss_weight=0.1`, `logit_bias_scale=1.0`",
     f"- script: `{script_rel}`",
     f"- method flags: `{method_flags}`",
     "",

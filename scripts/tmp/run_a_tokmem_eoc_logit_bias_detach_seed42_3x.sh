@@ -6,27 +6,31 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 SCRIPT_REL="${SCRIPT_PATH#$ROOT_DIR/}"
 RESULTS_ROOT="$ROOT_DIR/scripts/tmp/results"
 SUITE_ID="$(date -u +%Y%m%d_%H%M%S)"
-METHOD_NAME="c_tokmem_eoc_logit_train_add_detach_llama_1b"
-RUN_NAME_PREFIX="tokmem_eoc_logit_train_add_detach_llama_1b_50tools"
-RUN_TAG="llama_1b_eoc_logit_train_add_detach"
-SUITE_NAME="${METHOD_NAME}_seed42_5x_${SUITE_ID}"
+METHOD_NAME="a_tokmem_eoc_logit_bias_detach_llama_1b"
+RUN_NAME_PREFIX="tokmem_eoc_logit_bias_detach_llama_1b_50tools"
+RUN_TAG="llama_1b_eoc_logit_bias_detach"
+SUITE_NAME="${METHOD_NAME}_seed42_3x_${SUITE_ID}"
 SUITE_DIR="$RESULTS_ROOT/$SUITE_NAME"
 MANIFEST_FILE="$SUITE_DIR/manifest.tsv"
 SUMMARY_FILE="$SUITE_DIR/summary.md"
 ARTIFACTS_FILE="$SUITE_DIR/results.json"
-METHOD_FLAGS=(--use_eoc --use_logit_bias --use_logit_train_add --detach)
+DATA_DIR="${TOKMEM_DATA_DIR:-$ROOT_DIR/compositional/data}"
+METHOD_FLAGS=(--use_eoc --use_logit_bias --detach)
 METHOD_FLAGS_TEXT="${METHOD_FLAGS[*]}"
 
 mkdir -p "$SUITE_DIR"
+if [[ -n "${TOKMEM_CHILD_SUITE_DIR_FILE:-}" ]]; then
+    printf "%s\n" "$SUITE_DIR" > "$TOKMEM_CHILD_SUITE_DIR_FILE"
+fi
 
 source /home/shilong/anaconda3/etc/profile.d/conda.sh
 conda activate tokmem
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
 
 printf "trial\tseed\trun_name\trun_dir\tevaluation_results\ttraining_summary\tstdout_log\n" > "$MANIFEST_FILE"
 
-for trial in 1 2 3 4 5; do
+for trial in 1 2 3; do
     run_name="${RUN_NAME_PREFIX}_${SUITE_ID}_trial${trial}"
     run_dir="$ROOT_DIR/compositional/runs/$run_name"
     stdout_log="$SUITE_DIR/trial_${trial}.stdout.log"
@@ -34,20 +38,22 @@ for trial in 1 2 3 4 5; do
     mkdir -p "$run_dir"
     cp "$SCRIPT_PATH" "$run_dir/$(basename "$SCRIPT_PATH")"
 
-    echo "[trial $trial/5] running $run_name"
+    echo "[trial $trial/3] running $run_name"
     (
         cd "$ROOT_DIR/compositional"
 
-        python xlam_datasets.py \
-            --top_k "51-100" \
-            --max_samples_per_tool 50 \
-            --train_size 5000 \
-            --test_size 500 \
-            --train_max_function_calls 4 \
-            --test_max_function_calls 4 \
-            --train_multi_tool_ratios "0.5,0.5" \
-            --test_multi_tool_ratios "0.5,0.5" \
-            --output_dir "$ROOT_DIR/compositional/data"
+        if [[ "${SKIP_XLAM_DATASET:-0}" != "1" ]]; then
+            python xlam_datasets.py \
+                --top_k "51-100" \
+                --max_samples_per_tool 50 \
+                --train_size 5000 \
+                --test_size 500 \
+                --train_max_function_calls 4 \
+                --test_max_function_calls 4 \
+                --train_multi_tool_ratios "0.5,0.5" \
+                --test_multi_tool_ratios "0.5,0.5" \
+                --output_dir "$DATA_DIR"
+        fi
 
         python -u main_sequential.py \
             --training_rounds "51-100:1" \
@@ -58,7 +64,7 @@ for trial in 1 2 3 4 5; do
             --model_name "$ROOT_DIR/models/Llama-3.2-1B-Instruct" \
             --eval_after_each_round \
             --save_checkpoints \
-            --data_dir "$ROOT_DIR/compositional/data" \
+            --data_dir "$DATA_DIR" \
             --lr 5e-3 \
             --eval_batch_size 256 \
             --max_length 512 \
@@ -202,7 +208,7 @@ artifacts = {
     "method": method_name,
     "script": script_rel,
     "method_flags": method_flags,
-    "trials_requested": 5,
+    "trials_requested": 3,
     "seed": 42,
     "metric_stats": metric_stats,
     "loss_stats": loss_stats,
@@ -214,7 +220,7 @@ summary_lines = [
     f"# {suite_name}",
     "",
     f"- method: `{method_name}`",
-    "- trials: `5`",
+    "- trials: `3`",
     "- seed: `42` for every trial",
     f"- script: `{script_rel}`",
     f"- method flags: `{method_flags}`",

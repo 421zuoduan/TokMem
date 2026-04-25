@@ -187,6 +187,17 @@ When the suite is resumed with `--rerun-failed --suite-name <existing-suite>`, t
 
 Suite-level metadata keeps evaluation scopes and adaptation training scopes separately. `summary.md` writes separate result tables for `tools 51-100 / 4 calls` and `tools 51-100 / 10 calls`; adaptation entries record `1-50:1,51-100:3` plus their per-round call limits.
 
+To summarize already completed suite trials after a partial stop, or to compare suites with different completed trial counts, use:
+
+```bash
+python scripts/compositional/summarize_completed_trials.py \
+  results/compositional/all_methods \
+  results/compositional/paper_compositional_mainline_bs \
+  --output-dir results/compositional/completed_trials_summary
+```
+
+This script averages every successful trial within each `call_scope x model x method` group and writes `completed_trials_summary.md` plus `completed_trials_summary.json`. It keeps `4calls` and `10calls` separate, reports the regular suite metrics, and adds Table-3-style Tool Selection F1 / Argument F1 by target function-call count. The call-count F1 parser first uses `evaluation_results.json` breakdowns, then falls back to `stdout.log`, and finally recomputes ICL/RAG breakdowns from `detailed_results` when available.
+
 Use these labels when reporting TokMem-family method comparisons:
 
 - `baseline`
