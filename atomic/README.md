@@ -107,6 +107,14 @@ Default `700-task` batch settings in the launcher:
 
 Use `--suite-name <existing-suite> --rerun-failed` to rerun only failed tasks inside an existing suite directory.
 
+For a shorter comparison run, use the fewer-time launcher. Its default scope is the
+`700-task / train 80 / val 10 / test 20 / seed 42` cached split and two trials per
+model/method group:
+
+```bash
+bash ../scripts/atomic/run_paper_atomic_suite_fewer_time.sh --gpus 0,1,2,3
+```
+
 ### Older local atomic path
 Archived local experiments, scripts, and docs live under `atomic/archive/current_local/`.
 

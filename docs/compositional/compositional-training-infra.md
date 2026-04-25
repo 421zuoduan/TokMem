@@ -11,6 +11,7 @@
 
 - `use_eoc` 定义显式边界 token
 - `use_logit_bias` 包含一个 detached 的辅助头和对应 decode-time bias
+- `use_logit_train_add` 默认关闭；开启时训练阶段的 AR forward logits 也会看到 detached prior bias
 
 ## 入口与主流程
 
@@ -33,15 +34,19 @@
 `logit_bias_loss` 的定义：
 
 1. 只在 assistant-start 和 gold-`eoc` 边界位收集 hidden state
-2. 对 hidden state 做 `detach`
+2. 按 `--detach / --no-detach` 对 hidden state 应用 stop-gradient
 3. 用 `logit_bias_head` 预测下一步 gold tool id
 4. 将 `logit_bias_loss_weight * CE` 加回总损失
 
 当前 `total_loss` 的组成是：
 
 ```text
-total_loss = ar_loss + logit_bias_loss_weight * detached_tool_prior_ce
+total_loss = ar_loss + logit_bias_loss_weight * tool_prior_ce
 ```
+
+`--detach` 默认开启，此时 `tool_prior_ce` 只更新 `logit_bias_head`。传入 `--no-detach` 时，这条 auxiliary CE 也会塑形 boundary hidden state 上游的可训练参数。
+
+`--use_logit_train_add` 开启时，训练会在 boundary tool-token 位置把 centered prior bias 加到 AR logits。这个 bias 在加入前固定 detach，所以 AR loss 会受到 forward 数值影响，但 AR loss 不会通过 train-add 路径更新 `logit_bias_head`。四种 `detach x use_logit_train_add` 组合中，`logit_bias_head` 都只从 `logit_bias_loss` 获得梯度，并受 `logit_bias_loss_weight` 缩放。
 
 ## 推理与评测约束
 

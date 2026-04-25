@@ -168,10 +168,10 @@ $$
 输出第 $b$ 个边界位上的工具 logits：
 
 $$
-\mathbf{z}_b = g_\phi(\operatorname{sg}(h_b)),
+\mathbf{z}_b = g_\phi(\operatorname{sg}_d(h_b)),
 $$
 
-其中 $\operatorname{sg}(\cdot)$ 表示 stop-gradient，也就是实现中的 `detach`。这一步让辅助头学习边界上的工具先验，同时保持主语言模型自回归路径的梯度形态稳定。
+其中 $\operatorname{sg}_d(\cdot)$ 由实现中的 `--detach / --no-detach` 控制。默认 `--detach` 使用 stop-gradient，让辅助头学习边界上的工具先验；`--no-detach` 让辅助 CE 也塑形上游 boundary hidden state 路径。
 
 设边界 $b$ 后的 gold 工具 id 为 $a^+(b)$，则辅助头损失为
 
@@ -193,6 +193,8 @@ $$
 $$
 
 其中 $\lambda$ 对应代码中的 `logit_bias_loss_weight`。
+
+当启用 `--use_logit_train_add` 时，训练阶段也在 boundary tool-token 位置把同样的 centered prior bias 加到 AR forward logits。这个 bias 在加入前做 stop-gradient：AR loss 会看到 prior bias 的数值影响，但不会通过 train-add 路径更新 prior head。因此 prior head 始终只由 $\lambda \mathcal{L}_{\text{LB}}$ 训练。
 
 ### 4.3 推理时的 soft bias
 
@@ -278,7 +280,8 @@ $$
 
 - `build_shift_supervision_masks` 标记 tool 位与 `eoc` 位
 - `gather_logit_bias_examples` 收集 assistant-start 与 gold-`eoc` 边界 hidden state
-- `compute_logit_bias_loss` 计算 detached prior head 的 CE loss
+- `compute_logit_bias_loss` 按 `detach` 设置计算 prior head 的 CE loss
+- `apply_logit_train_add` 在训练 AR logits 上加入 detached prior bias
 
 ### 6.3 `model.py`
 

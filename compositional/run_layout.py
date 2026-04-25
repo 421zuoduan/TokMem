@@ -99,6 +99,8 @@ def build_training_summary_payload(run_name, all_results, experiment_type="tokme
                     "avg_logit_bias_loss",
                     metrics.get("use_logit_bias", False) or metrics.get("use_tool_head_replacement", False),
                 ),
+                "use_logit_train_add": metrics.get("use_logit_train_add", False),
+                "detach": metrics.get("detach", True),
             }
         )
 

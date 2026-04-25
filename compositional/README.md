@@ -8,22 +8,25 @@ The maintained compositional path keeps these method switches:
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_logit_train_add`
 - `--use_tool_head_replacement`
 
 Historical archived runs still exist under `compositional/runs/`. Current code and docs describe the maintained `eoc/logit_bias/tool_head_replacement` family.
 
 ## Modes
 
-| Mode | `--use_eoc` | `--use_logit_bias` | `--use_tool_head_replacement` | Behavior |
-| --- | --- | --- | --- | --- |
-| Baseline | off | off | off | Original TokMem decoding and training |
-| EOC token only | on | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
-| EOC + logit bias | on | on | off | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
-| EOC + tool-head replacement | on | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
+| Mode | `--use_eoc` | `--use_logit_bias` | `--use_logit_train_add` | `--use_tool_head_replacement` | Behavior |
+| --- | --- | --- | --- | --- | --- |
+| Baseline | off | off | off | off | Original TokMem decoding and training |
+| EOC token only | on | off | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
+| EOC + logit bias | on | on | off | off | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
+| EOC + logit-bias train add | on | on | on | off | Also adds detached centered auxiliary tool bias to teacher-forced tool-token logits at boundary sites during training |
+| EOC + tool-head replacement | on | off | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
 
 Constraint summary:
 
 - `--use_logit_bias` requires `--use_eoc`
+- `--use_logit_train_add` requires `--use_logit_bias`
 - `--use_tool_head_replacement` requires `--use_eoc`
 - `--use_logit_bias` and `--use_tool_head_replacement` are decode-time alternatives
 
@@ -31,10 +34,12 @@ Useful flags:
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_logit_train_add`
 - `--use_tool_head_replacement`
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
+- `--detach` default enabled; use `--no-detach` to let prior-head CE gradients update the boundary-state path
 - `--max_length` default `512`
 - `--max_new_tokens` default `512`
 
@@ -54,14 +59,22 @@ When `--use_eoc` is enabled, each gold tool span becomes:
 
 ### Auxiliary tool head
 
-`--use_logit_bias` and `--use_tool_head_replacement` both train a detached auxiliary tool-prior head on boundary states.
+`--use_logit_bias` and `--use_tool_head_replacement` both train an auxiliary tool-prior head on boundary states. The default `--detach` setting detaches those states before the auxiliary CE loss, so prior-head gradients update the head parameters and leave the embedding path to the autoregressive loss. Use `--no-detach` to let that auxiliary loss also backpropagate through the boundary hidden states into trainable embeddings and LoRA parameters.
 
 Training:
 
 1. collect assistant-start and gold-`eoc` boundary states
-2. detach those boundary hidden states
+2. apply the `detach` setting to those boundary hidden states
 3. predict the next gold tool id with `logit_bias_head`
 4. add `logit_bias_loss_weight * CE` to the autoregressive loss
+
+With `--use_logit_bias --use_logit_train_add`, training also applies the decode-time logit-bias transform to the main autoregressive CE logits at those same gathered boundary sites. The flag defaults to off, so standard training leaves the AR logits unchanged. The transform is:
+
+```text
+(log_softmax(tool_logits) + log(num_tools)) * logit_bias_scale
+```
+
+The resulting bias is detached before it is added to the full-vocab columns for reserved tool tokens. AR loss sees the prior-bias values in the forward pass, while AR gradients stop at the added bias. The prior head is trained only by the boundary tool-selection auxiliary CE, scaled by `logit_bias_loss_weight`; `--detach` controls whether that auxiliary CE also shapes the upstream boundary hidden-state path.
 
 ### Logit bias
 
@@ -97,6 +110,8 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/tokmem_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_no_detach_llama_1b.sh`
 
 Additional Llama-1B adaptation launchers over `1-50 -> 51-100`:
 
@@ -218,6 +233,8 @@ For ICL/RAG, `function_calls` on the maintained compositional dataset store argu
 - `avg_total_loss`
 - `avg_ar_loss`
 - `avg_logit_bias_loss` when `use_logit_bias=true` or `use_tool_head_replacement=true`
+- `use_logit_train_add`
+- `detach`
 
 Detailed position counters are available in the per-round training `results` payload and training logs. The saved `training_summary.json` stays a run-level loss summary.
 

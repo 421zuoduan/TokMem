@@ -33,9 +33,13 @@
 训练阶段：
 
 1. 收集 assistant-start 和每个 gold `eoc` 的边界 hidden state
-2. 对这些 hidden state 做 `detach`
+2. 按 `--detach / --no-detach` 对这些 hidden state 应用 stop-gradient
 3. 用独立的 `logit_bias_head` 预测下一步 gold tool id
 4. 将这条 CE 乘上 `logit_bias_loss_weight` 后加回主 AR loss
+
+`--detach` 默认开启，使 auxiliary CE 只训练 `logit_bias_head`。`--no-detach` 让 auxiliary CE 也回传到 boundary hidden state 上游的可训练参数。
+
+`--use_logit_train_add` 默认关闭。开启后，训练阶段会在 boundary tool-token 位置把 centered prior bias 加到 AR forward logits；这个 bias 在加入前 detach，所以 AR loss 会看到 prior bias 的数值影响，但不会通过 train-add 路径更新 `logit_bias_head`。
 
 推理阶段：
 
@@ -69,6 +73,8 @@ tool_bias = (tool_log_probs + log(K)) * logit_bias_scale
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_logit_train_add`
+- `--detach / --no-detach`
 - `--logit_bias_loss_weight`
 - `--logit_bias_network {linear,mlp}`
 - `--logit_bias_scale`

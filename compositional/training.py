@@ -1,4 +1,5 @@
 import inspect
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -406,11 +407,42 @@ def gather_logit_bias_examples(hidden_states, labels, model, return_indices=Fals
     return stacked_hidden_states, stacked_targets, initial_sites, eoc_sites
 
 
-def compute_logit_bias_loss(model, boundary_hidden_states, tool_targets):
-    """Run the detached tool prior head and return logits with CE loss on gold tool ids."""
-    tool_logits = model._get_logit_bias_scores(boundary_hidden_states.detach())
+def compute_logit_bias_loss(model, boundary_hidden_states, tool_targets, detach=True):
+    """Run the tool prior head and return logits with CE loss on gold tool ids."""
+    prior_hidden_states = boundary_hidden_states.detach() if detach else boundary_hidden_states
+    tool_logits = model._get_logit_bias_scores(prior_hidden_states)
     tool_loss = F.cross_entropy(tool_logits, tool_targets)
     return tool_logits, tool_loss
+
+
+def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_indices, time_indices, detach=True):
+    """Add detached auxiliary tool-prior bias to full-vocab logits at supervised boundary sites."""
+    if boundary_hidden_states.numel() == 0:
+        return shift_logits
+
+    tool_token_ids = getattr(model, "tool_reserved_token_ids", None)
+    if not tool_token_ids:
+        return shift_logits
+
+    prior_hidden_states = boundary_hidden_states.detach() if detach else boundary_hidden_states
+    tool_logits = model._get_logit_bias_scores(prior_hidden_states)
+    if tool_logits is None or tool_logits.numel() == 0:
+        return shift_logits
+
+    tool_log_probs = torch.log_softmax(tool_logits.float(), dim=-1)
+    uniform_tool_log_prob = math.log(max(1, len(tool_token_ids)))
+    logit_bias_scale = float(getattr(model, "logit_bias_scale", 1.0))
+    tool_bias = (tool_log_probs + uniform_tool_log_prob) * logit_bias_scale
+    tool_bias = tool_bias.detach().to(dtype=shift_logits.dtype)
+
+    if hasattr(model, "_get_tool_reserved_token_ids_tensor"):
+        tool_token_ids_tensor = model._get_tool_reserved_token_ids_tensor(shift_logits.device)
+    else:
+        tool_token_ids_tensor = torch.tensor(tool_token_ids, dtype=torch.long, device=shift_logits.device)
+
+    biased_logits = shift_logits.clone()
+    biased_logits[batch_indices[:, None], time_indices[:, None], tool_token_ids_tensor[None, :]] += tool_bias
+    return biased_logits
 
 
 def _forward_with_optional_hidden_states(
@@ -619,6 +651,8 @@ def train_native_function_calling_model(
     use_eoc=None,
     use_logit_bias=None,
     use_tool_head_replacement=None,
+    use_logit_train_add=False,
+    detach=True,
     logit_bias_loss_weight=0.1,
     plot_history=None,
     plot_step_offset=0,
@@ -640,6 +674,8 @@ def train_native_function_calling_model(
     )
     if resolved_use_logit_bias and resolved_use_tool_head_replacement:
         raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
+    if use_logit_train_add and not resolved_use_logit_bias:
+        raise ValueError("use_logit_train_add=True requires use_logit_bias=True")
     use_auxiliary_tool_head = resolved_use_logit_bias or resolved_use_tool_head_replacement
     if use_auxiliary_tool_head and not resolved_use_eoc:
         raise ValueError("use_logit_bias=True or use_tool_head_replacement=True requires use_eoc=True")
@@ -701,6 +737,8 @@ def train_native_function_calling_model(
         f"use_eoc={resolved_use_eoc}, "
         f"use_logit_bias={resolved_use_logit_bias}, "
         f"use_tool_head_replacement={resolved_use_tool_head_replacement}, "
+        f"use_logit_train_add={use_logit_train_add}, "
+        f"detach={detach}, "
         f"logit_bias_loss_weight={logit_bias_loss_weight}"
     )
 
@@ -770,6 +808,41 @@ def train_native_function_calling_model(
             shift_labels = labels[..., 1:].contiguous()
             valid_mask = shift_labels != -100
 
+            logit_bias_loss = zero
+            logit_bias_targets = None
+            logit_bias_initial_count = 0
+            logit_bias_eoc_count = 0
+            if use_auxiliary_tool_head and hidden_states is not None:
+                (
+                    logit_bias_hidden_states,
+                    logit_bias_targets,
+                    logit_bias_batch_indices,
+                    logit_bias_time_indices,
+                    logit_bias_initial_count,
+                    logit_bias_eoc_count,
+                ) = gather_logit_bias_examples(
+                    hidden_states,
+                    labels,
+                    model,
+                    return_indices=True,
+                )
+                if logit_bias_targets.numel() > 0 and has_logit_bias_head:
+                    if use_logit_train_add:
+                        shift_logits = apply_logit_train_add(
+                            model,
+                            shift_logits,
+                            logit_bias_hidden_states,
+                            logit_bias_batch_indices,
+                            logit_bias_time_indices,
+                            detach=detach,
+                        )
+                    _, logit_bias_loss = compute_logit_bias_loss(
+                        model,
+                        logit_bias_hidden_states,
+                        logit_bias_targets,
+                        detach=detach,
+                    )
+
             if valid_mask.sum() == 0:
                 print(
                     f"Warning: skipping batch with no valid targets at epoch {epoch + 1}, "
@@ -795,31 +868,6 @@ def train_native_function_calling_model(
             )
             eoc_count = int(masks["eoc_mask"].sum().item())
             tool_count = int(masks["tool_mask"].sum().item())
-            logit_bias_loss = zero
-            logit_bias_targets = None
-            logit_bias_initial_count = 0
-            logit_bias_eoc_count = 0
-
-            if use_auxiliary_tool_head and hidden_states is not None:
-                (
-                    logit_bias_hidden_states,
-                    logit_bias_targets,
-                    _,
-                    _,
-                    logit_bias_initial_count,
-                    logit_bias_eoc_count,
-                ) = gather_logit_bias_examples(
-                    hidden_states,
-                    labels,
-                    model,
-                    return_indices=True,
-                )
-                if logit_bias_targets.numel() > 0 and has_logit_bias_head:
-                    _, logit_bias_loss = compute_logit_bias_loss(
-                        model,
-                        logit_bias_hidden_states,
-                        logit_bias_targets,
-                    )
 
             loss = ar_loss
             if use_auxiliary_tool_head:
@@ -1013,6 +1061,8 @@ def train_native_function_calling_model(
         "use_eoc": resolved_use_eoc,
         "use_logit_bias": resolved_use_logit_bias,
         "use_tool_head_replacement": resolved_use_tool_head_replacement,
+        "use_logit_train_add": bool(use_logit_train_add),
+        "detach": bool(detach),
         "avg_loss_metrics": avg_loss_metrics,
         "plot_next_step": plot_step_offset + successful_steps,
         "plot_end_step": plot_step_offset + successful_steps,
