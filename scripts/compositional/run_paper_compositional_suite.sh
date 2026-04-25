@@ -22,7 +22,7 @@ Runs the compositional paper suite for:
 - 4 calls main comparison
 - 10 calls TokMem-family stress test with separate result tables
 - models: llama1b, llama3b, llama8b
-- methods: icl, rag, lora, tokmem, tokmem_eoc, tokmem_eoc_logit_bias, adap_tokmem, adap_tokmem_eoc, adap_tokmem_eoc_logit_bias
+- methods: icl, rag, lora, tokmem, tokmem_eoc, tokmem_eoc_logit_bias, tokmem_eoc_replace_head, adap_tokmem, adap_tokmem_eoc, adap_tokmem_eoc_logit_bias, adap_tokmem_eoc_replace_head
 - 5 trials per model/method, seed fixed to 42 for every trial
 
 Artifacts:
@@ -130,23 +130,27 @@ METHODS=(
     tokmem
     tokmem_eoc
     tokmem_eoc_logit_bias
+    tokmem_eoc_replace_head
     adap_tokmem
     adap_tokmem_eoc
     adap_tokmem_eoc_logit_bias
+    adap_tokmem_eoc_replace_head
 )
 TRAINING_METHODS=(
     lora
     tokmem
     tokmem_eoc
     tokmem_eoc_logit_bias
+    tokmem_eoc_replace_head
     adap_tokmem
     adap_tokmem_eoc
     adap_tokmem_eoc_logit_bias
+    adap_tokmem_eoc_replace_head
 )
 
 declare -A METHODS_BY_SCOPE=(
     [4calls]="${METHODS[*]}"
-    [10calls]="tokmem tokmem_eoc_logit_bias adap_tokmem adap_tokmem_eoc_logit_bias"
+    [10calls]="tokmem tokmem_eoc_logit_bias tokmem_eoc_replace_head adap_tokmem adap_tokmem_eoc_logit_bias adap_tokmem_eoc_replace_head"
 )
 
 declare -A TRAIN_SIZE_BY_SCOPE=(
@@ -197,9 +201,11 @@ declare -A METHOD_EXPERIMENT_TYPES=(
     [tokmem]="tokmem"
     [tokmem_eoc]="tokmem_eoc"
     [tokmem_eoc_logit_bias]="tokmem_eoc_logit_bias"
+    [tokmem_eoc_replace_head]="tokmem_eoc_replace_head"
     [adap_tokmem]="adap_tokmem"
     [adap_tokmem_eoc]="adap_tokmem_eoc"
     [adap_tokmem_eoc_logit_bias]="adap_tokmem_eoc_logit_bias"
+    [adap_tokmem_eoc_replace_head]="adap_tokmem_eoc_replace_head"
 )
 
 declare -A TOKMEM_BATCH_SIZES=(
@@ -328,9 +334,11 @@ payload = {
                     "tokmem",
                     "tokmem_eoc",
                     "tokmem_eoc_logit_bias",
+                    "tokmem_eoc_replace_head",
                     "adap_tokmem",
                     "adap_tokmem_eoc",
                     "adap_tokmem_eoc_logit_bias",
+                    "adap_tokmem_eoc_replace_head",
                 ],
             },
             "10calls": {
@@ -345,8 +353,10 @@ payload = {
                 "methods": [
                     "tokmem",
                     "tokmem_eoc_logit_bias",
+                    "tokmem_eoc_replace_head",
                     "adap_tokmem",
                     "adap_tokmem_eoc_logit_bias",
+                    "adap_tokmem_eoc_replace_head",
                 ],
             },
         },
@@ -357,9 +367,11 @@ payload = {
             "tokmem": "51-100:3",
             "tokmem_eoc": "51-100:3",
             "tokmem_eoc_logit_bias": "51-100:3",
+            "tokmem_eoc_replace_head": "51-100:3",
             "adap_tokmem": "1-50:1,51-100:3",
             "adap_tokmem_eoc": "1-50:1,51-100:3",
             "adap_tokmem_eoc_logit_bias": "1-50:1,51-100:3",
+            "adap_tokmem_eoc_replace_head": "1-50:1,51-100:3",
         },
         "adaptation_scopes": {
             "4calls": {
@@ -367,6 +379,7 @@ payload = {
                     "adap_tokmem",
                     "adap_tokmem_eoc",
                     "adap_tokmem_eoc_logit_bias",
+                    "adap_tokmem_eoc_replace_head",
                 ],
                 "pre_adaptation_top_k": "1-50",
                 "training_rounds": "1-50:1,51-100:3",
@@ -377,6 +390,7 @@ payload = {
                 "enabled_methods": [
                     "adap_tokmem",
                     "adap_tokmem_eoc_logit_bias",
+                    "adap_tokmem_eoc_replace_head",
                 ],
                 "pre_adaptation_top_k": "1-50",
                 "training_rounds": "1-50:1,51-100:3",
@@ -436,9 +450,11 @@ payload = {
         "tokmem",
         "tokmem_eoc",
         "tokmem_eoc_logit_bias",
+        "tokmem_eoc_replace_head",
         "adap_tokmem",
         "adap_tokmem_eoc",
         "adap_tokmem_eoc_logit_bias",
+        "adap_tokmem_eoc_replace_head",
     ],
 }
 path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -572,7 +588,7 @@ build_task_command() {
                 --run_tag "${model_key}_${method}"
             )
             ;;
-        adap_tokmem|adap_tokmem_eoc|adap_tokmem_eoc_logit_bias)
+        adap_tokmem|adap_tokmem_eoc|adap_tokmem_eoc_logit_bias|adap_tokmem_eoc_replace_head)
             TASK_CMD=(
                 python -u main_sequential.py
                 --training_rounds "1-50:1,51-100:3"
@@ -599,14 +615,17 @@ build_task_command() {
                 --run_name "$task_name"
                 --run_tag "${model_key}_${method}"
             )
-            if [[ "$method" == "adap_tokmem_eoc" || "$method" == "adap_tokmem_eoc_logit_bias" ]]; then
+            if [[ "$method" == "adap_tokmem_eoc" || "$method" == "adap_tokmem_eoc_logit_bias" || "$method" == "adap_tokmem_eoc_replace_head" ]]; then
                 TASK_CMD+=(--use_eoc)
             fi
             if [[ "$method" == "adap_tokmem_eoc_logit_bias" ]]; then
                 TASK_CMD+=(--use_logit_bias)
             fi
+            if [[ "$method" == "adap_tokmem_eoc_replace_head" ]]; then
+                TASK_CMD+=(--use_tool_head_replacement)
+            fi
             ;;
-        tokmem|tokmem_eoc|tokmem_eoc_logit_bias)
+        tokmem|tokmem_eoc|tokmem_eoc_logit_bias|tokmem_eoc_replace_head)
             TASK_CMD=(
                 python -u main_sequential.py
                 --training_rounds "$TOKMEM_TRAINING_ROUNDS"
@@ -627,11 +646,14 @@ build_task_command() {
                 --run_name "$task_name"
                 --run_tag "${model_key}_${method}_${call_scope}"
             )
-            if [[ "$method" == "tokmem_eoc" || "$method" == "tokmem_eoc_logit_bias" ]]; then
+            if [[ "$method" == "tokmem_eoc" || "$method" == "tokmem_eoc_logit_bias" || "$method" == "tokmem_eoc_replace_head" ]]; then
                 TASK_CMD+=(--use_eoc)
             fi
             if [[ "$method" == "tokmem_eoc_logit_bias" ]]; then
                 TASK_CMD+=(--use_logit_bias)
+            fi
+            if [[ "$method" == "tokmem_eoc_replace_head" ]]; then
+                TASK_CMD+=(--use_tool_head_replacement)
             fi
             ;;
         *)
@@ -648,7 +670,7 @@ command_string() {
 is_training_method() {
     local method="$1"
     case "$method" in
-        lora|tokmem|tokmem_eoc|tokmem_eoc_logit_bias|adap_tokmem|adap_tokmem_eoc|adap_tokmem_eoc_logit_bias)
+        lora|tokmem|tokmem_eoc|tokmem_eoc_logit_bias|tokmem_eoc_replace_head|adap_tokmem|adap_tokmem_eoc|adap_tokmem_eoc_logit_bias|adap_tokmem_eoc_replace_head)
             return 0
             ;;
         *)
@@ -1283,9 +1305,11 @@ training_methods = {
     "tokmem",
     "tokmem_eoc",
     "tokmem_eoc_logit_bias",
+    "tokmem_eoc_replace_head",
     "adap_tokmem",
     "adap_tokmem_eoc",
     "adap_tokmem_eoc_logit_bias",
+    "adap_tokmem_eoc_replace_head",
 }
 
 rows = list(csv.DictReader(manifest_path.open("r", encoding="utf-8"), delimiter="\t"))
@@ -1358,9 +1382,9 @@ summary_lines = [
     "- max length by scope: `4calls=512`, `10calls=1024`",
     "- 10-call results are summarized in separate tables because they use a different synthesized dataset.",
     "- models: `llama1b`, `llama3b`, `llama8b`",
-    "- methods: `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`",
+    "- methods: `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`, `adap_tokmem_eoc_replace_head`",
     "- adaptation 4calls scope: `adap_tokmem* uses 1-50:1,51-100:3 with 4 calls in both rounds`",
-    "- adaptation 10calls scope: `adap_tokmem` and `adap_tokmem_eoc_logit_bias` use `1-50:1,51-100:3` with `4,10` calls by round",
+    "- adaptation 10calls scope: `adap_tokmem`, `adap_tokmem_eoc_logit_bias`, and `adap_tokmem_eoc_replace_head` use `1-50:1,51-100:3` with `4,10` calls by round",
     "",
     "## Batch Settings",
     "",

@@ -33,8 +33,10 @@ Notes:
 - Suite-owned tasks keep their GPU reserved for the full process lifetime.
 - GPUs that are already free, or just finished a suite-owned task, are eligible immediately.
 - A GPU that was externally busy is eligible after memory.used stays <= 2048 MiB for 300 consecutive seconds.
+- RAG tasks share one suite-level few-shot corpus cache under data/.
 - --rerun-failed requires --suite-name <existing-suite>
 - the default split cache must exist before launch
+- the suite exits nonzero after writing summary/status when any task did not succeed
 EOF
 }
 
@@ -110,6 +112,13 @@ if [[ "$RERUN_FAILED" -eq 1 && ! -d "$SUITE_DIR" ]]; then
 fi
 
 RAG_RETRIEVAL_TOP_K=3
+RAG_RETRIEVER_MODEL="$ROOT_DIR/models/all-MiniLM-L6-v2"
+RAG_SPLIT_CACHE_STEM="$(basename "$SPLIT_CACHE")"
+RAG_SPLIT_CACHE_STEM="${RAG_SPLIT_CACHE_STEM%.*}"
+RAG_SPLIT_CACHE_STEM="${RAG_SPLIT_CACHE_STEM//[^A-Za-z0-9_.-]/_}"
+RAG_RETRIEVER_STEM="$(basename "$RAG_RETRIEVER_MODEL")"
+RAG_RETRIEVER_STEM="${RAG_RETRIEVER_STEM//[^A-Za-z0-9_.-]/_}"
+RAG_CORPUS_CACHE_PATH="$DATA_DIR/rag_corpus_${RAG_SPLIT_CACHE_STEM}_${RAG_RETRIEVER_STEM}_top${RAG_RETRIEVAL_TOP_K}.pt"
 TOKMEM_EPOCHS=1
 TOKMEM_LR="5e-3"
 TOKMEM_VALIDATE_EVERY_N_STEPS=1000
@@ -148,9 +157,9 @@ declare -A LORA_GRADIENT_ACCUMULATION_STEPS=(
 )
 
 declare -A TOKMEM_TRAIN_BATCH_SIZES=(
-    [qwen0_5b]=8
-    [llama3b]=4
-    [llama8b]=2
+    [qwen0_5b]=16
+    [llama3b]=8
+    [llama8b]=4
 )
 
 declare -A TOKMEM_EVAL_BATCH_SIZES=(
@@ -198,6 +207,7 @@ log() {
 write_suite_config() {
     python - "$SUITE_CONFIG_FILE" "$SUITE_NAME" "$GPU_IDS_CSV" "$POLL_SECONDS" "$GPU_MEMORY_LIMIT_MIB" \
         "$GPU_IDLE_REQUIRED_SECONDS" "$RERUN_FAILED" "$TASKS_DIR" "$SPLIT_CACHE" \
+        "$RAG_CORPUS_CACHE_PATH" "$RAG_RETRIEVER_MODEL" "$RAG_RETRIEVAL_TOP_K" \
         "$NUM_TASKS" "$TRAIN_SIZE" "$VAL_SIZE" "$TEST_SIZE" "$SEED" \
         "$MAX_LENGTH" "$MAX_INSTRUCTION_TOKENS" "$MAX_NEW_TOKENS" <<'PY'
 import json
@@ -214,34 +224,39 @@ payload = {
     "rerun_failed": bool(int(sys.argv[7])),
     "tasks_dir": sys.argv[8],
     "split_cache_path": sys.argv[9],
+    "rag": {
+        "corpus_cache_path": sys.argv[10],
+        "retriever_model": sys.argv[11],
+        "retrieval_top_k": int(sys.argv[12]),
+    },
     "dataset": {
-        "num_tasks": int(sys.argv[10]),
-        "train_size": int(sys.argv[11]),
-        "val_size": int(sys.argv[12]),
-        "test_size": int(sys.argv[13]),
-        "seed": int(sys.argv[14]),
-        "max_length": int(sys.argv[15]),
-        "max_instruction_tokens": int(sys.argv[16]),
-        "max_new_tokens": int(sys.argv[17]),
+        "num_tasks": int(sys.argv[13]),
+        "train_size": int(sys.argv[14]),
+        "val_size": int(sys.argv[15]),
+        "test_size": int(sys.argv[16]),
+        "seed": int(sys.argv[17]),
+        "max_length": int(sys.argv[18]),
+        "max_instruction_tokens": int(sys.argv[19]),
+        "max_new_tokens": int(sys.argv[20]),
     },
     "trial_count": 3,
     "trial_seeds": [42, 42, 42],
         "batch_settings": {
             "qwen0_5b": {
             "lora": {"train_batch_size": 8, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
-            "tokmem_family": {"train_batch_size": 8, "eval_batch_size": 64, "gradient_accumulation_steps": 1},
+            "tokmem_family": {"train_batch_size": 16, "eval_batch_size": 64, "gradient_accumulation_steps": 1},
             "base": {"test_batch_size": 512},
             "rag": {"test_batch_size": 256, "retrieval_top_k": 3},
         },
         "llama3b": {
             "lora": {"train_batch_size": 2, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
-            "tokmem_family": {"train_batch_size": 4, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
+            "tokmem_family": {"train_batch_size": 8, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
             "base": {"test_batch_size": 256},
             "rag": {"test_batch_size": 128, "retrieval_top_k": 3},
         },
         "llama8b": {
             "lora": {"train_batch_size": 2, "eval_batch_size": 8, "gradient_accumulation_steps": 2},
-            "tokmem_family": {"train_batch_size": 2, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
+            "tokmem_family": {"train_batch_size": 4, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
             "base": {"test_batch_size": 128},
             "rag": {"test_batch_size": 64, "retrieval_top_k": 3},
         },
@@ -287,8 +302,8 @@ validate_inputs() {
         fi
     done
 
-    if [[ ! -d "$ROOT_DIR/models/all-MiniLM-L6-v2" ]]; then
-        echo "Retriever model path not found: $ROOT_DIR/models/all-MiniLM-L6-v2" >&2
+    if [[ ! -d "$RAG_RETRIEVER_MODEL" ]]; then
+        echo "Retriever model path not found: $RAG_RETRIEVER_MODEL" >&2
         exit 1
     fi
 
@@ -363,10 +378,10 @@ build_task_command() {
                 --val_size "$VAL_SIZE"
                 --test_size "$TEST_SIZE"
                 --model_name "$model_path"
-                --retriever_model "$ROOT_DIR/models/all-MiniLM-L6-v2"
+                --retriever_model "$RAG_RETRIEVER_MODEL"
                 --device_map balanced
                 --split_cache_path "$SPLIT_CACHE"
-                --corpus_cache_path "$task_dir/rag_corpus.pt"
+                --corpus_cache_path "$RAG_CORPUS_CACHE_PATH"
                 --retrieval_top_k "$RAG_RETRIEVAL_TOP_K"
                 --max_length "$MAX_LENGTH"
                 --max_instruction_tokens "$MAX_INSTRUCTION_TOKENS"
@@ -987,11 +1002,11 @@ summary_lines = [
     "",
     "## Batch Settings",
     "",
-    "| Model | LoRA train | LoRA grad acc | LoRA eval | TokMem train | TokMem grad acc | TokMem eval | base test | rag test |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    "| qwen0_5b | 8 | 1 | 32 | 8 | 1 | 64 | 512 | 256 |",
-    "| llama3b | 2 | 2 | 16 | 4 | 1 | 32 | 256 | 128 |",
-    "| llama8b | 2 | 2 | 8 | 2 | 2 | 16 | 128 | 64 |",
+    "| Model | LoRA train | LoRA grad acc | LoRA eval | TokMem train | TokMem grad acc | TokMem effective train | TokMem eval | base test | rag test |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| qwen0_5b | 8 | 1 | 32 | 16 | 1 | 16 | 64 | 512 | 256 |",
+    "| llama3b | 2 | 2 | 16 | 8 | 1 | 8 | 32 | 256 | 128 |",
+    "| llama8b | 2 | 2 | 8 | 4 | 2 | 8 | 16 | 128 | 64 |",
     "",
     "- current launcher methods: `base`, `rag`, `lora`, `tokmem`, `tokmem_logit_bias`",
     "- shared training settings: epochs `1`, lr `5e-3`, validate_every_n_steps `1000`",
@@ -1268,4 +1283,25 @@ harvest_finished_tasks
 write_suite_status_json
 write_suite_summary
 
-log "Suite complete: $SUMMARY_FILE"
+if python - "$STATUS_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+payload = json.loads(status_path.read_text(encoding="utf-8"))
+failed = [
+    item["task_name"]
+    for item in payload.get("tasks", [])
+    if item.get("status") != "success"
+]
+if failed:
+    print(f"{len(failed)} task(s) did not succeed.", file=sys.stderr)
+    sys.exit(1)
+PY
+then
+    log "Suite finished. Summary written to $SUMMARY_FILE"
+else
+    log "Suite finished with failures. Summary written to $SUMMARY_FILE"
+    exit 1
+fi

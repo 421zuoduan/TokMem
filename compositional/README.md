@@ -128,15 +128,15 @@ Paper-level compositional suite launcher:
 
 - `scripts/compositional/run_paper_compositional_suite.sh`
 
-This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`.
+This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`, `adap_tokmem_eoc_replace_head`.
 
-The same suite also schedules a separate `51-100 / 10 calls` TokMem-family stress test for `tokmem`, `tokmem_eoc_logit_bias`, `adap_tokmem`, and `adap_tokmem_eoc_logit_bias`. It synthesizes `8000` train and `800` test examples with 10-call filenames and uses smaller TokMem train/eval batches:
+The same suite also schedules a separate `51-100 / 10 calls` TokMem-family stress test for `tokmem`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc_logit_bias`, and `adap_tokmem_eoc_replace_head`. It synthesizes `8000` train and `800` test examples with 10-call filenames and uses smaller TokMem train/eval batches:
 
 - `llama1b`: `4/16`
 - `llama3b`: `2/8`
 - `llama8b`: `1/4`
 
-For the two 10-call adaptation methods, the first round stays aligned with the suite adaptation setup over `1-50 / 4 calls`, and the second round trains on `51-100 / 10 calls`:
+For the three 10-call adaptation methods, the first round stays aligned with the suite adaptation setup over `1-50 / 4 calls`, and the second round trains on `51-100 / 10 calls`:
 
 - `llama1b`: `16,4`
 - `llama3b`: `8,2`
@@ -205,6 +205,8 @@ rounds[-1].eval_results
 ```
 
 ICL/RAG baselines save the same maintained metric names under the top-level `metrics` field in `evaluation_results.json`.
+
+Their saved `config.generation_params` records the actual evaluation decoding settings: `max_new_tokens=256`, `temperature=0.6`, `do_sample=false`, and `top_p=0.9`.
 
 For ICL/RAG, `function_calls` on the maintained compositional dataset store argument JSON only. The saved tool metrics therefore first map each predicted argument object back to a tool id from the active prompt tool schemas, and ambiguous calls stay unresolved. Fields including `tool_accuracy`, `tool_exact_match_acc`, `avg_tool_f1_score`, `avg_f1_score`, `exact_accuracy`, and `parse_error_rate` are overall values over the full evaluation set. `tool_accuracy` is the binary per-sample-tool accuracy over TP/TN/FP/FN, `tool_exact_match_acc` is the sample rate where the full tool set is predicted exactly, and `avg_tool_f1_score` keeps the existing Tool F1 definition. Per-call-count breakdowns are printed in `evaluation.log`.
 

@@ -5,6 +5,7 @@ import argparse
 import gc
 import json
 import os
+import time
 from collections import defaultdict
 
 import torch
@@ -22,6 +23,9 @@ from generation_baseline_utils import (
 )
 from task_training import setup_logging
 from test_sbert_retriever import SBERTRetriever
+
+CORPUS_CACHE_LOCK_POLL_SECONDS = 10
+CORPUS_CACHE_LOCK_STALE_SECONDS = 24 * 60 * 60
 
 
 def parse_args():
@@ -109,32 +113,76 @@ def build_or_load_corpus(
     retriever_model_name,
 ):
     """Build the SBERT corpus or load it from cache."""
-    if corpus_cache_path and os.path.exists(corpus_cache_path):
+    def load_cached_corpus():
         payload = torch.load(corpus_cache_path, map_location="cpu")
         retriever.corpus_embeddings = payload["corpus_embeddings"]
         retriever.corpus_metadata = payload["corpus_metadata"]
         retriever._normalized_corpus_matrix = None
         return payload.get("corpus_size", len(retriever.corpus_metadata)), True
 
-    corpus_size = retriever.build_corpus(
-        tasks_few_shot,
-        task_instructions if include_instruction_in_demos else None,
-    )
-
+    lock_path = None
     if corpus_cache_path:
-        os.makedirs(os.path.dirname(corpus_cache_path), exist_ok=True)
-        torch.save(
-            {
-                "corpus_embeddings": retriever.corpus_embeddings.detach().cpu(),
-                "corpus_metadata": retriever.corpus_metadata,
-                "corpus_size": corpus_size,
-                "include_instruction_in_demos": include_instruction_in_demos,
-                "retriever_model": retriever_model_name,
-            },
-            corpus_cache_path,
+        cache_dir = os.path.dirname(corpus_cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+
+        lock_path = f"{corpus_cache_path}.lock"
+        while True:
+            if os.path.exists(corpus_cache_path):
+                return load_cached_corpus()
+            try:
+                os.mkdir(lock_path)
+                break
+            except FileExistsError:
+                try:
+                    lock_age = time.time() - os.path.getmtime(lock_path)
+                except FileNotFoundError:
+                    continue
+                if lock_age > CORPUS_CACHE_LOCK_STALE_SECONDS:
+                    try:
+                        os.rmdir(lock_path)
+                        continue
+                    except OSError:
+                        pass
+                print(
+                    f"Waiting for RAG corpus cache lock: {lock_path}",
+                    flush=True,
+                )
+                time.sleep(CORPUS_CACHE_LOCK_POLL_SECONDS)
+
+        if os.path.exists(corpus_cache_path):
+            try:
+                return load_cached_corpus()
+            finally:
+                os.rmdir(lock_path)
+
+    tmp_cache_path = None
+    try:
+        corpus_size = retriever.build_corpus(
+            tasks_few_shot,
+            task_instructions if include_instruction_in_demos else None,
         )
 
-    return corpus_size, False
+        if corpus_cache_path:
+            tmp_cache_path = f"{corpus_cache_path}.tmp.{os.getpid()}"
+            torch.save(
+                {
+                    "corpus_embeddings": retriever.corpus_embeddings.detach().cpu(),
+                    "corpus_metadata": retriever.corpus_metadata,
+                    "corpus_size": corpus_size,
+                    "include_instruction_in_demos": include_instruction_in_demos,
+                    "retriever_model": retriever_model_name,
+                },
+                tmp_cache_path,
+            )
+            os.replace(tmp_cache_path, corpus_cache_path)
+
+        return corpus_size, False
+    finally:
+        if tmp_cache_path and os.path.exists(tmp_cache_path):
+            os.remove(tmp_cache_path)
+        if lock_path and os.path.isdir(lock_path):
+            os.rmdir(lock_path)
 
 
 def resolve_retriever_device(requested_device):

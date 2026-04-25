@@ -31,6 +31,14 @@ from run_layout import (
 )
 
 
+ICL_GENERATION_PARAMS = {
+    'max_new_tokens': 256,
+    'temperature': 0.6,
+    'do_sample': False,
+    'top_p': 0.9,
+}
+
+
 class TeeStream:
     def __init__(self, *streams):
         self.streams = streams
@@ -163,7 +171,7 @@ class ICLBaseline:
         self.model.eval()
         print("Model loaded successfully!")
     
-    def generate_batch_responses(self, prompts: List[str], max_length=4096, max_new_tokens=256, temperature=0.6, do_sample=True, top_p=0.9) -> List[str]:
+    def generate_batch_responses(self, prompts: List[str], max_length=4096, max_new_tokens=256, temperature=0.6, do_sample=False, top_p=0.9) -> List[str]:
         """Generate responses for a batch of prompts"""
         if not prompts:
             return []
@@ -330,7 +338,7 @@ class ICLBaseline:
             })
         
         # Generate responses for the batch
-        responses = self.generate_batch_responses(prompts, max_length=4096, max_new_tokens=256, temperature=0.6, do_sample=False, top_p=0.9)
+        responses = self.generate_batch_responses(prompts, max_length=4096, **ICL_GENERATION_PARAMS)
         
         # Parse responses and combine with batch info
         results = []
@@ -567,12 +575,7 @@ class ICLBaseline:
                 'batch_size': batch_size,
                 'tool_descriptions_path': tool_descriptions_path,
                 'test_data_path': test_data_path,
-                'generation_params': {
-                    'max_new_tokens': 256,
-                    'temperature': 0.1,
-                    'do_sample': True,
-                    'top_p': 0.9
-                }
+                'generation_params': ICL_GENERATION_PARAMS.copy()
             },
             'summary_stats': {
                 'total_exact_matches': total_exact_matches,

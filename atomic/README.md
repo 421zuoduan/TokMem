@@ -84,21 +84,26 @@ bash ../scripts/atomic/run_paper_atomic_suite.sh --gpus 0,1,2,3
 The suite writes all artifacts under `results/atomic/<suite-name>/`:
 
 - per-task runs: `results/atomic/<suite-name>/runs/`
+- shared suite data: `results/atomic/<suite-name>/data/`
 - task manifest: `results/atomic/<suite-name>/task_manifest.tsv`
 - task status: `results/atomic/<suite-name>/task_status.json`
 - summary: `results/atomic/<suite-name>/summary.md`
 - scheduler log: `results/atomic/<suite-name>/scheduler.log`
 - GPU availability log: `results/atomic/<suite-name>/gpu_availability.log`
 
-The suite scheduler only monitors and schedules the GPUs listed by `--gpus`. Suite-owned tasks reserve their assigned GPU for the full process lifetime, including RAG corpus processing before generator loading. GPUs that are already free, or just finished a suite-owned task, can launch the next task immediately once `memory.used <= 2048 MiB`; the 300-second availability window applies after external GPU occupancy. `--poll-seconds` controls the sampling interval. Each task still writes its own runtime `gpu_monitor.log` under the task run directory.
+RAG tasks share one suite-level SBERT corpus cache under `data/`, keyed by the fixed split cache, retriever model, and retrieval top-k. The first RAG task builds the corpus; later RAG tasks in the same suite reuse it across models and trials.
+
+The suite scheduler only monitors and schedules the GPUs listed by `--gpus`. Suite-owned tasks reserve their assigned GPU for the full process lifetime, including RAG retrieval preprocessing before generator loading. GPUs that are already free, or just finished a suite-owned task, can launch the next task immediately once `memory.used <= 2048 MiB`; the 300-second availability window applies after external GPU occupancy. `--poll-seconds` controls the sampling interval. Each task still writes its own runtime `gpu_monitor.log` under the task run directory.
+
+The suite always writes `task_status.json`, `summary.md`, and `summary.json` after scheduling completes. If any task status is not `success`, the launcher exits with status `1` after those files are written.
 
 Default `700-task` batch settings in the launcher:
 
-| Model | LoRA train | LoRA eval | TokMem train | TokMem eval | base test | rag test |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `Qwen 0.5B` | `16` | `64` | `16` | `256` | `1024` | `512` |
-| `Llama 3B` | `16` | `64` | `32` | `128` | `512` | `256` |
-| `Llama 8B` | `8` | `48` | `16` | `64` | `256` | `128` |
+| Model | LoRA train | LoRA grad acc | LoRA eval | TokMem train | TokMem grad acc | TokMem effective train | TokMem eval | base test | rag test |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Qwen 0.5B` | `8` | `1` | `32` | `16` | `1` | `16` | `64` | `512` | `256` |
+| `Llama 3B` | `2` | `2` | `16` | `8` | `1` | `8` | `32` | `256` | `128` |
+| `Llama 8B` | `2` | `2` | `8` | `4` | `2` | `8` | `16` | `128` | `64` |
 
 Use `--suite-name <existing-suite> --rerun-failed` to rerun only failed tasks inside an existing suite directory.
 

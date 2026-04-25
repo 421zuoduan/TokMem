@@ -167,6 +167,35 @@ class FunctionCallingModel(nn.Module):
         # Create trainable parameters for tool tokens (coupled or decoupled)
         # Clone the embeddings for the trainable reserved tokens and make them parameters
         reserved_token_indices = torch.tensor(self.trainable_reserved_token_ids, device=device)
+        self.register_buffer(
+            "_trainable_reserved_token_id_tensor",
+            reserved_token_indices.clone().long(),
+            persistent=False,
+        )
+        tool_token_indices = torch.tensor(self.tool_reserved_token_ids, device=device, dtype=torch.long)
+        self.register_buffer(
+            "_tool_reserved_token_id_tensor",
+            tool_token_indices,
+            persistent=False,
+        )
+        reserved_index_lookup = torch.full(
+            (int(reserved_token_indices.max().item()) + 1,),
+            -1,
+            device=device,
+            dtype=torch.long,
+        )
+        reserved_index_lookup[reserved_token_indices.long()] = torch.arange(
+            reserved_token_indices.numel(),
+            device=device,
+            dtype=torch.long,
+        )
+        self.register_buffer(
+            "_trainable_reserved_index_lookup",
+            reserved_index_lookup,
+            persistent=False,
+        )
+        self._min_trainable_reserved_token_id = int(reserved_token_indices.min().item())
+        self._max_trainable_reserved_token_id = int(reserved_token_indices.max().item())
         
         if self.decouple_embeddings:
             # Separate parameters for input and output layers
@@ -228,17 +257,24 @@ class FunctionCallingModel(nn.Module):
             # Get standard embeddings
             embeddings = self.original_embed_forward(input_ids)
 
-            reserved_token_ids = torch.as_tensor(
-                self.trainable_reserved_token_ids,
-                device=input_ids.device,
-            )
             flattened_input_ids = input_ids.reshape(-1)
-            reserved_matches = (flattened_input_ids[:, None] == reserved_token_ids[None, :]).nonzero(as_tuple=False)
-            if reserved_matches.numel() > 0:
+            candidate_mask = (
+                (flattened_input_ids >= self._min_trainable_reserved_token_id)
+                & (flattened_input_ids <= self._max_trainable_reserved_token_id)
+            )
+            if candidate_mask.any():
+                candidate_positions = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
+                lookup = self._get_trainable_reserved_index_lookup(input_ids.device)
+                reserved_indices = lookup[flattened_input_ids[candidate_positions]]
+                reserved_mask = reserved_indices >= 0
+                reserved_positions = candidate_positions[reserved_mask]
+                reserved_indices = reserved_indices[reserved_mask]
+            else:
+                reserved_positions = None
+
+            if reserved_positions is not None and reserved_positions.numel() > 0:
                 flattened_embeddings = embeddings.reshape(-1, embeddings.size(-1))
-                flattened_embeddings[reserved_matches[:, 0]] = self.trainable_tool_input_embeddings[
-                    reserved_matches[:, 1]
-                ]
+                flattened_embeddings[reserved_positions] = self.trainable_tool_input_embeddings[reserved_indices]
             
             return embeddings
         
@@ -247,10 +283,7 @@ class FunctionCallingModel(nn.Module):
             # Get standard logits
             logits = self.original_lm_head_forward(hidden_states)
 
-            reserved_token_ids = torch.as_tensor(
-                self.trainable_reserved_token_ids,
-                device=logits.device,
-            )
+            reserved_token_ids = self._get_trainable_reserved_token_ids_tensor(logits.device)
             reserved_token_logits = torch.matmul(
                 hidden_states,
                 self.trainable_tool_output_embeddings.transpose(0, 1),
@@ -269,6 +302,27 @@ class FunctionCallingModel(nn.Module):
             # Direct override for non-LoRA model
             self.model.model.embed_tokens.forward = custom_embed_forward
             self.model.lm_head.forward = custom_lm_head_forward
+
+    def _get_trainable_reserved_token_ids_tensor(self, device):
+        """Return cached trainable reserved token IDs on the active device."""
+        token_ids = self._trainable_reserved_token_id_tensor
+        if token_ids.device != device:
+            token_ids = token_ids.to(device=device)
+        return token_ids
+
+    def _get_tool_reserved_token_ids_tensor(self, device):
+        """Return cached tool token IDs on the active device."""
+        token_ids = self._tool_reserved_token_id_tensor
+        if token_ids.device != device:
+            token_ids = token_ids.to(device=device)
+        return token_ids
+
+    def _get_trainable_reserved_index_lookup(self, device):
+        """Return token-ID to trainable reserved slot lookup on the active device."""
+        lookup = self._trainable_reserved_index_lookup
+        if lookup.device != device:
+            lookup = lookup.to(device=device)
+        return lookup
     
     def restore_original_model(self):
         """Restore the original model methods (useful for cleanup or debugging)"""
@@ -390,7 +444,7 @@ class FunctionCallingModel(nn.Module):
         """Mask logits so only tool token IDs remain valid."""
         if not self.tool_reserved_token_ids:
             return logits
-        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=logits.device)
+        tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
         masked_logits = torch.full_like(logits, float("-inf"))
         masked_logits[..., tool_token_ids] = logits[..., tool_token_ids]
         return masked_logits
@@ -415,7 +469,7 @@ class FunctionCallingModel(nn.Module):
         tool_bias = (tool_log_probs + uniform_tool_log_prob) * self.logit_bias_scale
         tool_bias = tool_bias.to(dtype=logits.dtype)
 
-        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=logits.device)
+        tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
         logits = logits.clone()
         logits[active_indices[:, None], tool_token_ids[None, :]] += tool_bias
         return logits
@@ -435,7 +489,7 @@ class FunctionCallingModel(nn.Module):
         if hidden_states is None:
             raise ValueError("Boundary hidden states are required when use_tool_head_replacement is enabled")
 
-        tool_token_ids = torch.tensor(self.tool_reserved_token_ids, device=next_tokens.device)
+        tool_token_ids = self._get_tool_reserved_token_ids_tensor(next_tokens.device)
         is_tool_token = (next_tokens[:, None] == tool_token_ids[None, :]).any(dim=-1)
         replacement_rows = active_decision_rows & is_tool_token
         if not replacement_rows.any():
