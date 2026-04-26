@@ -11,7 +11,7 @@
 
 - `use_eoc` 定义显式边界 token
 - `use_logit_bias` 包含一个 detached 的辅助头和对应 decode-time bias
-- `use_logit_train_add` 默认关闭；开启时训练阶段的 AR forward logits 也会看到 detached prior bias
+- `use_logit_train_add` 默认关闭；开启时训练阶段的 AR forward logits 也会看到 centered prior bias
 
 ## 入口与主流程
 
@@ -46,7 +46,7 @@ total_loss = ar_loss + logit_bias_loss_weight * tool_prior_ce
 
 `--detach` 默认开启，此时 `tool_prior_ce` 只更新 `logit_bias_head`。传入 `--no-detach` 时，这条 auxiliary CE 也会塑形 boundary hidden state 上游的可训练参数。
 
-`--use_logit_train_add` 开启时，训练会在 boundary tool-token 位置把 centered prior bias 加到 AR logits。这个 bias 在加入前固定 detach，所以 AR loss 会受到 forward 数值影响，但 AR loss 不会通过 train-add 路径更新 `logit_bias_head`。四种 `detach x use_logit_train_add` 组合中，`logit_bias_head` 都只从 `logit_bias_loss` 获得梯度，并受 `logit_bias_loss_weight` 缩放。
+`--use_logit_train_add` 开启时，训练会在 boundary tool-token 位置把 centered prior bias 加到 AR logits，并保留这条 bias 计算图。AR loss 会受到 forward 数值影响，也会通过 train-add 路径更新 `logit_bias_head`。默认 `--detach` 会让这条路径的上游梯度停在 gathered boundary hidden state；传入 `--no-detach` 时，梯度会继续塑形 boundary hidden state 上游的可训练参数。
 
 ## 推理与评测约束
 

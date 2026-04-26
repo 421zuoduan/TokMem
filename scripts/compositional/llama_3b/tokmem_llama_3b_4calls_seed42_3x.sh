@@ -73,7 +73,7 @@ for trial in 1 2 3; do
             --data_dir "$DATA_DIR" \
             --lr 5e-3 \
             --eval_batch_size 192 \
-            --max_length 1024 \
+            --max_length 512 \
             --seed 42 \
             --tensorboard \
             "${METHOD_FLAGS[@]}" \
@@ -220,7 +220,7 @@ artifacts = {
     "epochs": 3,
     "batch_size": 16,
     "eval_batch_size": 192,
-    "max_length": 1024,
+    "max_length": 512,
     "lr": 5e-3,
     "trials_requested": 3,
     "seed": 42,
@@ -238,7 +238,7 @@ summary_lines = [
     "- scope: `tools 51-100 / 4 calls`",
     "- trials: `3`",
     "- seed: `42` for every trial",
-    "- paper-suite aligned settings: `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=192`, `max_length=1024`, `lr=5e-3`",
+    "- paper-suite aligned settings: `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=192`, `max_length=512`, `lr=5e-3`",
     f"- script: `{script_rel}`",
     f"- method flags: `{method_flags}`",
     "",

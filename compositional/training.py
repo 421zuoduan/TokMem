@@ -433,7 +433,7 @@ def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_ind
     uniform_tool_log_prob = math.log(max(1, len(tool_token_ids)))
     logit_bias_scale = float(getattr(model, "logit_bias_scale", 1.0))
     tool_bias = (tool_log_probs + uniform_tool_log_prob) * logit_bias_scale
-    tool_bias = tool_bias.detach().to(dtype=shift_logits.dtype)
+    tool_bias = tool_bias.to(dtype=shift_logits.dtype)
 
     if hasattr(model, "_get_tool_reserved_token_ids_tensor"):
         tool_token_ids_tensor = model._get_tool_reserved_token_ids_tensor(shift_logits.device)

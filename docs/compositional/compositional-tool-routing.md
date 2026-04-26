@@ -39,7 +39,7 @@
 
 `--detach` 默认开启，使 auxiliary CE 只训练 `logit_bias_head`。`--no-detach` 让 auxiliary CE 也回传到 boundary hidden state 上游的可训练参数。
 
-`--use_logit_train_add` 默认关闭。开启后，训练阶段会在 boundary tool-token 位置把 centered prior bias 加到 AR forward logits；这个 bias 在加入前 detach，所以 AR loss 会看到 prior bias 的数值影响，但不会通过 train-add 路径更新 `logit_bias_head`。
+`--use_logit_train_add` 默认关闭。开启后，训练阶段会在 boundary tool-token 位置把 centered prior bias 加到 AR forward logits，并保留这条 bias 计算图。AR loss 会看到 prior bias 的数值影响，也会通过 train-add 路径更新 `logit_bias_head`。默认 `--detach` 会让这条路径的上游梯度停在 gathered boundary hidden state。
 
 推理阶段：
 

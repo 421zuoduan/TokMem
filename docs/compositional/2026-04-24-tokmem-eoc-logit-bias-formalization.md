@@ -194,7 +194,7 @@ $$
 
 其中 $\lambda$ 对应代码中的 `logit_bias_loss_weight`。
 
-当启用 `--use_logit_train_add` 时，训练阶段也在 boundary tool-token 位置把同样的 centered prior bias 加到 AR forward logits。这个 bias 在加入前做 stop-gradient：AR loss 会看到 prior bias 的数值影响，但不会通过 train-add 路径更新 prior head。因此 prior head 始终只由 $\lambda \mathcal{L}_{\text{LB}}$ 训练。
+当启用 `--use_logit_train_add` 时，训练阶段也在 boundary tool-token 位置把同样的 centered prior bias 加到 AR forward logits，并保留这条 bias 计算图。AR loss 会看到 prior bias 的数值影响，也会通过 train-add 路径更新 prior head。默认 `--detach` 让这条 train-add 梯度停在 gathered boundary hidden state，`--no-detach` 让它继续塑形上游 boundary 表示路径。
 
 ### 4.3 推理时的 soft bias
 
@@ -281,7 +281,7 @@ $$
 - `build_shift_supervision_masks` 标记 tool 位与 `eoc` 位
 - `gather_logit_bias_examples` 收集 assistant-start 与 gold-`eoc` 边界 hidden state
 - `compute_logit_bias_loss` 按 `detach` 设置计算 prior head 的 CE loss
-- `apply_logit_train_add` 在训练 AR logits 上加入 detached prior bias
+- `apply_logit_train_add` 在训练 AR logits 上加入可微 prior bias，并按 `detach` 设置控制 boundary hidden state 上游梯度
 
 ### 6.3 `model.py`
 

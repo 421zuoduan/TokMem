@@ -199,6 +199,10 @@ def main():
                         help='Directory where logs and results will be written')
     parser.add_argument('--use_logit_bias', action='store_true',
                         help='Train and apply a first-step task logit-bias head over reserved task tokens')
+    parser.add_argument('--use_logit_train_add', action='store_true',
+                        help='Add the task-prior bias to supervised task-token logits during training')
+    parser.add_argument('--detach', action=argparse.BooleanOptionalAction, default=True,
+                        help='Detach hidden states before the logit-bias auxiliary loss and train-add path')
     parser.add_argument('--logit_bias_loss_weight', type=float, default=1.0,
                         help='Weight for the detached hidden-state logit-bias supervision loss')
     parser.add_argument('--logit_bias_network', type=str, default='linear', choices=['linear', 'mlp'],
@@ -206,6 +210,8 @@ def main():
     parser.add_argument('--logit_bias_scale', type=float, default=1.0,
                         help='Scale applied to the bias head logits at the first generation step')
     args = parser.parse_args()
+    if args.use_logit_train_add and not args.use_logit_bias:
+        parser.error('--use_logit_train_add requires --use_logit_bias')
     
     # Set random seed first for full reproducibility
     set_random_seed(args.seed)
@@ -230,6 +236,8 @@ def main():
     print(f"Decouple embeddings: {args.decouple_embeddings}")
     print(f"Shuffle training dataloader: {args.shuffle_train}")
     print(f"Use logit bias: {args.use_logit_bias}")
+    print(f"Logit train add: {args.use_logit_train_add}")
+    print(f"Logit bias detach: {args.detach}")
     print(f"Logit bias loss weight: {args.logit_bias_loss_weight}")
     print(f"Logit bias network: {args.logit_bias_network}")
     print(f"Logit bias scale: {args.logit_bias_scale}")
@@ -324,6 +332,8 @@ def main():
             "split_cache_path": split_cache_path,
             "run_dir": run_dir,
             "use_logit_bias": args.use_logit_bias,
+            "use_logit_train_add": args.use_logit_train_add,
+            "detach": args.detach,
             "logit_bias_loss_weight": args.logit_bias_loss_weight,
             "logit_bias_network": args.logit_bias_network,
             "logit_bias_scale": args.logit_bias_scale,
@@ -402,6 +412,8 @@ def main():
             validate_every_n_steps=args.validate_every_n_steps,
             use_logit_bias=args.use_logit_bias,
             logit_bias_loss_weight=args.logit_bias_loss_weight,
+            use_logit_train_add=args.use_logit_train_add,
+            detach=args.detach,
         )
         print(f"Training completed with average loss: {train_results['avg_total_loss']:.4f}")
         write_json(
@@ -409,6 +421,8 @@ def main():
             {
                 "avg_total_loss": train_results["avg_total_loss"],
                 "avg_logit_bias_loss": train_results["avg_logit_bias_loss"],
+                "use_logit_train_add": train_results["use_logit_train_add"],
+                "detach": train_results["detach"],
                 "best_val_loss": train_results["best_val_loss"],
                 "best_model_path": train_results["best_model_path"],
             },

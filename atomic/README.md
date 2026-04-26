@@ -5,7 +5,7 @@ Atomic task learning using reserved special tokens as task identifiers. Each tok
 The maintained atomic TokMem surface is the restored upstream atomic baseline plus two local additions:
 
 - fixed cached split loading directly in `main_in_domain.py` through `--split_cache_path`
-- first-step reserved-task logit bias through `--use_logit_bias`, `--logit_bias_loss_weight`, `--logit_bias_network`, and `--logit_bias_scale`
+- first-step reserved-task logit bias through `--use_logit_bias`, `--use_logit_train_add`, `--detach`, `--logit_bias_loss_weight`, `--logit_bias_network`, and `--logit_bias_scale`
 
 Older local atomic implementations now live under `atomic/archive/current_local/`.
 
@@ -25,9 +25,13 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 - `--split_cache_path`: Load `train_data`, `val_data`, `test_data`, and `task_names` from a cached split file instead of runtime sampling.
 - `--run_dir`: Write logs, checkpoints, and result JSONs into one explicit run folder.
 - `--use_logit_bias`: Enable the first-step task logit-bias head over reserved task tokens.
+- `--use_logit_train_add`: Add the same centered task-prior bias to supervised task-token logits during training.
+- `--detach` / `--no-detach`: Control whether the logit-bias auxiliary loss and train-add path stop gradients at the gathered hidden states. The default is `--detach`.
 - `--logit_bias_loss_weight`: Weight on the detached hidden-state bias-head supervision loss.
 - `--logit_bias_network`: Bias-head architecture, `linear` or `mlp`.
 - `--logit_bias_scale`: Decode-time scale applied to the bias logits on the first generated token.
+
+When `--use_logit_bias --use_logit_train_add` are enabled, validation loss applies the same centered train-add transform before AR CE as training, then adds the auxiliary logit-bias CE scaled by `--logit_bias_loss_weight`. This keeps best-checkpoint selection aligned with the training forward objective.
 
 ## Paper Suite Batch Size
 
@@ -113,6 +117,12 @@ model/method group:
 
 ```bash
 bash ../scripts/atomic/run_paper_atomic_suite_fewer_time.sh --gpus 0,1,2,3
+```
+
+To retrain only the fewer-time `tokmem_logit_bias` groups with detached train-add enabled, use the rerun launcher. It runs three trials per model:
+
+```bash
+bash ../scripts/atomic/run_paper_atomic_suite_fewer_time_rerun_logit_bias.sh --gpus 0,1,2,3
 ```
 
 ### Older local atomic path

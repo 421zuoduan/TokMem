@@ -76,6 +76,7 @@ class FunctionCallingModel(nn.Module):
         self.max_reserved_tokens = 248  # Native Llama reserved_special_token_* count
         self.num_tools = min(num_tools, self.max_reserved_tokens - (1 if self.use_eoc else 0))
         self.num_reserved_slots = self.num_tools + (1 if self.use_eoc else 0)
+        self.added_reserved_token_count = 0
         if self.num_tools != num_tools:
             print(
                 f"Adjusted num_tools from {num_tools} to {self.num_tools} to fit the "
@@ -98,6 +99,7 @@ class FunctionCallingModel(nn.Module):
             torch_dtype=dtype,
             local_files_only=True,
         ).to(device)
+        self._ensure_model_token_capacity()
         
         # Apply LoRA if configured
         if self.lora_config:
@@ -343,6 +345,11 @@ class FunctionCallingModel(nn.Module):
         """Extract reserved special token IDs from tokenizer"""
         vocab = self.tokenizer.get_vocab()
         reserved_tokens = {k: v for k, v in vocab.items() if 'reserved_special_token_' in k}
+
+        if len(reserved_tokens) < self.num_reserved_slots:
+            self._add_missing_reserved_tokens(reserved_tokens)
+            vocab = self.tokenizer.get_vocab()
+            reserved_tokens = {k: v for k, v in vocab.items() if 'reserved_special_token_' in k}
         
         # Sort by token ID to get consistent ordering
         sorted_reserved = sorted(reserved_tokens.items(), key=lambda x: x[1])
@@ -383,6 +390,54 @@ class FunctionCallingModel(nn.Module):
             print(f"Using reserved token as eoc: {self.eoc_token_name} -> {self.eoc_token_id}")
         print(f"Trainable reserved slots: {self.num_reserved_slots}")
         print(f"Embedding coupling mode: {'Decoupled' if self.decouple_embeddings else 'Coupled'}")
+
+    def _add_missing_reserved_tokens(self, existing_reserved_tokens):
+        """Add synthetic reserved tokens for tokenizers that do not ship Llama slots."""
+        missing_count = self.num_reserved_slots - len(existing_reserved_tokens)
+        if missing_count <= 0:
+            return
+        if not hasattr(self.tokenizer, "add_special_tokens"):
+            return
+
+        existing_names = set(existing_reserved_tokens)
+        new_tokens = []
+        next_index = 0
+        while len(new_tokens) < missing_count:
+            token = f"<|reserved_special_token_{next_index}|>"
+            if token not in existing_names:
+                new_tokens.append(token)
+                existing_names.add(token)
+            next_index += 1
+
+        try:
+            added_count = self.tokenizer.add_special_tokens(
+                {"additional_special_tokens": new_tokens},
+                replace_additional_special_tokens=False,
+            )
+        except TypeError:
+            added_count = self.tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
+
+        self.added_reserved_token_count = int(added_count or 0)
+        if self.added_reserved_token_count:
+            print(
+                f"Added {self.added_reserved_token_count} synthetic reserved special tokens "
+                f"for tokenizer compatibility"
+            )
+
+    def _ensure_model_token_capacity(self):
+        """Resize the base LM if runtime-added reserved tokens extend the tokenizer."""
+        try:
+            tokenizer_size = len(self.tokenizer)
+        except TypeError:
+            return
+
+        input_embeddings = self.model.get_input_embeddings()
+        current_size = input_embeddings.num_embeddings
+        if tokenizer_size <= current_size:
+            return
+
+        self.model.resize_token_embeddings(tokenizer_size)
+        print(f"Resized model token embeddings from {current_size} to {tokenizer_size}")
     
     def _print_parameter_breakdown(self):
         """Print breakdown of trainable parameters"""

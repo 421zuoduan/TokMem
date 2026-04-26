@@ -20,7 +20,7 @@ Historical archived runs still exist under `compositional/runs/`. Current code a
 | Baseline | off | off | off | off | Original TokMem decoding and training |
 | EOC token only | on | off | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
 | EOC + logit bias | on | on | off | off | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
-| EOC + logit-bias train add | on | on | on | off | Also adds detached centered auxiliary tool bias to teacher-forced tool-token logits at boundary sites during training |
+| EOC + logit-bias train add | on | on | on | off | Also adds centered auxiliary tool bias to teacher-forced tool-token logits at boundary sites during training |
 | EOC + tool-head replacement | on | off | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
 
 Constraint summary:
@@ -74,7 +74,7 @@ With `--use_logit_bias --use_logit_train_add`, training also applies the decode-
 (log_softmax(tool_logits) + log(num_tools)) * logit_bias_scale
 ```
 
-The resulting bias is detached before it is added to the full-vocab columns for reserved tool tokens. AR loss sees the prior-bias values in the forward pass, while AR gradients stop at the added bias. The prior head is trained only by the boundary tool-selection auxiliary CE, scaled by `logit_bias_loss_weight`; `--detach` controls whether that auxiliary CE also shapes the upstream boundary hidden-state path.
+The resulting bias is added to the full-vocab columns for reserved tool tokens with its computation graph intact. AR loss sees the same prior-bias transform used at decode time and can update `logit_bias_head` through the train-add path. `--detach` controls whether train-add and auxiliary CE gradients also shape the upstream boundary hidden-state path; with the default `--detach`, those gradients stop at the gathered boundary states while `logit_bias_head` remains trainable.
 
 ### Logit bias
 
@@ -112,6 +112,19 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_no_detach_llama_1b.sh`
+- `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_scale_ablation.sh`
+- `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_loss_weight_ablation.sh`
+- `scripts/compositional/qwen_0_5b/tokmem_eoc_logit_bias_scale_ablation_qwen_0_5b_4calls_seed42_3x.sh`
+- `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
+- `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
+
+The Qwen-0.5B scale-ablation launcher runs `tokmem_eoc_logit_bias` on `models/Qwen2.5-0.5B-Instruct` with tools `51-100`, 4-call data, `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=64`, `max_length=512`, and `lr=5e-3`. It fixes `seed=42`, runs three trials per scale, assigns `logit_bias_scale=0.1` to GPU `5`, `0.5` to GPU `6`, and `2` to GPU `7`, then writes `manifest.tsv`, `summary.md`, and `results.json` under `results/compositional/<suite_name>/`.
+
+The Llama-1B paper-style scale-ablation nohup launcher starts `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_scale_ablation.sh` on GPUs `0,1,2,3,4,5,6,7`. It runs `tokmem_eoc_logit_bias` with `--detach --use_logit_train_add` over `logit_bias_scale=0.1,0.5,0.8,1,1.1,1.2,1.3,1.4,1.5,2,3,5`, three trials per scale, tools `51-100`, 4-call data, `batch_size=24`, `eval_batch_size=256`, and writes `nohup.log`, `nohup.pid`, `manifest.tsv`, `summary.md`, `results.json`, and `gpu_availability.log` under `results/compositional/<suite_name>/`. The runner treats the GPU list as worker slots, takes a per-GPU `flock` under `/tmp/tokmem_gpu_locks`, and starts each GPU worker after `memory.used <= 2048 MiB` for 180 consecutive seconds. Extra scales queue round-robin onto the available worker slots. `manifest.tsv` records every attempted trial with `status` and `exit_code`; failed trials remain visible in `summary.md` and `results.json`. Mean metrics and loss summaries include trials whose manifest status is `success`. The summary table labels `avg_f1_score` as `Arguments F1`.
+
+The Llama-1B loss-weight ablation launcher starts `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_loss_weight_ablation.sh` on GPUs `0,1,2,3,4,5,6,7`. It keeps `logit_bias_scale=1.0` and sweeps `logit_bias_loss_weight=0.01,0.05,0.1,0.15,0.2,0.3,0.5,1`, three trials per weight, with the same tools `51-100`, 4-call data, `batch_size=24`, `eval_batch_size=256`, status-aware manifest, GPU lock scheduling, and output files as the scale ablation. Its GPU workers start after `memory.used <= 2048 MiB` for 240 consecutive seconds. Mean metrics and loss summaries include trials whose manifest status is `success`.
+
+Tokenizer note: Llama 3.x tokenizers expose native `reserved_special_token_*` entries. Qwen2.5-0.5B does not expose those entries in its tokenizer config, so `FunctionCallingModel` adds synthetic `<|reserved_special_token_N|>` special tokens at runtime when the reserved-token budget is short. If the added tokenizer length exceeds the base model embedding table, the model resizes token embeddings before creating the trainable TokMem tool/eoc embeddings.
 
 Additional Llama-1B adaptation launchers over `1-50 -> 51-100`:
 
@@ -142,8 +155,16 @@ README 汇总复现实验的 maintained launcher:
 Paper-level compositional suite launcher:
 
 - `scripts/compositional/run_paper_compositional_suite.sh`
+- `scripts/compositional/rerun_paper_compositional_head.sh`
+- `scripts/compositional/run_paper_compositional_head_8gpu_nohup.sh`
+- `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
+- `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
 
 This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`, `adap_tokmem_eoc_replace_head`.
+
+`rerun_paper_compositional_head.sh` keeps the same scheduler, datasets, model set, artifact layout, and `--rerun-failed` workflow, while scheduling three trials of the logit-bias head methods `tokmem_eoc_logit_bias` and `adap_tokmem_eoc_logit_bias` for both `4calls` and `10calls`. It keeps TokMem embedding LR at `5e-3`, uses adaptation LoRA LR `8e-5`, and runs all logit-bias methods with `--detach --use_logit_train_add`. When pointed at an existing suite directory, its task loading, status JSON, and summaries are filtered to that logit-bias method set.
+
+`run_paper_compositional_head_8gpu_nohup.sh` starts that logit-bias head suite through `nohup` on GPUs `0,1,2,3,4,5,6,7`, activates the `tokmem` conda environment before launching, and writes `nohup.log` plus `nohup.pid` under the generated suite directory.
 
 The same suite also schedules a separate `51-100 / 10 calls` TokMem-family stress test for `tokmem`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc_logit_bias`, and `adap_tokmem_eoc_replace_head`. It synthesizes `8000` train and `800` test examples with 10-call filenames and uses smaller TokMem train/eval batches:
 

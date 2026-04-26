@@ -1,6 +1,7 @@
-import torch
 import logging
+import math
 import os
+import torch
 from datetime import datetime
 
 def setup_logging(log_dir="logs"):
@@ -51,7 +52,7 @@ def extract_trained_token_state(model):
     return state
 
 
-def compute_logit_bias_loss(model, shift_hidden_states, shift_labels, ignore_index=-100):
+def compute_logit_bias_loss(model, shift_hidden_states, shift_labels, ignore_index=-100, detach=True):
     """Compute detached hidden-state supervision for the first-step logit-bias head."""
     import torch.nn.functional as F
 
@@ -67,15 +68,45 @@ def compute_logit_bias_loss(model, shift_hidden_states, shift_labels, ignore_ind
 
     bias_logits = model.compute_task_logit_bias(
         shift_hidden_states[task_token_mask],
-        detach_hidden_states=True,
+        detach_hidden_states=detach,
     )
     bias_targets = model.get_task_bias_targets(shift_labels[task_token_mask]).to(bias_logits.device)
     logit_bias_loss = F.cross_entropy(bias_logits, bias_targets)
     return logit_bias_loss, routing_count
 
 
+def apply_logit_train_add(model, shift_logits, shift_hidden_states, shift_labels, ignore_index=-100, detach=True):
+    """Add the task-prior bias to supervised task-token logits during training."""
+    if not getattr(model, 'use_logit_bias', False) or shift_hidden_states is None:
+        return shift_logits
+
+    reserved_token_tensor = model.reserved_token_tensor.to(shift_labels.device)
+    valid_mask = shift_labels != ignore_index
+    task_token_mask = torch.isin(shift_labels, reserved_token_tensor) & valid_mask
+    if int(task_token_mask.sum().item()) == 0:
+        return shift_logits
+
+    bias_logits = model.compute_task_logit_bias(
+        shift_hidden_states[task_token_mask],
+        detach_hidden_states=detach,
+    )
+    bias_log_probs = torch.log_softmax(bias_logits.float(), dim=-1)
+    uniform_log_prob = math.log(max(1, model.num_tasks))
+    centered_bias = (bias_log_probs + uniform_log_prob) * model.logit_bias_scale
+    centered_bias = centered_bias.to(device=shift_logits.device, dtype=shift_logits.dtype)
+
+    biased_logits = shift_logits.clone()
+    row_indices = task_token_mask.nonzero(as_tuple=False).squeeze(-1).to(shift_logits.device)
+    column_indices = reserved_token_tensor.to(shift_logits.device)
+    biased_logits[row_indices[:, None], column_indices[None, :]] = (
+        biased_logits[row_indices[:, None], column_indices[None, :]] + centered_bias
+    )
+    return biased_logits
+
+
 def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
-                   use_logit_bias=False, logit_bias_loss_weight=0.0):
+                   use_logit_bias=False, logit_bias_loss_weight=0.0,
+                   use_logit_train_add=False, detach=True):
     """Run validation pass and return average loss.
     Switches model to eval() and restores previous training state when finished.
     """
@@ -108,6 +139,15 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
 
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
+            if use_logit_bias and use_logit_train_add:
+                shift_logits = apply_logit_train_add(
+                    model,
+                    shift_logits,
+                    shift_hidden_states,
+                    shift_labels,
+                    ignore_index=ignore_index,
+                    detach=detach,
+                )
 
             # Check if there are any valid (non-ignored) labels
             valid_mask = shift_labels != ignore_index
@@ -120,6 +160,7 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
                         shift_hidden_states,
                         shift_labels,
                         ignore_index=ignore_index,
+                        detach=detach,
                     )
                     loss = loss + logit_bias_loss_weight * logit_bias_loss
                 if not torch.isnan(loss) and not torch.isinf(loss):
@@ -147,7 +188,7 @@ def run_validation(model, val_dataloader, device="cuda", ignore_index=-100,
 def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=3, lr=0.01,
                            gradient_accumulation_steps=1, device="cuda", timestamp=None,
                            save_dir="saved_models", validate_every_n_steps=1000, use_logit_bias=False,
-                           logit_bias_loss_weight=0.0):
+                           logit_bias_loss_weight=0.0, use_logit_train_add=False, detach=True):
     """Train the task calling model using reserved tokens"""
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
@@ -181,6 +222,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     print(f"Warmup steps: {total_steps // 10}")
     print(f"Use logit bias: {use_logit_bias}")
     print(f"Logit bias loss weight: {logit_bias_loss_weight}")
+    print(f"Logit train add: {use_logit_train_add}")
+    print(f"Logit bias detach: {detach}")
     if model.decouple_embeddings:
         print(f"Training mode: Decoupled embeddings")
         print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)} (input: {model.trainable_task_input_embeddings.numel()}, output: {model.trainable_task_output_embeddings.numel()})")
@@ -193,7 +236,10 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     # Log training configuration
     training_logger.info(f"TRAINING START - Epochs: {num_epochs}, Batches: {len(dataloader)}, Total optimizer steps: {total_steps}")
     training_logger.info(f"Config - LR: {lr}, Warmup: {total_steps // 10}, Mode: {'Decoupled' if model.decouple_embeddings else 'Coupled'}")
-    training_logger.info(f"Logit bias enabled: {use_logit_bias}, Weight: {logit_bias_loss_weight}")
+    training_logger.info(
+        f"Logit bias enabled: {use_logit_bias}, Weight: {logit_bias_loss_weight}, "
+        f"TrainAdd: {use_logit_train_add}, Detach: {detach}"
+    )
     training_logger.info(f"Trainable params: {sum(p.numel() for p in trainable_params)}, Task tokens: {model.reserved_token_ids}")
     training_logger.info(f"PyTorch manual seed: {torch.initial_seed()}")
     
@@ -237,6 +283,14 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
             # Flatten for cross entropy
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
             shift_labels = shift_labels.view(-1)
+            if use_logit_bias and use_logit_train_add:
+                shift_logits = apply_logit_train_add(
+                    model,
+                    shift_logits,
+                    shift_hidden_states,
+                    shift_labels,
+                    detach=detach,
+                )
             
             # Calculate overall loss (ignore -100 labels)
             loss = F.cross_entropy(shift_logits, shift_labels, ignore_index=-100)            
@@ -261,6 +315,7 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                     model,
                     shift_hidden_states,
                     shift_labels,
+                    detach=detach,
                 )
             else:
                 logit_bias_loss = torch.tensor(0.0, device=shift_logits.device)
@@ -342,6 +397,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                         ignore_index=-100,
                         use_logit_bias=use_logit_bias,
                         logit_bias_loss_weight=logit_bias_loss_weight,
+                        use_logit_train_add=use_logit_train_add,
+                        detach=detach,
                     )
                     avg_val_loss = val_metrics['avg_val_loss']
                     avg_val_logit_bias_loss = val_metrics['avg_logit_bias_loss']
@@ -372,6 +429,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
                 ignore_index=-100,
                 use_logit_bias=use_logit_bias,
                 logit_bias_loss_weight=logit_bias_loss_weight,
+                use_logit_train_add=use_logit_train_add,
+                detach=detach,
             )
             avg_val_loss = val_metrics['avg_val_loss']
             avg_val_logit_bias_loss = val_metrics['avg_logit_bias_loss']
@@ -435,6 +494,8 @@ def train_task_calling_model(model, dataloader, val_dataloader=None, num_epochs=
     return {
         'avg_total_loss': avg_total_loss,
         'avg_logit_bias_loss': avg_total_logit_bias_loss,
+        'use_logit_train_add': bool(use_logit_train_add),
+        'detach': bool(detach),
         'best_val_loss': best_val_loss if val_dataloader is not None else None,
         'best_model_state': best_model_state,
         'best_model_path': best_model_path
