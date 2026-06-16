@@ -19,14 +19,15 @@ Historical archived runs still exist under `compositional/runs/`. Current code a
 | --- | --- | --- | --- | --- | --- |
 | Baseline | off | off | off | off | Original TokMem decoding and training |
 | EOC token only | on | off | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
-| EOC + logit bias | on | on | off | off | Trains a detached tool-prior head on boundary states and adds centered tool-only bias back to decode logits |
-| EOC + logit-bias train add | on | on | on | off | Also adds centered auxiliary tool bias to teacher-forced tool-token logits at boundary sites during training |
+| EOC + logit bias | on | on | on | off | Trains a detached tool-prior head on boundary states, adds centered tool-only bias back to decode logits, and applies the same transform during boundary-site training |
+| EOC + logit bias without train add | on | on | off | off | Uses `--no-use_logit_train_add` to keep the auxiliary head out of teacher-forced AR logits |
 | EOC + tool-head replacement | on | off | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
 
 Constraint summary:
 
 - `--use_logit_bias` requires `--use_eoc`
-- `--use_logit_train_add` requires `--use_logit_bias`
+- `--use_logit_train_add` defaults enabled and is active with `--use_logit_bias`
+- explicit `--use_logit_train_add` requires `--use_logit_bias`
 - `--use_tool_head_replacement` requires `--use_eoc`
 - `--use_logit_bias` and `--use_tool_head_replacement` are decode-time alternatives
 
@@ -34,7 +35,7 @@ Useful flags:
 
 - `--use_eoc`
 - `--use_logit_bias`
-- `--use_logit_train_add`
+- `--use_logit_train_add` default enabled; use `--no-use_logit_train_add` to disable boundary-site train add
 - `--use_tool_head_replacement`
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
@@ -68,7 +69,7 @@ Training:
 3. predict the next gold tool id with `logit_bias_head`
 4. add `logit_bias_loss_weight * CE` to the autoregressive loss
 
-With `--use_logit_bias --use_logit_train_add`, training also applies the decode-time logit-bias transform to the main autoregressive CE logits at those same gathered boundary sites. The flag defaults to off, so standard training leaves the AR logits unchanged. The transform is:
+With `--use_logit_bias --use_logit_train_add`, training also applies the decode-time logit-bias transform to the main autoregressive CE logits at those same gathered boundary sites. The flag defaults enabled for logit-bias runs; use `--no-use_logit_train_add` for auxiliary-head-only training. The transform is:
 
 ```text
 (log_softmax(tool_logits) + log(num_tools)) * logit_bias_scale
@@ -159,12 +160,16 @@ Paper-level compositional suite launcher:
 - `scripts/compositional/run_paper_compositional_head_8gpu_nohup.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
+- `scripts/compositional/launch_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_nohup.sh`
+- `scripts/compositional/run_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_suite.sh`
 
 This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`, `adap_tokmem_eoc_replace_head`.
 
 `rerun_paper_compositional_head.sh` keeps the same scheduler, datasets, model set, artifact layout, and `--rerun-failed` workflow, while scheduling three trials of the logit-bias head methods `tokmem_eoc_logit_bias` and `adap_tokmem_eoc_logit_bias` for both `4calls` and `10calls`. It keeps TokMem embedding LR at `5e-3`, uses adaptation LoRA LR `8e-5`, and runs all logit-bias methods with `--detach --use_logit_train_add`. When pointed at an existing suite directory, its task loading, status JSON, and summaries are filtered to that logit-bias method set.
 
 `run_paper_compositional_head_8gpu_nohup.sh` starts that logit-bias head suite through `nohup` on GPUs `0,1,2,3,4,5,6,7`, activates the `tokmem` conda environment before launching, and writes `nohup.log` plus `nohup.pid` under the generated suite directory.
+
+`launch_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_nohup.sh` starts the Llama-3B/8B 4-call rerun through `nohup` on GPUs `0,1,2,3,4,5,6,7`. It calls `run_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_suite.sh`, which schedules `lora` and `adap_tokmem_eoc_logit_bias` over `llama3b` and `llama8b`, six trials per model/method, using the maintained paper-suite batch settings. The logit-bias adaptation method runs with `--use_eoc --use_logit_bias --detach --use_logit_train_add`, `training_rounds=1-50:1,51-100:3`, `lr=5e-3`, and `lora_lr=8e-5`; LoRA runs with `training_rounds=51-100:3`, `lr=5e-5`, and `q_proj,v_proj` target modules. The summary focuses on `Tool F1` from `avg_tool_f1_score` and `Arguments F1` from `avg_f1_score`, with means reported across complete six-trial groups. The runner marks GPUs that just finished suite-owned tasks as immediately reusable before continuing the scheduling loop.
 
 The same suite also schedules a separate `51-100 / 10 calls` TokMem-family stress test for `tokmem`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc_logit_bias`, and `adap_tokmem_eoc_replace_head`. It synthesizes `8000` train and `800` test examples with 10-call filenames and uses smaller TokMem train/eval batches:
 
@@ -274,6 +279,41 @@ Passing `--tensorboard` on the maintained TokMem path saves two static PNG trend
 
 - `loss_step.png`
 - `lr_step.png`
+
+## Per-Sample Prediction Comparison
+
+Use `scripts/compositional/generate_checkpoint_predictions.py` to run a saved TokMem-family checkpoint over every example in a compositional test split and write one JSONL record per sample. The script reads `run_config.json` for the model path, data path, and maintained mode flags such as `use_eoc` and `use_logit_bias`.
+
+Example for the Llama-1B TokMem and EOC+logit-bias checkpoints:
+
+```bash
+python scripts/compositional/generate_checkpoint_predictions.py \
+  --run-config results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/run_config.json \
+  --checkpoint results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/round_1_tools_51_100.pt \
+  --method tokmem \
+  --output results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/tokmem_predictions.jsonl
+
+python scripts/compositional/generate_checkpoint_predictions.py \
+  --run-config results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/run_config.json \
+  --checkpoint results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt \
+  --method tokmem_eoc_logit_bias \
+  --output results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/eoc_logit_bias_predictions.jsonl
+```
+
+Each JSONL record keeps the sample index, user input, expected tools/calls, predicted tools/calls, reserved tool tokens, `tool_sequence_exact`, `call_exact`, F1, Tool F1, and parse-error counts.
+
+Use `scripts/compositional/compare_tokmem_eoc_logit_bias_predictions.py` to compare two JSONL files and extract samples where EOC+logit-bias is fully correct while TokMem has a later tool-selection error:
+
+```bash
+python scripts/compositional/compare_tokmem_eoc_logit_bias_predictions.py \
+  --tokmem results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/tokmem_predictions.jsonl \
+  --eoc-logit-bias results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/eoc_logit_bias_predictions.jsonl \
+  --require-dissimilar \
+  --output-json results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/matches_dissimilar_later_tool_errors.json \
+  --output-md results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/matches_dissimilar_later_tool_errors.md
+```
+
+`--require-dissimilar` keeps later TokMem errors where the expected and predicted tools are both present and look semantically different by a coarse tool-category heuristic. This is intended for qualitative case selection; use the JSONL records for metric-level analysis.
 
 ## Legacy Entry Points
 

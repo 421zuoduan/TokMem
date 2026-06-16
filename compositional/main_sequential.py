@@ -8,6 +8,7 @@ import argparse
 import inspect
 import random
 import os
+import sys
 import numpy as np
 import torch
 from transformers import AutoTokenizer
@@ -267,7 +268,7 @@ def build_parser():
                         help="Insert an explicit end-of-control token after each tool-controlled span")
     parser.add_argument("--use_logit_bias", action="store_true",
                         help="Train an external detached tool prior head and use it as a soft decode-time logit bias")
-    parser.add_argument("--use_logit_train_add", action="store_true",
+    parser.add_argument("--use_logit_train_add", action=argparse.BooleanOptionalAction, default=True,
                         help="Add detached prior bias to boundary tool-token logits during training")
     parser.add_argument("--use_tool_head_replacement", action="store_true",
                         help="Train the detached tool prior head and replace triggered tool tokens at EOC decision sites")
@@ -339,13 +340,21 @@ def build_parser():
     return parser
 
 
-def validate_args(args, parser):
+def validate_args(args, parser, argv=None):
     if args.use_logit_bias and args.use_tool_head_replacement:
         parser.error("--use_logit_bias and --use_tool_head_replacement are decode-time alternatives")
     if args.use_logit_bias and not args.use_eoc:
         parser.error("--use_logit_bias requires --use_eoc")
+    explicit_logit_train_add = False
+    if argv is not None:
+        explicit_logit_train_add = any(
+            item in {"--use_logit_train_add", "--no-use_logit_train_add"}
+            for item in argv
+        )
     if args.use_logit_train_add and not args.use_logit_bias:
-        parser.error("--use_logit_train_add requires --use_logit_bias")
+        if explicit_logit_train_add:
+            parser.error("--use_logit_train_add requires --use_logit_bias")
+        args.use_logit_train_add = False
     if args.use_tool_head_replacement and not args.use_eoc:
         parser.error("--use_tool_head_replacement requires --use_eoc")
     if args.max_length <= 0:
@@ -361,7 +370,7 @@ def validate_args(args, parser):
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    validate_args(args, parser)
+    validate_args(args, parser, sys.argv[1:])
 
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -375,7 +384,6 @@ def main():
     torch.backends.cudnn.benchmark = False
 
     # Setup simple logging
-    import sys
     from datetime import datetime
     
     run_context = resolve_run_context(
@@ -745,7 +753,6 @@ def main():
             
             # Capture the formatted evaluation output
             import io
-            import sys
             from contextlib import redirect_stdout
             
             # Capture stdout to get the formatted evaluation results

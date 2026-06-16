@@ -156,3 +156,27 @@ Adap 的 `batch_size_per_round` 顺序对应 `training_rounds=1-50:1,51-100:3`�
 | `adap_tokmem_eoc_replace_head` | `llama1b` | - | `16,4` | `16` | `use_eoc`、`use_tool_head_replacement`、calls per round=`4,10` |
 | `adap_tokmem_eoc_replace_head` | `llama3b` | - | `8,2` | `8` | `use_eoc`、`use_tool_head_replacement`、calls per round=`4,10` |
 | `adap_tokmem_eoc_replace_head` | `llama8b` | - | `4,1` | `4` | `use_eoc`、`use_tool_head_replacement`、calls per round=`4,10` |
+
+## Llama3B/8B LoRA + Adaptation Logit-Bias Rerun
+
+来源脚本：
+
+- `scripts/compositional/launch_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_nohup.sh`
+- `scripts/compositional/run_paper_compositional_llama3b8b_lora_vs_adap_logit_bias_6trials_suite.sh`
+
+固定设置：
+
+- 数据：`tools 51-100 / 4 calls`
+- 模型：`llama3b`、`llama8b`
+- 方法：`lora`、`adap_tokmem_eoc_logit_bias`
+- 试验次数：每个 model/method `6` 次
+- `lora`：`training_rounds=51-100:3`、`lr=5e-5`
+- `adap_tokmem_eoc_logit_bias`：`training_rounds=1-50:1,51-100:3`、`lr=5e-3`、`lora_lr=8e-5`、`--use_eoc --use_logit_bias --detach --use_logit_train_add`
+- `max_length=512`
+
+| 方法 | 模型 | train bs | train bs per round | eval/test bs | 备注 |
+| --- | --- | ---: | --- | ---: | --- |
+| `lora` | `llama3b` | `8` | - | `96` | `q_proj,v_proj` |
+| `lora` | `llama8b` | `4` | - | `32` | `q_proj,v_proj` |
+| `adap_tokmem_eoc_logit_bias` | `llama3b` | - | `8,16` | `192` | `1-50:1,51-100:3` |
+| `adap_tokmem_eoc_logit_bias` | `llama8b` | - | `4,8` | `64` | `1-50:1,51-100:3` |

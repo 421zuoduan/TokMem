@@ -69,6 +69,26 @@ bash ../scripts/atomic/qwen_0_5b/run_atomic_qwen_0_5b_fixed_split_50task_test_ba
 
 The Python entrypoint is `main_base_model.py`. It writes `run_config.json`, `evaluation_results.json`, `evaluation_predictions.jsonl`, and `run_summary.json` into one folder under `atomic/runs/`. The prediction JSONL uses a compact default with query, expected response, predicted response, per-example metrics, and task metadata. Use `--save_verbose_predictions` when debugging requires the repeated instruction text, prompt preview, and full decoded sequence.
 
+### Raw base-model routing evaluation
+This path measures a prompt-based routing proxy for the raw base model. It scores every cached task identifier as the next assistant completion for each `instruction + query` example and selects the task name with the highest mean token log probability. This produces `Task Prediction Accuracy` for base models without using TokMem reserved task tokens.
+
+```bash
+python main_base_routing.py \
+  --tasks_dir ../datasets/natural-instructions-2.8/tasks \
+  --num_tasks 700 \
+  --train_size 80 \
+  --val_size 10 \
+  --test_size 20 \
+  --model_name ../models/Qwen2.5-0.5B-Instruct \
+  --device_map balanced \
+  --split_cache_path cached_splits/task700-80-10-20-seed42/tokmem_atomic_fixed_split_maxlen1024.pt \
+  --max_length 1024 \
+  --max_instruction_tokens 1024 \
+  --candidate_batch_size 128
+```
+
+The Python entrypoint is `main_base_routing.py`. It writes `base_routing_results.json`, `base_routing_predictions.jsonl`, `run_config.json`, and `run_summary.json` into one folder under `atomic/runs/`, or into `--run_dir` when supplied.
+
 ### SBERT RAG baseline
 This path uses the raw base model for generation, retrieves demonstrations with `Sentence-BERT`, and formats the prompt using the repo's few-shot conversational layout:
 

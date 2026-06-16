@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 SUITE_TIMESTAMP="$(date -u +%Y%m%d_%H%M%S)"
-SUITE_NAME="paper_atomic_700task_80_10_20_3trials_rerun_logit_bias_${SUITE_TIMESTAMP}"
+SUITE_NAME="atomic_qwen0_5b_tokmem_train_add_detach_6trials_${SUITE_TIMESTAMP}"
 GPU_IDS_CSV="0,1,2,3"
 POLL_SECONDS=5
 GPU_MEMORY_LIMIT_MIB=2048
@@ -16,13 +16,13 @@ EXPLICIT_SUITE_NAME=0
 
 usage() {
     cat <<EOF
-Usage: bash scripts/atomic/run_paper_atomic_suite_fewer_time_rerun_logit_bias.sh [--gpus 0,1,2,3] [--suite-name NAME] [--poll-seconds N] [--rerun-failed] [--num-tasks 700] [--split-cache PATH]
+Usage: bash scripts/atomic/run_atomic_qwen0_5b_tokmem_train_add_detach_6trials.sh [--gpus 0,1,2,3] [--suite-name NAME] [--poll-seconds N] [--rerun-failed] [--num-tasks 700] [--split-cache PATH]
 
-Retrains the maintained fewer-time atomic fixed-split logit-bias suite for:
+Runs the maintained fewer-time atomic fixed-split qwen0.5b TokMem-family suite for:
 - default split: 700 tasks / train 80 / val 10 / test 20 / seed 42
-- models: qwen0_5b, llama3b, llama8b
-- methods: tokmem_logit_bias
-- 3 trials per model/method, seed fixed to 42 for every trial to match the cached split metadata
+- models: qwen0_5b
+- methods: tokmem, tokmem_logit_bias
+- 6 trials per model/method, seed fixed to 42 for every trial to match the cached split metadata
 - logit-bias flags: --use_logit_bias --detach --use_logit_train_add
 
 Artifacts:
@@ -127,12 +127,12 @@ TOKMEM_VALIDATE_EVERY_N_STEPS=1000
 LOGIT_BIAS_LOSS_WEIGHT="0.1"
 LOGIT_BIAS_NETWORK="linear"
 LOGIT_BIAS_SCALE="1.0"
-TRIAL_COUNT=3
-TRIAL_SEEDS=(42 42 42)
+TRIAL_COUNT=6
+TRIAL_SEEDS=(42 42 42 42 42 42)
 
-MODEL_KEYS=(qwen0_5b llama3b llama8b)
-METHODS=(tokmem_logit_bias)
-TRAINING_METHODS=(tokmem_logit_bias)
+MODEL_KEYS=(qwen0_5b)
+METHODS=(tokmem tokmem_logit_bias)
+TRAINING_METHODS=(tokmem tokmem_logit_bias)
 
 declare -A MODEL_PATHS=(
     [qwen0_5b]="$ROOT_DIR/models/Qwen2.5-0.5B-Instruct"
@@ -269,18 +269,6 @@ payload = {
             "base": {"test_batch_size": 512},
             "rag": {"test_batch_size": 256, "retrieval_top_k": 3},
         },
-        "llama3b": {
-            "lora": {"train_batch_size": 2, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
-            "tokmem_family": {"train_batch_size": 8, "eval_batch_size": 32, "gradient_accumulation_steps": 1},
-            "base": {"test_batch_size": 256},
-            "rag": {"test_batch_size": 128, "retrieval_top_k": 3},
-        },
-        "llama8b": {
-            "lora": {"train_batch_size": 2, "eval_batch_size": 8, "gradient_accumulation_steps": 2},
-            "tokmem_family": {"train_batch_size": 4, "eval_batch_size": 16, "gradient_accumulation_steps": 2},
-            "base": {"test_batch_size": 128},
-            "rag": {"test_batch_size": 64, "retrieval_top_k": 3},
-        },
         "shared_training": {
             "epochs": 1,
             "lr": 5e-3,
@@ -289,10 +277,9 @@ payload = {
     },
     "models": {
         "qwen0_5b": "models/Qwen2.5-0.5B-Instruct",
-        "llama3b": "models/Llama-3.2-3B-Instruct",
-        "llama8b": "models/Llama-3.1-8B-Instruct",
     },
     "methods": [
+        "tokmem",
         "tokmem_logit_bias",
     ],
 }
@@ -960,7 +947,7 @@ metric_fields = (
     ("retrieval_topk_accuracy", "Retrieval Top-K"),
 )
 
-training_methods = {"tokmem_logit_bias"}
+training_methods = {"tokmem", "tokmem_logit_bias"}
 
 rows = list(csv.DictReader(manifest_path.open("r", encoding="utf-8"), delimiter="\t"))
 task_status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -1002,7 +989,7 @@ def load_eval_metrics(task_dir: Path, method: str):
         rouge_l = payload.get("avg_response_score")
         if rouge_l is None and payload.get("ni_rouge_l") is not None:
             rouge_l = float(payload["ni_rouge_l"]) / 100.0
-        task_accuracy = payload.get("task_accuracy") if method == "tokmem_logit_bias" else None
+        task_accuracy = payload.get("task_accuracy") if method in {"tokmem", "tokmem_logit_bias"} else None
         retrieval_top1_accuracy = payload.get("retrieval_top1_accuracy") if method == "rag" else None
         retrieval_topk_accuracy = payload.get("retrieval_topk_accuracy") if method == "rag" else None
         return {
@@ -1021,7 +1008,7 @@ def load_eval_metrics(task_dir: Path, method: str):
     if stdout_path.exists():
         candidates.append(stdout_path.read_text(encoding="utf-8", errors="replace"))
 
-    if method == "tokmem_logit_bias":
+    if method in {"tokmem", "tokmem_logit_bias"}:
         pattern = re.compile(
             r"EVALUATION COMPLETE - TaskAcc:(?P<task>[0-9.]+) ExactMatch:(?P<exact>[0-9.]+)% RougeL:(?P<rouge>[0-9.]+)%"
         )
@@ -1044,14 +1031,14 @@ for row in rows:
     grouped[(row["model"], row["method"])].append(row)
 
 summary_lines = [
-    "# Atomic Fewer-Time Logit-Bias Rerun Summary",
+    "# Atomic Qwen0.5B TokMem Train-Add Detach 6-Trial Summary",
     "",
     f"- suite: `{suite_name}`",
     f"- trials per model/method: `{trial_count}`",
     f"- scope: `{num_tasks}-task fixed split / train {train_size} / val {val_size} / test {test_size}`",
     f"- split cache: `{split_cache}`",
-    "- models: `qwen0_5b`, `llama3b`, `llama8b`",
-    "- methods: `tokmem_logit_bias`",
+    "- models: `qwen0_5b`",
+    "- methods: `tokmem`, `tokmem_logit_bias`",
     "- logit-bias settings: `detach=true`, `use_logit_train_add=true`, `logit_bias_loss_weight=0.1`, `logit_bias_network=linear`, `logit_bias_scale=1.0`",
     "- GPU scheduling: per-GPU `flock` locks under `/tmp/tokmem_gpu_locks`, plus `memory.used <= 2048 MiB` readiness checks",
     "",
@@ -1060,10 +1047,8 @@ summary_lines = [
     "| Model | LoRA train | LoRA grad acc | LoRA eval | TokMem train | TokMem grad acc | TokMem effective train | TokMem eval | base test | rag test |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     "| qwen0_5b | 8 | 1 | 32 | 16 | 1 | 16 | 64 | 512 | 256 |",
-    "| llama3b | 2 | 2 | 16 | 8 | 1 | 8 | 32 | 256 | 128 |",
-    "| llama8b | 2 | 2 | 8 | 4 | 2 | 8 | 16 | 128 | 64 |",
     "",
-    "- current launcher methods: `tokmem_logit_bias`",
+    "- current launcher methods: `tokmem`, `tokmem_logit_bias`",
     "- shared training settings: epochs `1`, lr `5e-3`, validate_every_n_steps `1000`",
     "",
     "## Mean Results",
@@ -1259,7 +1244,7 @@ summary_lines.extend(
         "## Notes",
         "",
         f"- Mean metrics are only reported for groups with `{trial_count}/{trial_count}` successful trials.",
-        "- `Routing Acc` is populated for `tokmem_logit_bias`.",
+        "- `Routing Acc` is populated for `tokmem` and `tokmem_logit_bias`.",
         "- `Rouge-L` and `Exact Match` are normalized to `0-1` decimals for every method.",
         "- Longer training trials are flagged when runtime is at least `max(1.5 x group median, group median + 600s)` within the same model/method group.",
     ]

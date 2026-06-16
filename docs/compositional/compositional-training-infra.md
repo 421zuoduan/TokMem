@@ -11,7 +11,7 @@
 
 - `use_eoc` 定义显式边界 token
 - `use_logit_bias` 包含一个 detached 的辅助头和对应 decode-time bias
-- `use_logit_train_add` 默认关闭；开启时训练阶段的 AR forward logits 也会看到 centered prior bias
+- `use_logit_train_add` 默认开启，并在 `use_logit_bias` 运行中让训练阶段的 AR forward logits 看到 centered prior bias
 
 ## 入口与主流程
 
