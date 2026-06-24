@@ -1,0 +1,419 @@
+{
+  "created_at": "2026-06-24T14:44:41",
+  "source_summary": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/summary.md",
+  "source_status": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/task_status.json",
+  "data_path": "/data/shilong/tokmem/results/compositional/all_methods/data/test/function_calling_test_tools51-100_10calls.json",
+  "max_new_tokens": 512,
+  "eval_batch_size": 8,
+  "limit": null,
+  "results": {
+    "llama1b": {
+      "tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama1b_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.3325,
+              "tool_multiset_exact": 0.33375,
+              "call_exact": 0.16875,
+              "f1": 0.636941606345274,
+              "tool_f1": 0.8271314320676744,
+              "parse_error_rate": 0.1775
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama1b_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.31375,
+              "tool_multiset_exact": 0.31625,
+              "call_exact": 0.1575,
+              "f1": 0.5960428850246225,
+              "tool_f1": 0.8086211650191913,
+              "parse_error_rate": 0.2475
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama1b_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.31625,
+              "tool_multiset_exact": 0.3175,
+              "call_exact": 0.17875,
+              "f1": 0.6353370483126272,
+              "tool_f1": 0.8218160662651761,
+              "parse_error_rate": 0.2075
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.3208333333333333,
+          "tool_sequence_exact_std": 0.010180659769058872,
+          "tool_multiset_exact": 0.3225,
+          "tool_multiset_exact_std": 0.00976281209488332,
+          "call_exact": 0.16833333333333333,
+          "call_exact_std": 0.010631125685144224,
+          "f1": 0.6227738465608412,
+          "f1_std": 0.023163589534183487,
+          "tool_f1": 0.8191895544506806,
+          "tool_f1_std": 0.009530551913992307,
+          "parse_error_rate": 0.21083333333333332,
+          "parse_error_rate_std": 0.035118845842842465
+        }
+      },
+      "adap_tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.55,
+              "tool_multiset_exact": 0.55,
+              "call_exact": 0.28,
+              "f1": 0.7689991200857106,
+              "tool_f1": 0.9400101803940814,
+              "parse_error_rate": 0.06125
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.59375,
+              "tool_multiset_exact": 0.595,
+              "call_exact": 0.3225,
+              "f1": 0.7869011627240149,
+              "tool_f1": 0.9463632368448545,
+              "parse_error_rate": 0.04375
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.58,
+              "tool_multiset_exact": 0.58125,
+              "call_exact": 0.30625,
+              "f1": 0.7791114158996318,
+              "tool_f1": 0.9424399589381207,
+              "parse_error_rate": 0.05375
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.5745833333333333,
+          "tool_sequence_exact_std": 0.02237232293109797,
+          "tool_multiset_exact": 0.5754166666666667,
+          "tool_multiset_exact_std": 0.023060156836702823,
+          "call_exact": 0.30291666666666667,
+          "call_exact_std": 0.021445182054096276,
+          "f1": 0.7783372329031191,
+          "f1_std": 0.00897609615255894,
+          "tool_f1": 0.9429377920590188,
+          "tool_f1_std": 0.0032056528085360136,
+          "parse_error_rate": 0.05291666666666667,
+          "parse_error_rate_std": 0.008779711460710616
+        }
+      }
+    },
+    "llama3b": {
+      "tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama3b_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.25125,
+              "tool_multiset_exact": 0.25375,
+              "call_exact": 0.1325,
+              "f1": 0.5959196913919096,
+              "tool_f1": 0.8117028853177266,
+              "parse_error_rate": 0.31625
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama3b_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.25125,
+              "tool_multiset_exact": 0.25375,
+              "call_exact": 0.1325,
+              "f1": 0.5959196913919096,
+              "tool_f1": 0.8117028853177266,
+              "parse_error_rate": 0.31625
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama3b_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.25125,
+              "tool_multiset_exact": 0.25375,
+              "call_exact": 0.1325,
+              "f1": 0.5959196913919096,
+              "tool_f1": 0.8117028853177266,
+              "parse_error_rate": 0.31625
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.25125,
+          "tool_sequence_exact_std": 0.0,
+          "tool_multiset_exact": 0.25375,
+          "tool_multiset_exact_std": 0.0,
+          "call_exact": 0.1325,
+          "call_exact_std": 0.0,
+          "f1": 0.5959196913919096,
+          "f1_std": 0.0,
+          "tool_f1": 0.8117028853177266,
+          "tool_f1_std": 0.0,
+          "parse_error_rate": 0.31625,
+          "parse_error_rate_std": 0.0
+        }
+      },
+      "adap_tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.86,
+              "tool_multiset_exact": 0.86,
+              "call_exact": 0.435,
+              "f1": 0.8512954082703502,
+              "tool_f1": 0.9872982731170619,
+              "parse_error_rate": 0.03875
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.86,
+              "tool_multiset_exact": 0.86,
+              "call_exact": 0.435,
+              "f1": 0.8512954082703502,
+              "tool_f1": 0.9872982731170619,
+              "parse_error_rate": 0.03875
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.86,
+              "tool_multiset_exact": 0.86,
+              "call_exact": 0.435,
+              "f1": 0.8512954082703502,
+              "tool_f1": 0.9872982731170619,
+              "parse_error_rate": 0.03875
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.86,
+          "tool_sequence_exact_std": 0.0,
+          "tool_multiset_exact": 0.86,
+          "tool_multiset_exact_std": 0.0,
+          "call_exact": 0.435,
+          "call_exact_std": 0.0,
+          "f1": 0.8512954082703502,
+          "f1_std": 0.0,
+          "tool_f1": 0.9872982731170619,
+          "tool_f1_std": 0.0,
+          "parse_error_rate": 0.03875,
+          "parse_error_rate_std": 0.0
+        }
+      }
+    },
+    "llama8b": {
+      "tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama8b_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.29875,
+              "tool_multiset_exact": 0.34125,
+              "call_exact": 0.23125,
+              "f1": 0.7387718790175253,
+              "tool_f1": 0.8756443248551414,
+              "parse_error_rate": 0.12625
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama8b_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.29875,
+              "tool_multiset_exact": 0.34125,
+              "call_exact": 0.23125,
+              "f1": 0.7387718790175253,
+              "tool_f1": 0.8756443248551414,
+              "parse_error_rate": 0.12625
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama8b_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.29875,
+              "tool_multiset_exact": 0.34125,
+              "call_exact": 0.23125,
+              "f1": 0.7387718790175253,
+              "tool_f1": 0.8756443248551414,
+              "parse_error_rate": 0.12625
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.29875,
+          "tool_sequence_exact_std": 0.0,
+          "tool_multiset_exact": 0.34125,
+          "tool_multiset_exact_std": 0.0,
+          "call_exact": 0.23125,
+          "call_exact_std": 0.0,
+          "f1": 0.7387718790175253,
+          "f1_std": 0.0,
+          "tool_f1": 0.8756443248551414,
+          "tool_f1_std": 0.0,
+          "parse_error_rate": 0.12625,
+          "parse_error_rate_std": 0.0
+        }
+      },
+      "adap_tokmem_eoc_logit_bias": {
+        "trials": [
+          {
+            "trial": 1,
+            "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.85,
+              "tool_multiset_exact": 0.85125,
+              "call_exact": 0.41625,
+              "f1": 0.8414951292257794,
+              "tool_f1": 0.9854540665625224,
+              "parse_error_rate": 0.0275
+            }
+          },
+          {
+            "trial": 2,
+            "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.85,
+              "tool_multiset_exact": 0.85125,
+              "call_exact": 0.41625,
+              "f1": 0.8414951292257794,
+              "tool_f1": 0.9854540665625224,
+              "parse_error_rate": 0.0275
+            }
+          },
+          {
+            "trial": 3,
+            "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42",
+            "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
+            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "metrics": {
+              "samples": 800,
+              "tool_sequence_exact": 0.85,
+              "tool_multiset_exact": 0.85125,
+              "call_exact": 0.41625,
+              "f1": 0.8414951292257794,
+              "tool_f1": 0.9854540665625224,
+              "parse_error_rate": 0.0275
+            }
+          }
+        ],
+        "aggregate": {
+          "trials": 3,
+          "tool_sequence_exact": 0.85,
+          "tool_sequence_exact_std": 0.0,
+          "tool_multiset_exact": 0.85125,
+          "tool_multiset_exact_std": 0.0,
+          "call_exact": 0.41625,
+          "call_exact_std": 0.0,
+          "f1": 0.8414951292257794,
+          "f1_std": 0.0,
+          "tool_f1": 0.9854540665625224,
+          "tool_f1_std": 0.0,
+          "parse_error_rate": 0.0275,
+          "parse_error_rate_std": 0.0
+        }
+      }
+    }
+  }
+}

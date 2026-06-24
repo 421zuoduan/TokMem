@@ -33,11 +33,14 @@ The primary maintained entrypoints are `main_tokmem.sh` for runtime sampling and
 
 When `--use_logit_bias --use_logit_train_add` are enabled, validation loss applies the same centered train-add transform before AR CE as training, then adds the auxiliary logit-bias CE scaled by `--logit_bias_loss_weight`. This keeps best-checkpoint selection aligned with the training forward objective.
 
-## Paper Suite Batch Size
+## Batch Size Defaults
 
-For current `atomic` paper-suite batch size settings, see:
+Current maintained `atomic` defaults are defined in the launchers and entrypoints:
 
-- [docs/paper-suite-batch-size-comparison.md](/data/shilong/tokmem/docs/paper-suite-batch-size-comparison.md)
+- `main_in_domain.py`: train batch size `4`, validation batch size `16`, test batch size `16`
+- `main_lora_baseline.py`: train batch size `4`, validation batch size `16`, test batch size `16`
+- `main_base_model.py`: test batch size `64`
+- `main_rag_baseline.py`: test batch size `16`
 
 ## Usage
 

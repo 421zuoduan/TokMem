@@ -1,6 +1,6 @@
 # Compositional 个人备忘
 
-这份备忘记录当前仓库里 `compositional/` 的实际维护路径。当前默认关注 `eoc/logit_bias` 方法族，主入口是 `main_sequential.py` 和 `scripts/compositional/llama_1b/tokmem_*.sh`。
+这份备忘记录当前仓库里 `compositional/` 的实际维护路径。当前代码支持 `eoc/logit_bias/tool_head_replacement` 方法族，主入口是 `main_sequential.py` 和 `scripts/compositional/llama_1b/tokmem_*.sh`；默认推荐和主要对比仍优先看 `eoc+logit_bias`。
 
 ## 1. 直接怎么跑
 
@@ -19,6 +19,8 @@ bash scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh
 - `eoc-only`：开启 `--use_eoc`
 - `eoc+logit_bias`：开启 `--use_eoc --use_logit_bias`
 
+当前代码还支持 `eoc+tool_head_replacement`，但 README 汇总型 3-method launcher 不覆盖它。
+
 README 汇总型 launcher：
 
 ```bash
@@ -34,6 +36,9 @@ bash scripts/compositional/llama_1b/run_readme_myself_3methods_10calls_llama_1b.
 - `--epochs`，单轮训练的 epoch override
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_logit_train_add / --no-use_logit_train_add`
+- `--use_tool_head_replacement`
+- `--detach / --no-detach`
 - `--logit_bias_loss_weight`，默认 `0.1`
 - `--logit_bias_network {mlp,linear}`，默认 `linear`
 - `--logit_bias_scale`，默认 `1.0`
@@ -47,6 +52,9 @@ bash scripts/compositional/llama_1b/run_readme_myself_3methods_10calls_llama_1b.
 约束：
 
 - `--use_logit_bias` 依赖 `--use_eoc`
+- `--use_tool_head_replacement` 依赖 `--use_eoc`
+- `--use_logit_bias` 和 `--use_tool_head_replacement` 互斥
+- 显式 `--use_logit_train_add` 需要 `--use_logit_bias`
 - `--epochs` 用于单轮 no-adaptation run
 
 ## 3. 当前 launcher 默认设置
@@ -109,11 +117,11 @@ rounds[-1].eval_results
 
 重点字段：
 
-- `tool_accuracy`：按样本和候选工具展开的 binary accuracy；ICL/RAG 会先把 arg-only 输出按 prompt 中候选工具 schema 映射回工具 ID
+- `tool_accuracy`：按样本和候选工具展开的 binary accuracy，是当前 compositional 代码里 routing acc 的对应字段；ICL/RAG 会先把 arg-only 输出按 prompt 中候选工具 schema 映射回工具 ID
 - `tool_exact_match_acc`：整组工具完全预测一致的样本比例；ICL/RAG 的歧义 call 会保留为 unresolved
 - `avg_tool_f1_score`：工具集合 F1
 - `arguments_accuracy`：gold tool call 的参数完全匹配比例
-- `avg_f1_score`：function call 序列 F1
+- `avg_f1_score`：normalized function-call set F1，当前汇总表常展示为 `Arguments F1`
 - `exact_accuracy` / `full_correctness`：工具和参数端到端完全正确比例
 - `parse_error_rate`：输出解析错误率
 
@@ -126,9 +134,11 @@ rounds[-1].eval_results
 - `epochs`
 - `avg_total_loss`
 - `avg_ar_loss`
-- `avg_logit_bias_loss`，启用 `use_logit_bias` 时有实际含义
+- `avg_logit_bias_loss`，启用 `use_logit_bias` 或 `use_tool_head_replacement` 时有实际含义
+- `use_logit_train_add`
+- `detach`
 
-position 计数字段保存在每轮训练返回的 `results` 和日志中，用于检查 `eoc/logit_bias` 边界监督覆盖情况。
+position 计数字段保存在每轮训练返回的 `results` 和日志中，用于检查 `eoc/logit_bias/tool_head_replacement` 边界监督覆盖情况。
 
 ## 6. 代码位置
 
@@ -150,8 +160,12 @@ position 计数字段保存在每轮训练返回的 `results` 和日志中，用
 `use_logit_bias` 在 assistant-start 和 gold/generated `eoc` 后的边界位工作：
 
 1. 训练时收集边界 hidden state。
-2. 对 hidden state 做 `detach`。
+2. 默认对 hidden state 做 `detach`，可用 `--no-detach` 关闭。
 3. 用 `logit_bias_head` 预测下一步 gold tool id。
 4. 推理时将 centered tool-only bias 加回 tool token logits。
 
-当前 `compositional` 默认产出 exact match、tool accuracy、argument accuracy 和 F1 类指标。跨 track 对齐 `routing acc` 和 `Rouge-L` 时，需要在分析层做字段映射或补充统计。
+`use_logit_train_add` 的 parser 默认开启，但只在 `use_logit_bias=true` 时生效。未开 `use_logit_bias` 时，如果没有显式传该 flag，会被隐式置为关闭；显式 `--use_logit_train_add` 则需要同时开启 `--use_logit_bias`。
+
+`use_tool_head_replacement` 使用同一个 `logit_bias_head` 和 auxiliary CE loss，但推理时不是加 soft bias；它只在边界位已经触发 tool token 时，用 auxiliary head 选出的 tool id 替换具体 tool token。
+
+当前 `compositional` 默认产出 exact match、tool accuracy、argument accuracy 和 F1 类指标。跨 track 对齐时，`routing acc` 对应 `tool_accuracy`；当前 compositional 代码不计算 Rouge-L，也没有 `rouge_l` 字段，response/function-call 质量主要看 `avg_f1_score`。

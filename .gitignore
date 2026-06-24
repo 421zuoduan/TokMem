@@ -48,6 +48,13 @@ atomic/runs
 compositional/data
 compositional/runs
 compositional/log
+!compositional/rebuttal/
+!compositional/rebuttal/results/
+!compositional/rebuttal/results/**/
+compositional/rebuttal/results/**/predictions/
+compositional/rebuttal/results/**/logs/
+compositional_taskbench/data
+compositional_taskbench/runs
 saved_models
 docs/compositional/archive
 

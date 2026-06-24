@@ -2,16 +2,18 @@
 
 ## 当前维护范围
 
-`compositional/` 当前维护的训练基础设施围绕下面两组方法参数展开：
+`compositional/` 当前维护的训练基础设施围绕下面三组方法参数展开：
 
 - `--use_eoc`
 - `--use_logit_bias`
+- `--use_tool_head_replacement`
 
 其中：
 
 - `use_eoc` 定义显式边界 token
 - `use_logit_bias` 包含一个 detached 的辅助头和对应 decode-time bias
-- `use_logit_train_add` 默认开启，并在 `use_logit_bias` 运行中让训练阶段的 AR forward logits 看到 centered prior bias
+- `use_tool_head_replacement` 使用同一个辅助头，并在 decode-time 做 triggered tool token 的 hard replacement
+- `use_logit_train_add` 的 parser 默认开启，但只在 `use_logit_bias` 运行中让训练阶段的 AR forward logits 看到 centered prior bias
 
 ## 入口与主流程
 
@@ -29,9 +31,9 @@
 当前训练目标包含两部分：
 
 1. 主自回归损失 `ar_loss`
-2. 可选的 `logit_bias_loss`
+2. 可选的 auxiliary tool-head CE loss，保存字段名为 `logit_bias_loss`
 
-`logit_bias_loss` 的定义：
+`logit_bias_loss` 在 `use_logit_bias` 或 `use_tool_head_replacement` 启用时生效，定义如下：
 
 1. 只在 assistant-start 和 gold-`eoc` 边界位收集 hidden state
 2. 按 `--detach / --no-detach` 对 hidden state 应用 stop-gradient
@@ -46,7 +48,7 @@ total_loss = ar_loss + logit_bias_loss_weight * tool_prior_ce
 
 `--detach` 默认开启，此时 `tool_prior_ce` 只更新 `logit_bias_head`。传入 `--no-detach` 时，这条 auxiliary CE 也会塑形 boundary hidden state 上游的可训练参数。
 
-`--use_logit_train_add` 开启时，训练会在 boundary tool-token 位置把 centered prior bias 加到 AR logits，并保留这条 bias 计算图。AR loss 会受到 forward 数值影响，也会通过 train-add 路径更新 `logit_bias_head`。默认 `--detach` 会让这条路径的上游梯度停在 gathered boundary hidden state；传入 `--no-detach` 时，梯度会继续塑形 boundary hidden state 上游的可训练参数。
+`--use_logit_train_add` 只在 `use_logit_bias=true` 时生效。开启时，训练会在 boundary tool-token 位置把 centered prior bias 加到 AR logits，并保留这条 bias 计算图。AR loss 会受到 forward 数值影响，也会通过 train-add 路径更新 `logit_bias_head`。默认 `--detach` 会让这条路径的上游梯度停在 gathered boundary hidden state；传入 `--no-detach` 时，梯度会继续塑形 boundary hidden state 上游的可训练参数。
 
 ## 推理与评测约束
 
@@ -59,7 +61,8 @@ total_loss = ar_loss + logit_bias_loss_weight * tool_prior_ce
 
 1. 主模型先给出全词表 logits
 2. 如果 `use_logit_bias=true`，对 tool token 子集加入软 bias
-3. 执行贪心或采样解码
+3. 如果 `use_tool_head_replacement=true`，主模型触发 tool token 后由 auxiliary head 替换具体 tool id
+4. 执行贪心或采样解码
 
 当传入 `--use_ground_truth_tools` 时，评测路径会在这些显式边界位直接写入 gold tool token。
 
@@ -103,7 +106,9 @@ rounds[-1].eval_results
 - `epochs`
 - `avg_total_loss`
 - `avg_ar_loss`
-- `avg_logit_bias_loss`，当 `use_logit_bias=true`
+- `avg_logit_bias_loss`，当 `use_logit_bias=true` 或 `use_tool_head_replacement=true`
+- `use_logit_train_add`
+- `detach`
 
 训练时的 position 计数字段保存在每轮训练返回的 `results` 和日志中。`training_summary.json` 服务于 run 级 loss 记录，step 级趋势由静态图片承担。
 
@@ -118,4 +123,4 @@ rounds[-1].eval_results
 
 - `total_loss`
 - `ar_loss`
-- `logit_bias_loss`，当启用时
+- `logit_bias_loss`，当启用 auxiliary tool head 时

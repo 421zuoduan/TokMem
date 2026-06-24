@@ -8,20 +8,27 @@
 compositional/runs/<run_name>/
 ```
 
-维护中的 TokMem 路径围绕 `main_sequential.py`、`use_eoc` 和 `use_logit_bias` 展开。当前推荐 launcher 位于：
+维护中的 TokMem 路径围绕 `main_sequential.py`、`use_eoc`、`use_logit_bias` 和 `use_tool_head_replacement` 方法族展开。当前单次 TokMem-family launcher 位于：
 
 - `scripts/compositional/llama_1b/tokmem_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_llama_1b.sh`
+- `scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_no_detach_llama_1b.sh`
 
 Llama-1B 对比方法 launcher 位于：
 
-- `scripts/compositional/llama_1b/baseline_llama_1b.sh`
 - `scripts/compositional/llama_1b/icl_llama_1b.sh`
 - `scripts/compositional/llama_1b/rag_llama_1b.sh`
 - `scripts/compositional/llama_1b/lora_llama_1b.sh`
 
-这些脚本与单轮 TokMem launcher 对齐 `51-100` benchmark tools、`5000/500` train/test size、max calls `4`、multi-tool ratios `0.5,0.5`、seed `42` 和本地 Llama-1B 模型路径。`baseline_llama_1b.sh` 和 `icl_llama_1b.sh` 都使用 `icl_baseline.py` 的全工具提示路径；`rag_llama_1b.sh` 在同一入口上启用 top-5 检索；`lora_llama_1b.sh` 使用 `lora_sequential.py` 做单轮 `51-100:3` 标准 LoRA finetuning。
+这些脚本与单轮 TokMem launcher 对齐 `51-100` benchmark tools、`5000/500` train/test size、max calls `4`、multi-tool ratios `0.5,0.5`、seed `42` 和本地 Llama-1B 模型路径。`icl_llama_1b.sh` 使用 `icl_baseline.py` 的全工具提示路径；`rag_llama_1b.sh` 在同一入口上启用 top-5 检索；`lora_llama_1b.sh` 使用 `lora_sequential.py` 做单轮 `51-100:3` 标准 LoRA finetuning。
+
+Adaptation 入口单独保留：
+
+- `scripts/compositional/llama_1b/adap_tokmem_llama_1b.sh`
+- `scripts/compositional/llama_1b/adap_tokmem_eoc_llama_1b.sh`
+- `scripts/compositional/llama_1b/adap_tokmem_eoc_logit_bias_llama_1b.sh`
 
 README 汇总型 launcher 位于：
 
@@ -32,7 +39,7 @@ README 汇总型 launcher 位于：
 
 - `scripts/compositional/run_paper_compositional_suite.sh`
 
-这个 suite launcher 固定评测 `51-100 / 4 calls`，覆盖 `llama1b`、`llama3b`、`llama8b` 和 `icl`、`rag`、`lora`、`tokmem`、`tokmem_eoc`、`tokmem_eoc_logit_bias`、`adap_tokmem`、`adap_tokmem_eoc`、`adap_tokmem_eoc_logit_bias`。其中 `adap_tokmem*` 的训练轮次是 `1-50:1,51-100:3`。调度粒度是单个 `model × method × trial`，所以同一 `model/method` 的 5 个 trial 可以分散到不同 GPU 上执行。suite 只监控和调度 `--gpus` 指定的 GPU；suite 自己的任务结束后，只要 `memory.used <= 2048 MiB` 就能继续启动下一项；外部占用释放后的 GPU 需要连续 300 秒低于阈值。
+这个 suite launcher 固定评测 `51-100 / 4 calls`，覆盖 `llama1b`、`llama3b`、`llama8b` 和 `icl`、`rag`、`lora`、`tokmem`、`tokmem_eoc`、`tokmem_eoc_logit_bias`、`tokmem_eoc_replace_head`、`adap_tokmem`、`adap_tokmem_eoc`、`adap_tokmem_eoc_logit_bias`、`adap_tokmem_eoc_replace_head`。其中 `adap_tokmem*` 的训练轮次是 `1-50:1,51-100:3`。调度粒度是单个 `model × method × trial`，所以同一 `model/method` 的 5 个 trial 可以分散到不同 GPU 上执行。suite 只监控和调度 `--gpus` 指定的 GPU；suite 自己的任务结束后，只要 `memory.used <= 2048 MiB` 就能继续启动下一项；外部占用释放后的 GPU 需要连续 300 秒低于阈值。
 
 ## Run Context
 
@@ -147,13 +154,15 @@ rounds[-1].eval_results
       "epochs": 3,
       "avg_total_loss": ...,
       "avg_ar_loss": ...,
-      "avg_logit_bias_loss": ...
+      "avg_logit_bias_loss": ...,
+      "use_logit_train_add": ...,
+      "detach": ...
     }
   ]
 }
 ```
 
-训练时的详细计数字段保存在每轮内部 `results` 中，并在日志里打印。`training_summary.json` 保持 run 级 compact 摘要。
+`avg_logit_bias_loss` 在 `use_logit_bias` 或 `use_tool_head_replacement` 启用时有实际含义。训练时的详细计数字段保存在每轮内部 `results` 中，并在日志里打印。`training_summary.json` 保持 run 级 compact 摘要。
 
 ## README 汇总 Run
 
@@ -186,6 +195,8 @@ trials/<trial_name>/
 
 汇总脚本读取每个 trial 的 `rounds[-1].eval_results` 和 `training_summary.json`，生成 Markdown 表格，并更新 `README_MYSELF.md` 中的维护方法表。
 
+这些 `run_readme_myself_3methods*.sh` launcher 只比较 baseline TokMem、EOC-only、EOC+logit_bias 三种设置，不覆盖 `tool_head_replacement`、ICL/RAG/LoRA 或 adaptation variants。
+
 ## Legacy 与 Adaptation 入口
 
 这些入口保留用于历史实验和 adaptation 复查：
@@ -202,6 +213,8 @@ trials/<trial_name>/
 - `baseline`
 - `eoc-only`
 - `eoc+logit_bias`
+
+当前代码还支持 `eoc+tool_head_replacement`，但 README 汇总型 3-method launcher 不覆盖它。
 
 ## 迁移脚本
 
@@ -223,10 +236,14 @@ python -m py_compile \
 bash -n scripts/compositional/llama_1b/tokmem_llama_1b.sh
 bash -n scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh
 bash -n scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh
-bash -n scripts/compositional/llama_1b/baseline_llama_1b.sh
+bash -n scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_llama_1b.sh
+bash -n scripts/compositional/llama_1b/tokmem_eoc_logit_train_add_no_detach_llama_1b.sh
 bash -n scripts/compositional/llama_1b/icl_llama_1b.sh
 bash -n scripts/compositional/llama_1b/lora_llama_1b.sh
 bash -n scripts/compositional/llama_1b/rag_llama_1b.sh
+bash -n scripts/compositional/llama_1b/adap_tokmem_llama_1b.sh
+bash -n scripts/compositional/llama_1b/adap_tokmem_eoc_llama_1b.sh
+bash -n scripts/compositional/llama_1b/adap_tokmem_eoc_logit_bias_llama_1b.sh
 bash -n scripts/compositional/llama_1b/run_readme_myself_3methods_llama_1b.sh
 bash -n scripts/compositional/llama_1b/run_readme_myself_3methods_10calls_llama_1b.sh
 ```
