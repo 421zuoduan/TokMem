@@ -14,6 +14,7 @@ METRICS = [
     "avg_argument_f1",
     "transition_error",
     "parse_error_rate",
+    "parse_error_example_rate",
 ]
 
 
@@ -131,6 +132,7 @@ def write_markdown(summary, suite_dir):
     with path.open("w", encoding="utf-8") as f:
         f.write("# TaskBench DailyLife LR Sweep Summary\n\n")
         f.write(f"Suite: `{suite_dir}`\n\n")
+        f.write("Best LR is selected by Tool F1, with Argument F1 as the tie-breaker.\n\n")
         f.write("## Method Results\n\n")
         f.write("| Method | LR | Trials | Routing Acc | Rouge-L | Tool F1 | Argument F1 | Transition Error |\n")
         f.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
@@ -147,6 +149,27 @@ def write_markdown(summary, suite_dir):
                         rouge=format_value(metrics["avg_rouge_l"]["mean"]),
                         tool=format_value(metrics["avg_tool_f1_score"]["mean"]),
                         arg=format_value(metrics["avg_argument_f1"]["mean"]),
+                        transition=format_value(metrics["transition_error"]["mean"]),
+                    )
+                )
+
+        best_rows = select_best_lrs(summary)
+        if best_rows:
+            f.write("\n## Best LR by Tool/Argument F1\n\n")
+            f.write("| Method | LR | Trials | Tool F1 | Argument F1 | Routing Acc | Rouge-L | Transition Error |\n")
+            f.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+            for method in sorted(best_rows):
+                lr, payload = best_rows[method]
+                metrics = payload["metrics"]
+                f.write(
+                    "| {method} | {lr} | {trials} | {tool} | {arg} | {routing} | {rouge} | {transition} |\n".format(
+                        method=method,
+                        lr=lr,
+                        trials=payload["successful_trials"],
+                        tool=format_value(metrics["avg_tool_f1_score"]["mean"]),
+                        arg=format_value(metrics["avg_argument_f1"]["mean"]),
+                        routing=format_value(metrics["routing_acc"]["mean"]),
+                        rouge=format_value(metrics["avg_rouge_l"]["mean"]),
                         transition=format_value(metrics["transition_error"]["mean"]),
                     )
                 )
@@ -179,6 +202,23 @@ def write_markdown(summary, suite_dir):
     return path
 
 
+def select_best_lrs(summary):
+    best_rows = {}
+    for method, lr_payloads in summary["methods"].items():
+        candidates = []
+        for lr, payload in lr_payloads.items():
+            metrics = payload["metrics"]
+            tool_f1 = metrics["avg_tool_f1_score"]["mean"]
+            argument_f1 = metrics["avg_argument_f1"]["mean"]
+            if tool_f1 is None or argument_f1 is None or payload["successful_trials"] == 0:
+                continue
+            candidates.append((tool_f1, argument_f1, lr, payload))
+        if candidates:
+            _, _, lr, payload = max(candidates, key=lambda item: (item[0], item[1]))
+            best_rows[method] = (lr, payload)
+    return best_rows
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("Usage: summarize_taskbench_lr_sweep.py <suite_dir>")
@@ -206,6 +246,13 @@ def main():
                 f"rouge_l={metrics['avg_rouge_l']['mean']} "
                 f"transition_error={metrics['transition_error']['mean']}"
             )
+    for method, (lr, payload) in sorted(select_best_lrs(summary).items()):
+        metrics = payload["metrics"]
+        print(
+            f"best_{method}_lr_by_tool_arg={lr} "
+            f"tool_f1={metrics['avg_tool_f1_score']['mean']:.4f} "
+            f"argument_f1={metrics['avg_argument_f1']['mean']:.4f}"
+        )
 
 
 if __name__ == "__main__":

@@ -249,6 +249,7 @@ def print_taskbench_metrics(metrics):
     print(f"Argument F1:              {metrics['avg_argument_f1']:.3f}")
     print(f"Transition error:         {metrics['transition_error']:.3f}")
     print(f"Parse error rate:         {metrics['parse_error_rate']:.3f}")
+    print(f"Parse error example rate: {metrics['parse_error_example_rate']:.3f}")
 
 
 def main():

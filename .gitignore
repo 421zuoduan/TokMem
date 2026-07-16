@@ -48,13 +48,13 @@ atomic/runs
 compositional/data
 compositional/runs
 compositional/log
-!compositional/rebuttal/
-!compositional/rebuttal/results/
-!compositional/rebuttal/results/**/
-compositional/rebuttal/results/**/predictions/
-compositional/rebuttal/results/**/logs/
+compositional/utils/analyze_tokmem_tapmem_error_types.py
+compositional/rebuttal/results
 compositional_taskbench/data
 compositional_taskbench/runs
+compositional_taskbench/recompute_metrics.py
+compositional_trajectbench/
+scripts/compositional_trajectbench/
 saved_models
 docs/compositional/archive
 

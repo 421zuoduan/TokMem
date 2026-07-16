@@ -14,6 +14,7 @@ METRICS = [
     "avg_argument_f1",
     "transition_error",
     "parse_error_rate",
+    "parse_error_example_rate",
 ]
 
 

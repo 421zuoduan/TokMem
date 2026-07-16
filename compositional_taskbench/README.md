@@ -179,7 +179,7 @@ nohup setsid bash -lc "
 - `routing acc` / `Task Prediction Accuracy`：预测工具序列是否与 gold 工具序列完全一致。
 - `Rouge-L`：预测工具调用序列与 gold 工具调用序列的 Rouge-L。
 - `Tool Selection F1`：工具选择 F1。
-- `Argument F1`：参数 JSON 的 F1。
-- `transition error`：chain 中相邻 procedure transition 预测错误率，用于观察模型在完成当前 procedure 后是否能正确选择下一个 procedure。
+- `Argument F1`：与 `compositional/` 对齐，使用 function-call/argument JSON 字符串的集合式 F1（`ignore_order=True`），不把工具名并入 argument 指标。
+- `transition error`：与论文 token-level 定义对齐，跳过第一个 initial procedure，从第二个 procedure 开始逐个检查后续 procedure 是否预测正确；缺失的 gold procedure 计为错误，额外预测不计入分母。
 
 对于 chain 样本，gold 顺序以 `task_links` 的依赖边为准。少量 TaskBench 样本的 `task_steps` 文本顺序会和 dependency-link 顺序不一致；本实验遵循 TaskBench Tool Graph 设置，视 `task_links` 为权威标注。

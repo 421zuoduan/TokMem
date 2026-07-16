@@ -1,8 +1,8 @@
 {
-  "created_at": "2026-06-24T14:44:41",
-  "source_summary": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/summary.md",
-  "source_status": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/task_status.json",
-  "data_path": "/data/shilong/tokmem/results/compositional/all_methods/data/test/function_calling_test_tools51-100_10calls.json",
+  "created_at": "2026-06-26T11:51:07",
+  "source_summary": "results/compositional/paper_compositional_head_8gpu/summary.md",
+  "source_status": "results/compositional/paper_compositional_head_8gpu/task_status.json",
+  "data_path": "results/compositional/all_methods/data/test/function_calling_test_tools51-100_10calls.json",
   "max_new_tokens": 512,
   "eval_batch_size": 8,
   "limit": null,
@@ -15,7 +15,7 @@
             "run_name": "llama1b_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.3325,
@@ -23,7 +23,7 @@
               "call_exact": 0.16875,
               "f1": 0.636941606345274,
               "tool_f1": 0.8271314320676744,
-              "parse_error_rate": 0.1775
+              "parse_error_rate": 1.31375
             }
           },
           {
@@ -31,7 +31,7 @@
             "run_name": "llama1b_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.31375,
@@ -39,7 +39,7 @@
               "call_exact": 0.1575,
               "f1": 0.5960428850246225,
               "tool_f1": 0.8086211650191913,
-              "parse_error_rate": 0.2475
+              "parse_error_rate": 0.4625
             }
           },
           {
@@ -47,7 +47,7 @@
             "run_name": "llama1b_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tokmem/llama1b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.31625,
@@ -55,7 +55,7 @@
               "call_exact": 0.17875,
               "f1": 0.6353370483126272,
               "tool_f1": 0.8218160662651761,
-              "parse_error_rate": 0.2075
+              "parse_error_rate": 0.55125
             }
           }
         ],
@@ -71,8 +71,8 @@
           "f1_std": 0.023163589534183487,
           "tool_f1": 0.8191895544506806,
           "tool_f1_std": 0.009530551913992307,
-          "parse_error_rate": 0.21083333333333332,
-          "parse_error_rate_std": 0.035118845842842465
+          "parse_error_rate": 0.7758333333333334,
+          "parse_error_rate_std": 0.46795822017925204
         }
       },
       "adap_tokmem_eoc_logit_bias": {
@@ -82,7 +82,7 @@
             "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.55,
@@ -90,7 +90,7 @@
               "call_exact": 0.28,
               "f1": 0.7689991200857106,
               "tool_f1": 0.9400101803940814,
-              "parse_error_rate": 0.06125
+              "parse_error_rate": 0.1325
             }
           },
           {
@@ -98,7 +98,7 @@
             "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.59375,
@@ -106,7 +106,7 @@
               "call_exact": 0.3225,
               "f1": 0.7869011627240149,
               "tool_f1": 0.9463632368448545,
-              "parse_error_rate": 0.04375
+              "parse_error_rate": 0.0575
             }
           },
           {
@@ -114,7 +114,7 @@
             "run_name": "llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama1b/tapmem/llama1b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.58,
@@ -122,7 +122,7 @@
               "call_exact": 0.30625,
               "f1": 0.7791114158996318,
               "tool_f1": 0.9424399589381207,
-              "parse_error_rate": 0.05375
+              "parse_error_rate": 0.05875
             }
           }
         ],
@@ -138,8 +138,8 @@
           "f1_std": 0.00897609615255894,
           "tool_f1": 0.9429377920590188,
           "tool_f1_std": 0.0032056528085360136,
-          "parse_error_rate": 0.05291666666666667,
-          "parse_error_rate_std": 0.008779711460710616
+          "parse_error_rate": 0.08291666666666667,
+          "parse_error_rate_std": 0.042944974482858105
         }
       }
     },
@@ -151,7 +151,7 @@
             "run_name": "llama3b_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.25125,
@@ -159,7 +159,7 @@
               "call_exact": 0.1325,
               "f1": 0.5959196913919096,
               "tool_f1": 0.8117028853177266,
-              "parse_error_rate": 0.31625
+              "parse_error_rate": 25.53875
             }
           },
           {
@@ -167,7 +167,7 @@
             "run_name": "llama3b_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.25125,
@@ -175,7 +175,7 @@
               "call_exact": 0.1325,
               "f1": 0.5959196913919096,
               "tool_f1": 0.8117028853177266,
-              "parse_error_rate": 0.31625
+              "parse_error_rate": 25.53875
             }
           },
           {
@@ -183,7 +183,7 @@
             "run_name": "llama3b_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tokmem/llama3b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.25125,
@@ -191,7 +191,7 @@
               "call_exact": 0.1325,
               "f1": 0.5959196913919096,
               "tool_f1": 0.8117028853177266,
-              "parse_error_rate": 0.31625
+              "parse_error_rate": 25.53875
             }
           }
         ],
@@ -207,7 +207,7 @@
           "f1_std": 0.0,
           "tool_f1": 0.8117028853177266,
           "tool_f1_std": 0.0,
-          "parse_error_rate": 0.31625,
+          "parse_error_rate": 25.53875,
           "parse_error_rate_std": 0.0
         }
       },
@@ -218,7 +218,7 @@
             "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.86,
@@ -226,7 +226,7 @@
               "call_exact": 0.435,
               "f1": 0.8512954082703502,
               "tool_f1": 0.9872982731170619,
-              "parse_error_rate": 0.03875
+              "parse_error_rate": 0.04125
             }
           },
           {
@@ -234,7 +234,7 @@
             "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.86,
@@ -242,7 +242,7 @@
               "call_exact": 0.435,
               "f1": 0.8512954082703502,
               "tool_f1": 0.9872982731170619,
-              "parse_error_rate": 0.03875
+              "parse_error_rate": 0.04125
             }
           },
           {
@@ -250,7 +250,7 @@
             "run_name": "llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama3b/tapmem/llama3b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.86,
@@ -258,7 +258,7 @@
               "call_exact": 0.435,
               "f1": 0.8512954082703502,
               "tool_f1": 0.9872982731170619,
-              "parse_error_rate": 0.03875
+              "parse_error_rate": 0.04125
             }
           }
         ],
@@ -274,7 +274,7 @@
           "f1_std": 0.0,
           "tool_f1": 0.9872982731170619,
           "tool_f1_std": 0.0,
-          "parse_error_rate": 0.03875,
+          "parse_error_rate": 0.04125,
           "parse_error_rate_std": 0.0
         }
       }
@@ -287,7 +287,7 @@
             "run_name": "llama8b_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.29875,
@@ -295,7 +295,7 @@
               "call_exact": 0.23125,
               "f1": 0.7387718790175253,
               "tool_f1": 0.8756443248551414,
-              "parse_error_rate": 0.12625
+              "parse_error_rate": 0.24625
             }
           },
           {
@@ -303,7 +303,7 @@
             "run_name": "llama8b_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial2_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.29875,
@@ -311,7 +311,7 @@
               "call_exact": 0.23125,
               "f1": 0.7387718790175253,
               "tool_f1": 0.8756443248551414,
-              "parse_error_rate": 0.12625
+              "parse_error_rate": 0.24625
             }
           },
           {
@@ -319,7 +319,7 @@
             "run_name": "llama8b_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_tokmem_eoc_logit_bias_trial3_seed42/round_1_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tokmem/llama8b_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.29875,
@@ -327,7 +327,7 @@
               "call_exact": 0.23125,
               "f1": 0.7387718790175253,
               "tool_f1": 0.8756443248551414,
-              "parse_error_rate": 0.12625
+              "parse_error_rate": 0.24625
             }
           }
         ],
@@ -343,7 +343,7 @@
           "f1_std": 0.0,
           "tool_f1": 0.8756443248551414,
           "tool_f1_std": 0.0,
-          "parse_error_rate": 0.12625,
+          "parse_error_rate": 0.24625,
           "parse_error_rate_std": 0.0
         }
       },
@@ -354,7 +354,7 @@
             "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial1_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.85,
@@ -362,7 +362,7 @@
               "call_exact": 0.41625,
               "f1": 0.8414951292257794,
               "tool_f1": 0.9854540665625224,
-              "parse_error_rate": 0.0275
+              "parse_error_rate": 0.03
             }
           },
           {
@@ -370,7 +370,7 @@
             "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial2_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.85,
@@ -378,7 +378,7 @@
               "call_exact": 0.41625,
               "f1": 0.8414951292257794,
               "tool_f1": 0.9854540665625224,
-              "parse_error_rate": 0.0275
+              "parse_error_rate": 0.03
             }
           },
           {
@@ -386,7 +386,7 @@
             "run_name": "llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "run_dir": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42",
             "checkpoint_path": "/data/shilong/tokmem/results/compositional/paper_compositional_head_8gpu/runs/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42/round_2_tools_51_100.pt",
-            "prediction_path": "/data/shilong/tokmem/compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
+            "prediction_path": "compositional/rebuttal/results/train4_checkpoint_eval_10calls/predictions/llama8b/tapmem/llama8b_adap_tokmem_eoc_logit_bias_trial3_seed42_train4_on_10calls_predictions.jsonl",
             "metrics": {
               "samples": 800,
               "tool_sequence_exact": 0.85,
@@ -394,7 +394,7 @@
               "call_exact": 0.41625,
               "f1": 0.8414951292257794,
               "tool_f1": 0.9854540665625224,
-              "parse_error_rate": 0.0275
+              "parse_error_rate": 0.03
             }
           }
         ],
@@ -410,7 +410,7 @@
           "f1_std": 0.0,
           "tool_f1": 0.9854540665625224,
           "tool_f1_std": 0.0,
-          "parse_error_rate": 0.0275,
+          "parse_error_rate": 0.03,
           "parse_error_rate_std": 0.0
         }
       }

@@ -379,10 +379,10 @@ def summarize_prediction_file(path):
     if not records:
         return {"samples": 0}
 
-    parse_errors = []
+    parse_error_outputs = []
     for record in records:
         errors = record.get("parse_errors") or {}
-        parse_errors.append(1.0 if float(errors.get("outputs", 0) or 0) > 0 else 0.0)
+        parse_error_outputs.append(float(errors.get("outputs", 0) or 0))
 
     return {
         "samples": len(records),
@@ -391,7 +391,7 @@ def summarize_prediction_file(path):
         "call_exact": mean([1.0 if record.get("call_exact") else 0.0 for record in records]),
         "f1": mean([float(record.get("f1") or 0.0) for record in records]),
         "tool_f1": mean([float(record.get("tool_f1") or 0.0) for record in records]),
-        "parse_error_rate": mean(parse_errors),
+        "parse_error_rate": sum(parse_error_outputs) / len(records) if records else 0.0,
     }
 
 

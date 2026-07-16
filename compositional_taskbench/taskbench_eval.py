@@ -88,13 +88,10 @@ def calculate_transition_error(predicted_tools, expected_tools):
 
     errors = 0
     total = len(expected_tools) - 1
-    for idx in range(total):
-        expected_pair = (expected_tools[idx], expected_tools[idx + 1])
-        predicted_pair = (
-            predicted_tools[idx] if idx < len(predicted_tools) else None,
-            predicted_tools[idx + 1] if idx + 1 < len(predicted_tools) else None,
-        )
-        if predicted_pair != expected_pair:
+    for idx in range(1, len(expected_tools)):
+        expected_tool = expected_tools[idx]
+        predicted_tool = predicted_tools[idx] if idx < len(predicted_tools) else None
+        if predicted_tool != expected_tool:
             errors += 1
 
     return {
@@ -108,7 +105,7 @@ def calculate_argument_f1(predicted_calls, expected_calls):
     result = compare_function_calls_advanced(
         predicted_calls,
         expected_calls,
-        ignore_order=False,
+        ignore_order=True,
     )
     return {
         "argument_f1": result.f1_score,
@@ -178,6 +175,7 @@ def evaluate_taskbench_predictions(prediction_records, candidate_tools=None, use
             totals["argument_exact_matches"] += 1
             breakdown[call_count]["argument_exact_matches"] += 1
         totals["parse_errors"] += argument_metrics["parse_errors"]
+        breakdown[call_count]["parse_errors"] += argument_metrics["parse_errors"]
         if argument_metrics["parse_errors"] > 0:
             totals["parse_error_examples"] += 1
             breakdown[call_count]["parse_error_examples"] += 1
@@ -203,7 +201,8 @@ def evaluate_taskbench_predictions(prediction_records, candidate_tools=None, use
         "avg_argument_recall": average(score_lists["argument_recall"]),
         "argument_exact_match_acc": totals["argument_exact_matches"] / total_examples if total_examples else 0.0,
         "avg_rouge_l": average(score_lists["rouge_l"]),
-        "parse_error_rate": totals["parse_error_examples"] / total_examples if total_examples else 0.0,
+        "parse_error_rate": totals["parse_errors"] / total_examples if total_examples else 0.0,
+        "parse_error_example_rate": totals["parse_error_examples"] / total_examples if total_examples else 0.0,
         "parse_error_call_count": totals["parse_errors"],
         "call_count_breakdown": {},
     }
@@ -221,7 +220,8 @@ def evaluate_taskbench_predictions(prediction_records, candidate_tools=None, use
             "avg_argument_f1": stats.get("argument_f1_sum", 0.0) / count if count else 0.0,
             "avg_rouge_l": stats.get("rouge_l_sum", 0.0) / count if count else 0.0,
             "argument_exact_match_acc": stats.get("argument_exact_matches", 0) / count if count else 0.0,
-            "parse_error_rate": stats.get("parse_error_examples", 0) / count if count else 0.0,
+            "parse_error_rate": stats.get("parse_errors", 0) / count if count else 0.0,
+            "parse_error_example_rate": stats.get("parse_error_examples", 0) / count if count else 0.0,
         }
 
     return metrics

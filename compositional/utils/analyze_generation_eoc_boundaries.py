@@ -25,10 +25,12 @@ LLAMA3B_FINAL_SUITE = (
 )
 
 MODELS = ("llama1b", "llama3b", "llama8b")
-METHODS = ("tokmem_eoc", "tokmem_eoc_logit_bias")
+DEFAULT_METHODS = ("tokmem_eoc", "tokmem_eoc_logit_bias")
+SUPPORTED_METHODS = ("tokmem_eoc", "tokmem_eoc_logit_bias", "adap_tokmem_eoc_logit_bias")
 METHOD_LABELS = {
     "tokmem_eoc": "eoc",
     "tokmem_eoc_logit_bias": "eoc_logit_bias",
+    "adap_tokmem_eoc_logit_bias": "eoc_logit_bias_adapt",
 }
 LLAMA3B_METHOD_DIRS = {
     "tokmem_eoc": "tokmem_eoc_llama_3b_4calls_seed42_3x_20260425_214658",
@@ -53,7 +55,16 @@ def parse_args():
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--models", default=",".join(MODELS), help="Comma-separated model keys.")
-    parser.add_argument("--methods", default=",".join(METHODS), help="Comma-separated method names.")
+    parser.add_argument("--methods", default=",".join(DEFAULT_METHODS), help="Comma-separated method names.")
+    parser.add_argument(
+        "--selection-policy",
+        default="legacy",
+        choices=["legacy", "table1_ours"],
+        help=(
+            "legacy reproduces the original rebuttal mix. table1_ours selects "
+            "paper_compositional_head_8gpu checkpoints for the Table 1 Ours rows."
+        ),
+    )
     parser.add_argument("--trials", type=int, default=5, help="Trials for all_methods EOC-only 1B/8B groups.")
     parser.add_argument("--logit-bias-trials", type=int, default=3, help="Trials for final 1B/8B EOC+logit-bias groups.")
     parser.add_argument("--llama3b-trials", type=int, default=3, help="Trials from the final 3B summary suite.")
@@ -306,6 +317,13 @@ def select_llama3b_items(selected, models, methods, trials):
 
 def select_items(models, methods, trials, logit_bias_trials, llama3b_trials):
     selected = {}
+    unsupported = sorted(set(methods) - set(DEFAULT_METHODS))
+    if unsupported:
+        raise SystemExit(
+            "legacy selection only supports "
+            f"{', '.join(DEFAULT_METHODS)}; use --selection-policy table1_ours for "
+            f"{', '.join(unsupported)}"
+        )
     all_methods = [method for method in methods if method == "tokmem_eoc"]
     if all_methods:
         select_status_items(
@@ -329,6 +347,27 @@ def select_items(models, methods, trials, logit_bias_trials, llama3b_trials):
             skip_models=("llama3b",),
         )
     select_llama3b_items(selected, models, methods, llama3b_trials)
+    return selected
+
+
+def select_table1_ours_items(models, methods, logit_bias_trials):
+    selected = {}
+    supported = {"tokmem_eoc_logit_bias", "adap_tokmem_eoc_logit_bias"}
+    unsupported = sorted(set(methods) - supported)
+    if unsupported:
+        raise SystemExit(
+            "table1_ours only supports Table 1 Ours methods: "
+            f"{', '.join(sorted(supported))}; got unsupported methods: {', '.join(unsupported)}"
+        )
+    trials_by_method = {method: logit_bias_trials for method in methods}
+    select_status_items(
+        selected,
+        status_path=PAPER_HEAD_STATUS,
+        source="paper_compositional_head_8gpu",
+        models=models,
+        methods=methods,
+        trials_by_method=trials_by_method,
+    )
     return selected
 
 
@@ -644,6 +683,7 @@ def summarize_all(selected, output_paths):
 def write_summary_json(output_dir, args, summaries):
     payload = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "selection_policy": args.selection_policy,
         "all_methods_status": str(ALL_METHODS_STATUS),
         "paper_head_status": str(PAPER_HEAD_STATUS),
         "llama3b_final_suite": str(LLAMA3B_FINAL_SUITE),
@@ -664,6 +704,7 @@ def write_summary_md(output_dir, args, summaries):
         f"- all_methods status: `{ALL_METHODS_STATUS}`",
         f"- paper head status: `{PAPER_HEAD_STATUS}`",
         f"- llama3b final checkpoint suite: `{LLAMA3B_FINAL_SUITE}`",
+        f"- selection policy: `{args.selection_policy}`",
         f"- max new tokens: `{args.max_new_tokens}`",
         f"- eval batch size: `{args.eval_batch_size}`",
     ]
@@ -745,11 +786,14 @@ def main():
     models = split_csv(args.models)
     methods = split_csv(args.methods)
     for method in methods:
-        if method not in METHODS:
+        if method not in SUPPORTED_METHODS:
             raise SystemExit(f"Unsupported method: {method}")
 
     output_dir = Path(args.output_dir)
-    selected = select_items(models, methods, args.trials, args.logit_bias_trials, args.llama3b_trials)
+    if args.selection_policy == "table1_ours":
+        selected = select_table1_ours_items(models, methods, args.logit_bias_trials)
+    else:
+        selected = select_items(models, methods, args.trials, args.logit_bias_trials, args.llama3b_trials)
     output_paths = {}
     for items in selected.values():
         for item in items:
