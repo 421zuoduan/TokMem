@@ -291,29 +291,16 @@ python scripts/compositional/generate_checkpoint_predictions.py \
   --run-config results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/run_config.json \
   --checkpoint results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/round_1_tools_51_100.pt \
   --method tokmem \
-  --output results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/tokmem_predictions.jsonl
+  --output results/compositional/checkpoint_predictions/llama1b/tokmem_predictions.jsonl
 
 python scripts/compositional/generate_checkpoint_predictions.py \
   --run-config results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/run_config.json \
   --checkpoint results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt \
   --method tokmem_eoc_logit_bias \
-  --output results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/eoc_logit_bias_predictions.jsonl
+  --output results/compositional/checkpoint_predictions/llama1b/eoc_logit_bias_predictions.jsonl
 ```
 
 Each JSONL record keeps the sample index, user input, expected tools/calls, predicted tools/calls, reserved tool tokens, `tool_sequence_exact`, `call_exact`, F1, Tool F1, and parse-error counts.
-
-Use `scripts/compositional/compare_tokmem_eoc_logit_bias_predictions.py` to compare two JSONL files and extract samples where EOC+logit-bias is fully correct while TokMem has a later tool-selection error:
-
-```bash
-python scripts/compositional/compare_tokmem_eoc_logit_bias_predictions.py \
-  --tokmem results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/tokmem_predictions.jsonl \
-  --eoc-logit-bias results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/eoc_logit_bias_predictions.jsonl \
-  --require-dissimilar \
-  --output-json results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/matches_dissimilar_later_tool_errors.json \
-  --output-md results/compositional/llama1b_tokmem_vs_eoc_logit_bias_predictions/matches_dissimilar_later_tool_errors.md
-```
-
-`--require-dissimilar` keeps later TokMem errors where the expected and predicted tools are both present and look semantically different by a coarse tool-category heuristic. This is intended for qualitative case selection; use the JSONL records for metric-level analysis.
 
 ## Legacy Entry Points
 

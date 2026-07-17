@@ -14,13 +14,6 @@ COMPOSITIONAL_DIR = REPO_ROOT / "compositional"
 if str(COMPOSITIONAL_DIR) not in sys.path:
     sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
-DEFAULT_SOURCE_SUMMARY = (
-    REPO_ROOT
-    / "results"
-    / "compositional"
-    / "paper_compositional_head_8gpu"
-    / "summary.md"
-)
 DEFAULT_DATA_PATH = (
     REPO_ROOT
     / "results"
@@ -30,32 +23,84 @@ DEFAULT_DATA_PATH = (
     / "test"
     / "function_calling_test_tools51-100_10calls.json"
 )
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "compositional" / "rebuttal" / "results" / "train4_checkpoint_eval_10calls"
+DEFAULT_OUTPUT_DIR = (
+    REPO_ROOT
+    / "compositional"
+    / "rebuttal"
+    / "results"
+    / "train4_checkpoint_eval_10calls_final"
+)
 
 MODELS = ("llama1b", "llama3b", "llama8b")
-METHODS = ("tokmem_eoc_logit_bias", "adap_tokmem_eoc_logit_bias")
+METHODS = ("tokmem", "tokmem_eoc_logit_bias")
 METHOD_LABELS = {
-    "tokmem_eoc_logit_bias": "tokmem",
-    "adap_tokmem_eoc_logit_bias": "tapmem",
+    "tokmem": "tokmem",
+    "tokmem_eoc_logit_bias": "tapmem",
 }
 METRIC_FIELDS = (
-    ("tool_sequence_exact", "Tool Sequence Exact"),
-    ("tool_multiset_exact", "Tool Multiset Exact"),
-    ("call_exact", "Call Exact"),
-    ("f1", "Argument F1"),
     ("tool_f1", "Tool F1"),
-    ("parse_error_rate", "Parse Error Rate"),
+    ("f1", "Argument F1"),
+    ("tool_sequence_exact", "Tool Sequence Exact"),
+    ("call_exact", "Call Exact"),
 )
+
+# These are the three-trial 4-call checkpoints used for the paper tables. TokMem
+# and TapMem come from different archived suites, so selecting both methods from
+# one suite summary (the previous behavior) silently chose the wrong baselines.
+CHECKPOINT_RUN_DIRS = {
+    ("llama1b", "tokmem"): tuple(
+        REPO_ROOT
+        / "results"
+        / "compositional"
+        / "all_methods"
+        / "runs"
+        / f"llama1b_tokmem_trial{trial}_seed42"
+        for trial in range(1, 4)
+    ),
+    ("llama3b", "tokmem"): tuple(
+        REPO_ROOT
+        / "compositional"
+        / "runs"
+        / f"tokmem_llama_3b_4calls_seed42_3x_20260425_214658_trial{trial}"
+        for trial in range(1, 4)
+    ),
+    ("llama8b", "tokmem"): tuple(
+        REPO_ROOT
+        / "results"
+        / "compositional"
+        / "all_methods"
+        / "runs"
+        / f"llama8b_tokmem_trial{trial}_seed42"
+        for trial in range(1, 4)
+    ),
+    **{
+        (model, "tokmem_eoc_logit_bias"): tuple(
+            REPO_ROOT
+            / "results"
+            / "compositional"
+            / "paper_compositional_head_8gpu"
+            / "runs"
+            / f"{model}_tokmem_eoc_logit_bias_trial{trial}_seed42"
+            for trial in range(1, 4)
+        )
+        for model in MODELS
+    },
+}
+
+EXPECTED_MODEL_NAMES = {
+    "llama1b": "Llama-3.2-1B-Instruct",
+    "llama3b": "Llama-3.2-3B-Instruct",
+    "llama8b": "Llama-3.1-8B-Instruct",
+}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Use the final 4-call checkpoints from a compositional suite summary to run "
+            "Use the paper-table 4-call TokMem and TapMem checkpoints to run "
             "1B/3B/8B TokMem and TapMem inference on the tools51-100 10-call test split."
         )
     )
-    parser.add_argument("--source-summary", default=str(DEFAULT_SOURCE_SUMMARY))
     parser.add_argument("--data-path", default=str(DEFAULT_DATA_PATH))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--models", default=",".join(MODELS), help="Comma-separated model keys.")
@@ -122,22 +167,6 @@ def expand_per_round_values(values_str, fallback, rounds):
     return values[: len(rounds)]
 
 
-def suite_dir_from_summary(summary_path):
-    path = Path(summary_path)
-    if path.name != "summary.md":
-        raise SystemExit(f"--source-summary must point to a summary.md file: {path}")
-    return path.parent
-
-
-def load_suite_tasks(summary_path):
-    suite_dir = suite_dir_from_summary(summary_path)
-    status_path = suite_dir / "task_status.json"
-    if not status_path.exists():
-        raise SystemExit(f"task_status.json not found next to source summary: {status_path}")
-    payload = load_json(status_path)
-    return payload.get("tasks", []), status_path
-
-
 def final_checkpoint_name(run_config):
     rounds = run_config.get("rounds") or []
     if not rounds:
@@ -149,28 +178,65 @@ def final_checkpoint_name(run_config):
     return f"round_{len(rounds) or 1}_tools_{tools.replace('-', '_')}.pt"
 
 
-def select_checkpoint_tasks(tasks, models, methods, trials):
+def validate_checkpoint_run(model, method, run_config, run_config_path):
+    args = run_config.get("args", {})
+    rounds = run_config.get("rounds") or []
+    errors = []
+
+    if Path(args.get("model_name", "")).name != EXPECTED_MODEL_NAMES[model]:
+        errors.append(f"model_name={args.get('model_name')!r}")
+    if args.get("use_lora", False):
+        errors.append("use_lora must be false")
+    if int(args.get("train_max_function_calls", -1)) != 4:
+        errors.append(f"train_max_function_calls={args.get('train_max_function_calls')!r}")
+    if int(args.get("test_max_function_calls", -1)) != 4:
+        errors.append(f"test_max_function_calls={args.get('test_max_function_calls')!r}")
+    if len(rounds) != 1 or rounds[0].get("tools") != "51-100":
+        errors.append(f"rounds={rounds!r}")
+
+    expected_flags = {
+        "tokmem": {
+            "use_eoc": False,
+            "use_logit_bias": False,
+            "use_tool_head_replacement": False,
+        },
+        "tokmem_eoc_logit_bias": {
+            "use_eoc": True,
+            "use_logit_bias": True,
+            "use_tool_head_replacement": False,
+        },
+    }
+    for flag, expected in expected_flags[method].items():
+        actual = bool(args.get(flag, False))
+        if actual != expected:
+            errors.append(f"{flag}={actual}, expected {expected}")
+
+    if errors:
+        details = "; ".join(errors)
+        raise SystemExit(f"Invalid {model}/{method} checkpoint config {run_config_path}: {details}")
+
+
+def select_checkpoint_tasks(models, methods, trials):
     selected = {}
     for model in models:
         for method in methods:
-            group = [
-                task
-                for task in tasks
-                if task.get("call_scope") == "4calls"
-                and task.get("model") == model
-                and task.get("method") == method
-                and task.get("status") == "success"
-            ]
-            group.sort(key=lambda task: int(task.get("trial", 10**9)))
-            group = group[:trials]
-            if len(group) < trials:
-                raise SystemExit(f"Not enough 4-call checkpoints for {model}/{method}: {len(group)}/{trials}")
+            key = (model, method)
+            if key not in CHECKPOINT_RUN_DIRS:
+                raise SystemExit(f"No paper checkpoint group configured for {model}/{method}")
+            run_dirs = CHECKPOINT_RUN_DIRS[key][:trials]
+            if len(run_dirs) < trials:
+                raise SystemExit(
+                    f"Not enough configured 4-call checkpoints for {model}/{method}: "
+                    f"{len(run_dirs)}/{trials}"
+                )
 
             resolved = []
-            for task in group:
-                run_dir = Path(task["task_dir"])
-                run_config_path = Path(task.get("run_config") or run_dir / "run_config.json")
+            for trial, run_dir in enumerate(run_dirs, start=1):
+                run_config_path = run_dir / "run_config.json"
+                if not run_config_path.exists():
+                    raise SystemExit(f"Run config not found: {run_config_path}")
                 run_config = load_json(run_config_path)
+                validate_checkpoint_run(model, method, run_config, run_config_path)
                 checkpoint_path = run_dir / final_checkpoint_name(run_config)
                 if not checkpoint_path.exists():
                     raise SystemExit(f"Final checkpoint not found: {checkpoint_path}")
@@ -178,7 +244,7 @@ def select_checkpoint_tasks(tasks, models, methods, trials):
                     {
                         "model": model,
                         "method": method,
-                        "trial": int(task.get("trial", 0)),
+                        "trial": trial,
                         "run_dir": run_dir,
                         "run_config_path": run_config_path,
                         "checkpoint_path": checkpoint_path,
@@ -430,11 +496,10 @@ def summarize_all(selected, output_paths):
     return summaries
 
 
-def write_summary_json(output_dir, args, source_status_path, summaries):
+def write_summary_json(output_dir, args, summaries):
     payload = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "source_summary": str(Path(args.source_summary)),
-        "source_status": str(source_status_path),
+        "checkpoint_policy": "paper-table 4-call TokMem and TapMem checkpoints",
         "data_path": str(Path(args.data_path)),
         "max_new_tokens": args.max_new_tokens,
         "eval_batch_size": args.eval_batch_size,
@@ -450,7 +515,7 @@ def write_summary_md(output_dir, args, summaries):
     lines = [
         "# 4-call Checkpoints Evaluated on 10-call Test",
         "",
-        f"- source summary: `{Path(args.source_summary)}`",
+        "- checkpoint policy: paper-table 4-call TokMem and TapMem checkpoints",
         f"- test split: `{Path(args.data_path)}`",
         f"- max new tokens: `{args.max_new_tokens}`",
         f"- eval batch size: `{args.eval_batch_size}`",
@@ -463,8 +528,8 @@ def write_summary_md(output_dir, args, summaries):
             "",
             "## Aggregate",
             "",
-            "| Model | Method | Trials | Tool Sequence Exact | Tool Multiset Exact | Call Exact | Argument F1 | Tool F1 | Parse Error Rate |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Model | Method | Trials | Tool F1 | Argument F1 | Tool Sequence Exact | Call Exact |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
 
@@ -479,48 +544,14 @@ def write_summary_md(output_dir, args, summaries):
                         model,
                         label,
                         str(aggregate["trials"]),
-                        fmt(aggregate["tool_sequence_exact"]),
-                        fmt(aggregate["tool_multiset_exact"]),
-                        fmt(aggregate["call_exact"]),
-                        fmt(aggregate["f1"]),
                         fmt(aggregate["tool_f1"]),
-                        fmt(aggregate["parse_error_rate"]),
+                        fmt(aggregate["f1"]),
+                        fmt(aggregate["tool_sequence_exact"]),
+                        fmt(aggregate["call_exact"]),
                     ]
                 )
                 + " |"
             )
-
-    lines.extend(["", "## Per Trial", ""])
-    for model in summaries:
-        for method, payload in summaries[model].items():
-            label = METHOD_LABELS.get(method, method)
-            lines.extend(
-                [
-                    f"### {model} / {label}",
-                    "",
-                    "| Trial | Run | Samples | Tool Sequence Exact | Call Exact | Argument F1 | Tool F1 | Checkpoint |",
-                    "| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |",
-                ]
-            )
-            for trial in payload["trials"]:
-                metrics = trial["metrics"]
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            str(trial["trial"]),
-                            trial["run_name"],
-                            str(metrics.get("samples", "")),
-                            fmt(metrics.get("tool_sequence_exact")),
-                            fmt(metrics.get("call_exact")),
-                            fmt(metrics.get("f1")),
-                            fmt(metrics.get("tool_f1")),
-                            f"`{trial['checkpoint_path']}`",
-                        ]
-                    )
-                    + " |"
-                )
-            lines.append("")
 
     path = output_dir / "summary.md"
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -531,18 +562,20 @@ def main():
     args = parse_args()
     if args.trials <= 0:
         raise SystemExit("--trials must be positive")
-    source_summary = Path(args.source_summary)
     data_path = Path(args.data_path)
     output_dir = Path(args.output_dir)
-    if not source_summary.exists():
-        raise SystemExit(f"Source summary not found: {source_summary}")
     if not data_path.exists():
         raise SystemExit(f"10-call test split not found: {data_path}")
 
     models = split_csv(args.models)
     methods = split_csv(args.methods)
-    tasks, source_status_path = load_suite_tasks(source_summary)
-    selected = select_checkpoint_tasks(tasks, models, methods, args.trials)
+    invalid_models = sorted(set(models) - set(MODELS))
+    invalid_methods = sorted(set(methods) - set(METHODS))
+    if invalid_models:
+        raise SystemExit(f"Unknown model keys: {', '.join(invalid_models)}")
+    if invalid_methods:
+        raise SystemExit(f"Unknown methods: {', '.join(invalid_methods)}")
+    selected = select_checkpoint_tasks(models, methods, args.trials)
     output_paths = {}
     for items in selected.values():
         for item in items:
@@ -580,7 +613,7 @@ def main():
                     run_prediction(args, item, pred_path, data)
 
     summaries = summarize_all(selected, output_paths)
-    summary_json = write_summary_json(output_dir, args, source_status_path, summaries)
+    summary_json = write_summary_json(output_dir, args, summaries)
     summary_md = write_summary_md(output_dir, args, summaries)
     print(f"\nWrote summary JSON: {summary_json}")
     print(f"Wrote summary MD: {summary_md}")

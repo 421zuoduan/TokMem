@@ -9,6 +9,12 @@
 - `results/`: archived successful runs with Chinese summaries.
 - `paper.pdf`: baseline method and results reference.
 
+## Method Terminology
+
+- By default, `TokMem` means the plain method with no adaptation, no EOC, and no logit bias, as described in `paper_tokmem.pdf`.
+- `TapMem` means the method with no adaptation, with EOC, and with logit bias, as described in `paper_tapmem.pdf`.
+- The TCRA module in the paper is the logit-bias mechanism (`logit bias`) used by TapMem.
+
 ## Environment
 
 Use the `tokmem` conda environment for experiment runs:
