@@ -333,7 +333,16 @@ def build_user_text(item):
     )
 
 
-def generate_batch(model, tokenizer, batch, device, max_new_tokens):
+def generate_batch(
+    model,
+    tokenizer,
+    batch,
+    device,
+    max_new_tokens,
+    use_memory_bank_constraint=False,
+    memory_bank_probability_threshold=0.5,
+    use_eoc=None,
+):
     import torch
 
     encoded = tokenizer(
@@ -352,6 +361,9 @@ def generate_batch(model, tokenizer, batch, device, max_new_tokens):
             temperature=0.6,
             top_p=0.9,
             do_sample=False,
+            use_memory_bank_constraint=use_memory_bank_constraint,
+            memory_bank_probability_threshold=memory_bank_probability_threshold,
+            use_eoc=use_eoc,
         )
 
 
@@ -371,7 +383,7 @@ def prediction_record(index, item, result, tokenizer, method, candidate_tools):
         candidate_tools=candidate_tools,
     )
 
-    return {
+    record = {
         "index": index,
         "method": method,
         "user_input": item["user_input"],
@@ -388,6 +400,9 @@ def prediction_record(index, item, result, tokenizer, method, candidate_tools):
         "tool_f1": tool_metrics["tool_f1_score"],
         "parse_errors": call_eval.details.get("parse_errors", {}),
     }
+    if result.get("memory_bank_constraint") is not None:
+        record["memory_bank_constraint"] = result["memory_bank_constraint"]
+    return record
 
 
 def prediction_path(output_dir, item):

@@ -9,34 +9,45 @@ The maintained compositional path keeps these method switches:
 - `--use_eoc`
 - `--use_logit_bias`
 - `--use_logit_train_add`
+- `--detach_head_from_ar_loss`
 - `--use_tool_head_replacement`
+- `--use_memory_bank_constraint`
 
 Historical archived runs still exist under `compositional/runs/`. Current code and docs describe the maintained `eoc/logit_bias/tool_head_replacement` family.
 
 ## Modes
 
-| Mode | `--use_eoc` | `--use_logit_bias` | `--use_logit_train_add` | `--use_tool_head_replacement` | Behavior |
-| --- | --- | --- | --- | --- | --- |
-| Baseline | off | off | off | off | Original TokMem decoding and training |
-| EOC token only | on | off | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
-| EOC + logit bias | on | on | on | off | Trains a detached tool-prior head on boundary states, adds centered tool-only bias back to decode logits, and applies the same transform during boundary-site training |
-| EOC + logit bias without train add | on | on | off | off | Uses `--no-use_logit_train_add` to keep the auxiliary head out of teacher-forced AR logits |
-| EOC + tool-head replacement | on | off | off | on | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
+| Mode | `--use_eoc` | `--use_logit_bias` | `--use_logit_train_add` | `--use_tool_head_replacement` | `--use_memory_bank_constraint` | Behavior |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | off | off | off | off | off | Original TokMem decoding and training |
+| EOC token only | on | off | off | off | off | Inserts explicit `eoc` boundary tokens between tool-controlled spans |
+| EOC + logit bias | on | on | on | off | off | Trains a detached tool-prior head on boundary states, adds centered tool-only bias back to decode logits, and applies the same transform during boundary-site training |
+| EOC + logit bias without train add | on | on | off | off | off | Uses `--no-use_logit_train_add` to keep the head out of teacher-forced AR logits |
+| EOC + tool-head replacement | on | off | off | on | off | Trains the same detached tool-prior head and replaces boundary-time tool triggers with tool ids sampled from that head |
+| TapMem + bank constraint | on | on | on | off | on | Applies the TapMem/TCRA bias first, then selects from memory tokens plus EOS at assistant-start and generated-EOC boundaries |
 
 Constraint summary:
 
 - `--use_logit_bias` requires `--use_eoc`
 - `--use_logit_train_add` defaults enabled and is active with `--use_logit_bias`
 - explicit `--use_logit_train_add` requires `--use_logit_bias`
+- `--detach_head_from_ar_loss` requires `--use_logit_bias --use_logit_train_add`
+- `--detach_head_from_ar_loss` does not apply to `--use_tool_head_replacement`
 - `--use_tool_head_replacement` requires `--use_eoc`
 - `--use_logit_bias` and `--use_tool_head_replacement` are decode-time alternatives
+- `--use_memory_bank_constraint` can be combined with `--use_logit_bias`; the fused logits are constrained after TCRA reweighting
+- `--use_memory_bank_constraint` cannot be combined with `--use_tool_head_replacement`
+- memory-bank constrained candidates always contain all memory tokens plus `tokenizer.eos_token_id`
 
 Useful flags:
 
 - `--use_eoc`
 - `--use_logit_bias`
 - `--use_logit_train_add` default enabled; use `--no-use_logit_train_add` to disable boundary-site train add
+- `--detach_head_from_ar_loss` default disabled; enable it to block the train-add AR-loss gradient to the head without changing the forward logits
 - `--use_tool_head_replacement`
+- `--use_memory_bank_constraint` enables constrained decoding, either as a no-adapter control or on top of TapMem logit bias
+- `--memory_bank_probability_threshold` defaults to `0.5` and is used only by TokMem without EOC
 - `--logit_bias_loss_weight` default `0.1`
 - `--logit_bias_network` default `linear`, choices: `mlp`, `linear`
 - `--logit_bias_scale` default `1.0`
@@ -58,9 +69,23 @@ When `--use_eoc` is enabled, each gold tool span becomes:
 
 `--max_new_tokens` controls only the training-time evaluation and demo decode budget in `main_sequential.py`. It does not change teacher-forcing supervision length during training.
 
-### Auxiliary tool head
+### Memory-bank constraint
 
-`--use_logit_bias` and `--use_tool_head_replacement` both train an auxiliary tool-prior head on boundary states. The default `--detach` setting detaches those states before the auxiliary CE loss, so prior-head gradients update the head parameters and leave the embedding path to the autoregressive loss. Use `--no-detach` to let that auxiliary loss also backpropagate through the boundary hidden states into trainable embeddings and LoRA parameters.
+`--use_memory_bank_constraint` changes free decoding only. It does not create a routing head, add a routing loss, or alter teacher-forcing training. At every active constraint site, greedy or sampled selection is performed over the compact candidate set consisting of every memory token plus `tokenizer.eos_token_id`; including the ending token lets the model terminate instead of forcing another procedure. It can be used alone for the TokMem/EOC-only controls or layered on an existing TapMem logit-bias checkpoint.
+
+Without `--use_eoc`, the assistant-start position is constrained and later positions are gated by the full-vocabulary normalized memory-token mass:
+
+```text
+P(memory bank) = sum(softmax(full_vocab_logits)[memory_token_ids])
+```
+
+The constraint fires after at least one ordinary response token has followed the previous memory token and `P(memory bank) >= memory_bank_probability_threshold`. The default threshold is `0.5`. The bank-conditional normalized entropy is recorded for analysis but is not part of the gate.
+
+With `--use_eoc`, the constraint fires deterministically at assistant start and after every actually generated `eoc`; the probability threshold is recorded but does not control activation. When `--use_logit_bias` is also enabled, the TCRA bias is added to the LM logits first and both constrained selection and diagnostics use that fused distribution. In all modes, argument and EOC generation positions retain the full vocabulary. Evaluation results record trigger counts, how often the constrained choice differs from full-vocabulary decoding, mean trigger mass, and mean bank-conditional entropy.
+
+### Tool head
+
+`--use_logit_bias` and `--use_tool_head_replacement` both train a tool-prior head on boundary states. The default `--detach` setting detaches those states before the head classification loss, so classification gradients update the head parameters without updating tool embeddings or LoRA through the boundary state. Use `--no-detach` to let the classification loss also backpropagate through the boundary hidden states into trainable tool embeddings and LoRA parameters.
 
 Training:
 
@@ -69,17 +94,33 @@ Training:
 3. predict the next gold tool id with `logit_bias_head`
 4. add `logit_bias_loss_weight * CE` to the autoregressive loss
 
-With `--use_logit_bias --use_logit_train_add`, training also applies the decode-time logit-bias transform to the main autoregressive CE logits at those same gathered boundary sites. The flag defaults enabled for logit-bias runs; use `--no-use_logit_train_add` for auxiliary-head-only training. The transform is:
+With `--use_logit_bias --use_logit_train_add`, training also applies the decode-time logit-bias transform to the main autoregressive CE logits at those same gathered boundary sites. The flag defaults enabled for logit-bias runs; use `--no-use_logit_train_add` for classification-only head training. The transform is:
 
 ```text
 (log_softmax(tool_logits) + log(num_tools)) * logit_bias_scale
 ```
 
-The resulting bias is added to the full-vocab columns for reserved tool tokens with its computation graph intact. AR loss sees the same prior-bias transform used at decode time and can update `logit_bias_head` through the train-add path. `--detach` controls whether train-add and auxiliary CE gradients also shape the upstream boundary hidden-state path; with the default `--detach`, those gradients stop at the gathered boundary states while `logit_bias_head` remains trainable.
+The resulting bias is added to the full-vocab columns for tool tokens. By default, its computation graph stays intact, so AR loss can update `logit_bias_head` through the train-add path. With `--detach_head_from_ar_loss`, the transformed bias is detached immediately before it is added: forward logits and loss values stay unchanged, but AR loss no longer updates the head through train-add. The classification loss still uses non-detached head logits and continues to train the head.
+
+The three gradient controls are separate:
+
+- `--use_logit_train_add` controls whether the transformed head result is added to tool-token logits during training.
+- `--detach` controls whether the head classification loss can update tool embeddings or LoRA through boundary hidden states. The existing train-add implementation also feeds the head a boundary state using this same detach setting.
+- `--detach_head_from_ar_loss` controls whether AR loss can update the head through the train-add path.
+
+To train the head only with classification loss while still applying its result to training and inference logits, use:
+
+```bash
+--use_eoc \
+--use_logit_bias \
+--use_logit_train_add \
+--detach \
+--detach_head_from_ar_loss
+```
 
 ### Logit bias
 
-`--use_logit_bias` uses the auxiliary head as a soft decode-time bias.
+`--use_logit_bias` uses the head as a soft decode-time bias.
 
 Decoding:
 
@@ -93,21 +134,23 @@ This means an informative prior only reweights relative preference among tool to
 
 ### Tool-head replacement
 
-`--use_tool_head_replacement` uses the auxiliary head as a hard replacement policy at EOC decision sites.
+`--use_tool_head_replacement` uses the head as a hard replacement policy at EOC decision sites.
 
 Decoding:
 
 1. let the base LM sample the next token at assistant-start or `eoc` boundary rows
 2. check whether that sampled token is one of the reserved tool tokens
-3. for rows where the base LM already triggered a tool token, sample a replacement tool id from the auxiliary head
+3. for rows where the base LM already triggered a tool token, sample a replacement tool id from the head
 4. write the replacement reserved tool token into the generated sequence
 
-This makes replacement trigger-gated: the auxiliary head chooses which tool token to emit only after the base LM has already decided to emit a tool token at a boundary. Non-tool continuations from the base LM pass through unchanged.
+This makes replacement trigger-gated: the head chooses which tool token to emit only after the base LM has already decided to emit a tool token at a boundary. Non-tool continuations from the base LM pass through unchanged.
 
 ## Maintained Launchers
 
 Single-round maintained launchers for tools `51-100`:
 
+- `scripts/compositional/run_rebuttal_compositional_pure_classification_head.sh`
+- `scripts/compositional/run_memory_bank_constraint_eval.sh`
 - `scripts/compositional/llama_1b/tokmem_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_llama_1b.sh`
 - `scripts/compositional/llama_1b/tokmem_eoc_logit_bias_llama_1b.sh`
@@ -118,6 +161,10 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/qwen_0_5b/tokmem_eoc_logit_bias_scale_ablation_qwen_0_5b_4calls_seed42_3x.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
+
+`run_rebuttal_compositional_pure_classification_head.sh` runs three trials concurrently as three independent processes on three distinct GPUs, with seed `42` for every trial. Set the GPU assignment with `TOKMEM_GPUS=0,1,2`; the launcher rejects missing or duplicate GPU identifiers. For a one-process capacity check, set matching single entries such as `TOKMEM_TRIALS=1 TOKMEM_GPUS=0`; the default remains trials `1,2,3`. `TOKMEM_MODEL_KEY=llama1b` is the default and uses `batch_size=24`, `eval_batch_size=256`; `TOKMEM_MODEL_KEY=llama8b` selects Llama-3.1-8B and uses `batch_size=8`, `eval_batch_size=64`. Both retain the corresponding 4-call TapMem paper settings (`max_length=512`, three epochs, and the same EOC/logit-bias settings) and add only `--detach_head_from_ar_loss`, so the routing head is trained by routing loss while its output is still added to memory-token logits. After the requested processes finish, the parent launcher writes per-trial artifacts plus `manifest.tsv`, `summary.md`, and `results.json` under `results/compositional/`; the summary reports the mean and standard deviation across successful trials and marks the suite incomplete unless every requested trial succeeds.
+
+`run_memory_bank_constraint_eval.sh` performs eval-only inference on the paper TokMem checkpoints and matched EOC-only checkpoints. It produces `tokmem_bank_constraint` and `eoc_only_bank_constraint` predictions without retraining, defaults to threshold `0.5`, and writes `manifest.json`, per-trial JSONL, `summary.json`, and `summary.md` under `compositional/rebuttal/results/memory_bank_constraint/`. Use `--models llama1b --trial-ids 1 --limit 8` for a narrow smoke run.
 
 The Qwen-0.5B scale-ablation launcher runs `tokmem_eoc_logit_bias` on `models/Qwen2.5-0.5B-Instruct` with tools `51-100`, 4-call data, `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=64`, `max_length=512`, and `lr=5e-3`. It fixes `seed=42`, runs three trials per scale, assigns `logit_bias_scale=0.1` to GPU `5`, `0.5` to GPU `6`, and `2` to GPU `7`, then writes `manifest.tsv`, `summary.md`, and `results.json` under `results/compositional/<suite_name>/`.
 
@@ -165,7 +212,7 @@ Paper-level compositional suite launcher:
 
 This suite launcher is the maintained entrypoint for the `51-100 / 4 calls` paper comparison sweep across `llama1b`, `llama3b`, `llama8b` and methods `icl`, `rag`, `lora`, `tokmem`, `tokmem_eoc`, `tokmem_eoc_logit_bias`, `tokmem_eoc_replace_head`, `adap_tokmem`, `adap_tokmem_eoc`, `adap_tokmem_eoc_logit_bias`, `adap_tokmem_eoc_replace_head`.
 
-`rerun_paper_compositional_head.sh` keeps the same scheduler, datasets, model set, artifact layout, and `--rerun-failed` workflow, while scheduling three trials of the logit-bias head methods `tokmem_eoc_logit_bias` and `adap_tokmem_eoc_logit_bias` for both `4calls` and `10calls`. It keeps TokMem embedding LR at `5e-3`, uses adaptation LoRA LR `8e-5`, and runs all logit-bias methods with `--detach --use_logit_train_add`. When pointed at an existing suite directory, its task loading, status JSON, and summaries are filtered to that logit-bias method set.
+`rerun_paper_compositional_head.sh` keeps the same scheduler, datasets, model set, artifact layout, and `--rerun-failed` workflow, while scheduling three trials of the logit-bias head methods `tokmem_eoc_logit_bias` and `adap_tokmem_eoc_logit_bias` for both `4calls` and `10calls`. It keeps the tool-token embedding LR at `5e-3`, uses adaptation LoRA LR `8e-5`, and runs all logit-bias methods with `--detach --use_logit_train_add`. When pointed at an existing suite directory, its task loading, status JSON, and summaries are filtered to that logit-bias method set.
 
 `run_paper_compositional_head_8gpu_nohup.sh` starts that logit-bias head suite through `nohup` on GPUs `0,1,2,3,4,5,6,7`, activates the `tokmem` conda environment before launching, and writes `nohup.log` plus `nohup.pid` under the generated suite directory.
 
@@ -271,6 +318,7 @@ For ICL/RAG, `function_calls` on the maintained compositional dataset store argu
 - `avg_ar_loss`
 - `avg_logit_bias_loss` when `use_logit_bias=true` or `use_tool_head_replacement=true`
 - `use_logit_train_add`
+- `detach_head_from_ar_loss`
 - `detach`
 
 Detailed position counters are available in the per-round training `results` payload and training logs. The saved `training_summary.json` stays a run-level loss summary.
@@ -342,6 +390,6 @@ This regenerates the synthetic data files under `compositional/data/` with fixed
 
 - `main_sequential.py`: maintained TokMem entrypoint
 - `model.py`: reserved-tool-token model, EOC boundary logic, logit-bias decoding, tool-head replacement decoding
-- `training.py`: autoregressive training loop plus detached auxiliary tool-head loss
+- `training.py`: autoregressive training loop plus tool-head classification loss
 - `dataset.py`: XLAM/APIGen data loading and EOC target formatting
 - `tool_retrieval.py`: RAG tool retrieval for ICL and related baselines

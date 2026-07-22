@@ -8,6 +8,7 @@ This directory keeps temporary or maintenance-oriented compositional utilities. 
 - `summarize_readme_myself_runs.py`: summarizes a completed README-style compositional run manifest into a compact markdown comparison table.
 - `run_train4_checkpoint_eval_10calls.py`: reads the final 4-call checkpoint groups from a compositional suite `summary.md` and adjacent `task_status.json`, runs the 1B/3B/8B TokMem/TapMem checkpoints on the tools51-100 10-call test split, then writes per-trial prediction JSONL files plus `summary.json` and `summary.md` under `compositional/rebuttal/results/`.
 - `analyze_generation_eoc_boundaries.py`: reruns free generation for non-adaptation `tokmem_eoc` and `tokmem_eoc_logit_bias` checkpoints, keeps raw generated token IDs so EOC tokens remain visible, and summarizes generated EOC boundary precision/recall/F1 under `compositional/rebuttal/results/eoc_boundary_accuracy/`. For Llama-3B it uses the final checkpoint suite referenced by `completed_trials_summary.md`.
+- `run_memory_bank_constraint_eval.py`: loads the paper TokMem, matched EOC-only, and TapMem 4-call checkpoints, applies memory-bank constrained decoding with the ending token retained, and writes aligned predictions plus trigger diagnostics and aggregate metrics under `compositional/rebuttal/results/memory_bank_constraint/`. For TapMem, TCRA bias is fused before constrained candidate selection.
 
 Run the 4-call checkpoint to 10-call evaluation through the script wrapper:
 
@@ -22,3 +23,11 @@ Run generated EOC boundary analysis through:
 ```bash
 bash scripts/compositional/analyze_generation_eoc_boundaries.sh
 ```
+
+Run the memory-bank constraint evaluation through:
+
+```bash
+bash scripts/compositional/run_memory_bank_constraint_eval.sh
+```
+
+TokMem uses a full-vocabulary memory-mass threshold of `0.5`; EOC-only and TapMem use generated EOC boundaries and do not threshold boundary activation. For TapMem, run with `--methods tapmem_bank_constraint`; the model applies TCRA bias before restricting selection to memory tokens plus EOS. Use `--models llama1b --trial-ids 1 --limit 8` for a smoke run, and `--summarize-only` after all desired prediction files exist.

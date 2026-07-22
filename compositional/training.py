@@ -328,7 +328,7 @@ def build_shift_supervision_masks(shift_labels, model, use_eoc=False):
 
 
 def gather_logit_bias_examples(hidden_states, labels, model, return_indices=False):
-    """Collect boundary hidden states with gold tool labels for the detached tool-prior head."""
+    """Collect boundary hidden states with gold tool labels for the tool-prior head."""
     eoc_token_id = getattr(model, "eoc_token_id", None)
     if eoc_token_id is None:
         empty_hidden = hidden_states.new_zeros((0, hidden_states.size(-1)))
@@ -415,8 +415,16 @@ def compute_logit_bias_loss(model, boundary_hidden_states, tool_targets, detach=
     return tool_logits, tool_loss
 
 
-def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_indices, time_indices, detach=True):
-    """Add detached auxiliary tool-prior bias to tool logits at supervised boundary sites."""
+def apply_logit_train_add(
+    model,
+    shift_logits,
+    boundary_hidden_states,
+    batch_indices,
+    time_indices,
+    detach=True,
+    detach_head_from_ar_loss=False,
+):
+    """Add the transformed tool-prior head result at supervised boundary sites."""
     if boundary_hidden_states.numel() == 0:
         return shift_logits
 
@@ -434,6 +442,8 @@ def apply_logit_train_add(model, shift_logits, boundary_hidden_states, batch_ind
     logit_bias_scale = float(getattr(model, "logit_bias_scale", 1.0))
     tool_bias = (tool_log_probs + uniform_tool_log_prob) * logit_bias_scale
     tool_bias = tool_bias.to(dtype=shift_logits.dtype)
+    if detach_head_from_ar_loss:
+        tool_bias = tool_bias.detach()
 
     if hasattr(model, "_get_tool_reserved_token_ids_tensor"):
         tool_token_ids_tensor = model._get_tool_reserved_token_ids_tensor(shift_logits.device)
@@ -484,6 +494,8 @@ def _generate_results(
     user_mask,
     use_logit_bias=False,
     use_tool_head_replacement=False,
+    use_memory_bank_constraint=False,
+    memory_bank_probability_threshold=0.5,
     use_eoc=False,
     use_ground_truth_tools=False,
     ground_truth_tools=None,
@@ -508,6 +520,8 @@ def _generate_results(
         "do_sample": do_sample,
         "use_logit_bias": use_logit_bias,
         "use_tool_head_replacement": use_tool_head_replacement,
+        "use_memory_bank_constraint": use_memory_bank_constraint,
+        "memory_bank_probability_threshold": memory_bank_probability_threshold,
         "use_eoc": use_eoc,
     }
     if ground_truth_tools is not None:
@@ -522,6 +536,7 @@ def _generate_results(
         f"Model {type(model).__name__} does not expose a compatible generation method "
         f"use_logit_bias={use_logit_bias}, "
         f"use_tool_head_replacement={use_tool_head_replacement}, "
+        f"use_memory_bank_constraint={use_memory_bank_constraint}, "
         f"use_ground_truth_tools={use_ground_truth_tools}."
     )
 
@@ -548,6 +563,8 @@ def _generate_results_with_example_fallback(
     batch_idx,
     use_logit_bias,
     use_tool_head_replacement,
+    use_memory_bank_constraint,
+    memory_bank_probability_threshold,
     use_eoc,
     use_ground_truth_tools,
     max_new_tokens,
@@ -570,6 +587,8 @@ def _generate_results_with_example_fallback(
                     single_mask,
                     use_logit_bias=use_logit_bias,
                     use_tool_head_replacement=use_tool_head_replacement,
+                    use_memory_bank_constraint=use_memory_bank_constraint,
+                    memory_bank_probability_threshold=memory_bank_probability_threshold,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=True,
                     ground_truth_tools=expected_tools,
@@ -592,6 +611,8 @@ def _generate_results_with_example_fallback(
             attention_mask,
             use_logit_bias=use_logit_bias,
             use_tool_head_replacement=use_tool_head_replacement,
+            use_memory_bank_constraint=use_memory_bank_constraint,
+            memory_bank_probability_threshold=memory_bank_probability_threshold,
             use_eoc=use_eoc,
             use_ground_truth_tools=False,
             max_new_tokens=max_new_tokens,
@@ -614,6 +635,8 @@ def _generate_results_with_example_fallback(
                     single_mask,
                     use_logit_bias=use_logit_bias,
                     use_tool_head_replacement=use_tool_head_replacement,
+                    use_memory_bank_constraint=use_memory_bank_constraint,
+                    memory_bank_probability_threshold=memory_bank_probability_threshold,
                     use_eoc=use_eoc,
                     use_ground_truth_tools=False,
                     max_new_tokens=max_new_tokens,
@@ -656,6 +679,7 @@ def train_native_function_calling_model(
     use_logit_bias=None,
     use_tool_head_replacement=None,
     use_logit_train_add=False,
+    detach_head_from_ar_loss=False,
     detach=True,
     logit_bias_loss_weight=0.1,
     plot_history=None,
@@ -678,10 +702,16 @@ def train_native_function_calling_model(
     )
     if resolved_use_logit_bias and resolved_use_tool_head_replacement:
         raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
+    if detach_head_from_ar_loss and resolved_use_tool_head_replacement:
+        raise ValueError("detach_head_from_ar_loss does not apply to use_tool_head_replacement")
+    if detach_head_from_ar_loss and not resolved_use_logit_bias:
+        raise ValueError("detach_head_from_ar_loss=True requires use_logit_bias=True")
+    if detach_head_from_ar_loss and not use_logit_train_add:
+        raise ValueError("detach_head_from_ar_loss=True requires use_logit_train_add=True")
     if use_logit_train_add and not resolved_use_logit_bias:
         raise ValueError("use_logit_train_add=True requires use_logit_bias=True")
-    use_auxiliary_tool_head = resolved_use_logit_bias or resolved_use_tool_head_replacement
-    if use_auxiliary_tool_head and not resolved_use_eoc:
+    use_tool_head = resolved_use_logit_bias or resolved_use_tool_head_replacement
+    if use_tool_head and not resolved_use_eoc:
         raise ValueError("use_logit_bias=True or use_tool_head_replacement=True requires use_eoc=True")
 
     if model.lora_config and lora_lr is not None:
@@ -701,7 +731,7 @@ def train_native_function_calling_model(
         ]
         if extra_trainable_params:
             param_groups.append(
-                {"params": extra_trainable_params, "lr": lr, "name": "auxiliary", "weight_decay": 0.0}
+                {"params": extra_trainable_params, "lr": lr, "name": "head", "weight_decay": 0.0}
             )
         optimizer = AdamW(param_groups)
         print(f"Using separate learning rates: embeddings={lr}, LoRA={lora_lr} (wd: emb=0.0, lora=0.01)")
@@ -717,7 +747,7 @@ def train_native_function_calling_model(
         if extra_trainable_params:
             print(f"Found {len(extra_trainable_params)} additional trainable parameters")
             param_groups.append(
-                {"params": extra_trainable_params, "lr": lr, "weight_decay": 0.0, "name": "auxiliary"}
+                {"params": extra_trainable_params, "lr": lr, "weight_decay": 0.0, "name": "head"}
             )
         optimizer = AdamW(param_groups)
         print(f"Using single learning rate: {lr} (wd: emb=0.0)")
@@ -742,6 +772,7 @@ def train_native_function_calling_model(
         f"use_logit_bias={resolved_use_logit_bias}, "
         f"use_tool_head_replacement={resolved_use_tool_head_replacement}, "
         f"use_logit_train_add={use_logit_train_add}, "
+        f"detach_head_from_ar_loss={detach_head_from_ar_loss}, "
         f"detach={detach}, "
         f"logit_bias_loss_weight={logit_bias_loss_weight}"
     )
@@ -782,8 +813,8 @@ def train_native_function_calling_model(
 
     zero = torch.tensor(0.0, device=device)
     has_logit_bias_head = hasattr(model, "logit_bias_head") and model.logit_bias_head is not None
-    if use_auxiliary_tool_head and not has_logit_bias_head:
-        print("Warning: auxiliary tool head requested but model has no logit_bias_head; detached prior loss will stay zero.")
+    if use_tool_head and not has_logit_bias_head:
+        print("Warning: tool head requested but model has no logit_bias_head; classification loss will stay zero.")
 
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(dataloader):
@@ -795,8 +826,8 @@ def train_native_function_calling_model(
                 model,
                 input_ids,
                 attention_mask,
-                output_hidden_states=use_auxiliary_tool_head,
-                final_hidden_state_only=use_auxiliary_tool_head,
+                output_hidden_states=use_tool_head,
+                final_hidden_state_only=use_tool_head,
             )
 
             if not torch.isfinite(logits).all():
@@ -816,7 +847,7 @@ def train_native_function_calling_model(
             logit_bias_targets = None
             logit_bias_initial_count = 0
             logit_bias_eoc_count = 0
-            if use_auxiliary_tool_head and hidden_states is not None:
+            if use_tool_head and hidden_states is not None:
                 (
                     logit_bias_hidden_states,
                     logit_bias_targets,
@@ -839,6 +870,7 @@ def train_native_function_calling_model(
                             logit_bias_batch_indices,
                             logit_bias_time_indices,
                             detach=detach,
+                            detach_head_from_ar_loss=detach_head_from_ar_loss,
                         )
                     _, logit_bias_loss = compute_logit_bias_loss(
                         model,
@@ -874,14 +906,14 @@ def train_native_function_calling_model(
             tool_count = int(masks["tool_mask"].sum().item())
 
             loss = ar_loss
-            if use_auxiliary_tool_head:
+            if use_tool_head:
                 loss = loss + logit_bias_loss_weight * logit_bias_loss
 
             step_loss_metrics = _build_loss_metrics(
                 total_loss=loss,
                 ar_loss=ar_loss,
                 extra_loss_metrics={
-                    "logit_bias_loss": logit_bias_loss if use_auxiliary_tool_head else None,
+                    "logit_bias_loss": logit_bias_loss if use_tool_head else None,
                 },
             )
 
@@ -969,7 +1001,7 @@ def train_native_function_calling_model(
             total_valid_positions += int(valid_mask.sum().item())
             total_eoc_positions += eoc_count
             total_tool_positions += tool_count
-            if use_auxiliary_tool_head and logit_bias_targets is not None:
+            if use_tool_head and logit_bias_targets is not None:
                 total_logit_bias_positions += int(logit_bias_targets.numel())
                 total_logit_bias_initial_positions += logit_bias_initial_count
                 total_logit_bias_eoc_positions += logit_bias_eoc_count
@@ -983,7 +1015,7 @@ def train_native_function_calling_model(
             window_valid_positions += int(valid_mask.sum().item())
             window_eoc_positions += eoc_count
             window_tool_positions += tool_count
-            if use_auxiliary_tool_head and logit_bias_targets is not None:
+            if use_tool_head and logit_bias_targets is not None:
                 window_logit_bias_positions += int(logit_bias_targets.numel())
             if plot_history is not None:
                 plot_step = plot_step_offset + successful_steps
@@ -1006,10 +1038,10 @@ def train_native_function_calling_model(
                 window_denom = max(1, window_batches)
                 window_avg_metrics = _average_metrics(window_loss_metrics, window_denom)
                 logit_bias_fragment = ""
-                if use_auxiliary_tool_head:
-                    aux_label = "LogitBias" if resolved_use_logit_bias else "ToolHead"
+                if use_tool_head:
+                    head_label = "LogitBias" if resolved_use_logit_bias else "ToolHead"
                     logit_bias_fragment = (
-                        f"{aux_label}: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
+                        f"{head_label}: {window_avg_metrics.get('logit_bias_loss', 0.0):.4f}, "
                     )
                 print(
                     f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx + 1}/{len(dataloader)}, "
@@ -1039,16 +1071,16 @@ def train_native_function_calling_model(
     print("\nTraining completed!")
     print(f"Average total loss: {avg_total_loss:.4f}")
     print(f"Average AR loss:    {avg_ar_loss:.4f}")
-    if use_auxiliary_tool_head:
-        print(f"Average auxiliary tool-head loss: {avg_logit_bias_loss:.4f}")
+    if use_tool_head:
+        print(f"Average tool-head classification loss: {avg_logit_bias_loss:.4f}")
     print(f"Total valid supervised positions: {total_valid_positions}")
     if resolved_use_eoc:
         print(f"Total EOC positions: {total_eoc_positions}")
         print(f"Total tool positions: {total_tool_positions}")
-    if use_auxiliary_tool_head:
-        print(f"Total auxiliary tool-head positions: {total_logit_bias_positions}")
-        print(f"Auxiliary tool-head sites from assistant-start positions: {total_logit_bias_initial_positions}")
-        print(f"Auxiliary tool-head sites from EOC positions: {total_logit_bias_eoc_positions}")
+    if use_tool_head:
+        print(f"Total tool-head positions: {total_logit_bias_positions}")
+        print(f"Tool-head sites from assistant-start positions: {total_logit_bias_initial_positions}")
+        print(f"Tool-head sites from EOC positions: {total_logit_bias_eoc_positions}")
     print(f"Successful optimizer steps: {successful_steps}")
 
     return {
@@ -1066,6 +1098,7 @@ def train_native_function_calling_model(
         "use_logit_bias": resolved_use_logit_bias,
         "use_tool_head_replacement": resolved_use_tool_head_replacement,
         "use_logit_train_add": bool(use_logit_train_add),
+        "detach_head_from_ar_loss": bool(detach_head_from_ar_loss),
         "detach": bool(detach),
         "avg_loss_metrics": avg_loss_metrics,
         "plot_next_step": plot_step_offset + successful_steps,
@@ -1083,6 +1116,8 @@ def demo_native_function_calling(
     use_eoc=None,
     use_logit_bias=None,
     use_tool_head_replacement=None,
+    use_memory_bank_constraint=None,
+    memory_bank_probability_threshold=None,
 ):
     """Demo of native function calling using held-out test examples."""
     model.eval()
@@ -1095,13 +1130,29 @@ def demo_native_function_calling(
         if use_tool_head_replacement is None
         else use_tool_head_replacement
     )
+    resolved_use_memory_bank_constraint = bool(
+        getattr(model, "use_memory_bank_constraint", False)
+        if use_memory_bank_constraint is None
+        else use_memory_bank_constraint
+    )
+    resolved_memory_bank_probability_threshold = float(
+        getattr(model, "memory_bank_probability_threshold", 0.5)
+        if memory_bank_probability_threshold is None
+        else memory_bank_probability_threshold
+    )
     if resolved_use_logit_bias and resolved_use_tool_head_replacement:
         raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
+    if resolved_use_memory_bank_constraint and resolved_use_tool_head_replacement:
+        raise ValueError(
+            "memory-bank constraint cannot be combined with tool-head replacement"
+        )
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
     if resolved_use_logit_bias:
         mode_desc += " + logit bias"
     if resolved_use_tool_head_replacement:
         mode_desc += " + tool head replacement"
+    if resolved_use_memory_bank_constraint:
+        mode_desc += " + memory-bank constraint"
 
     print(f"\n=== Native Function Calling Demo ({mode_desc}) ===")
     print(f"Testing on {len(test_examples)} held-out examples")
@@ -1132,6 +1183,8 @@ def demo_native_function_calling(
             user_tokens["attention_mask"],
             use_logit_bias=resolved_use_logit_bias,
             use_tool_head_replacement=resolved_use_tool_head_replacement,
+            use_memory_bank_constraint=resolved_use_memory_bank_constraint,
+            memory_bank_probability_threshold=resolved_memory_bank_probability_threshold,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             ground_truth_tools=expected_tools if use_ground_truth_tools else None,
@@ -1145,6 +1198,8 @@ def demo_native_function_calling(
             mode_line += " + logit bias"
         if resolved_use_tool_head_replacement:
             mode_line += " + tool head replacement"
+        if resolved_use_memory_bank_constraint:
+            mode_line += " + memory-bank constraint"
         print(f"Mode: {mode_line}")
 
         result = results[0]
@@ -1181,6 +1236,8 @@ def eval_native_function_calling(
     use_eoc=None,
     use_logit_bias=None,
     use_tool_head_replacement=None,
+    use_memory_bank_constraint=None,
+    memory_bank_probability_threshold=None,
 ):
     """Comprehensive evaluation of native function calling model using batch processing."""
     from eval import compare_function_calls_advanced, calculate_argument_accuracy, calculate_tool_metrics
@@ -1196,8 +1253,22 @@ def eval_native_function_calling(
         if use_tool_head_replacement is None
         else use_tool_head_replacement
     )
+    resolved_use_memory_bank_constraint = bool(
+        getattr(model, "use_memory_bank_constraint", False)
+        if use_memory_bank_constraint is None
+        else use_memory_bank_constraint
+    )
+    resolved_memory_bank_probability_threshold = float(
+        getattr(model, "memory_bank_probability_threshold", 0.5)
+        if memory_bank_probability_threshold is None
+        else memory_bank_probability_threshold
+    )
     if resolved_use_logit_bias and resolved_use_tool_head_replacement:
         raise ValueError("use_logit_bias=True and use_tool_head_replacement=True are decode-time alternatives")
+    if resolved_use_memory_bank_constraint and resolved_use_tool_head_replacement:
+        raise ValueError(
+            "memory-bank constraint cannot be combined with tool-head replacement"
+        )
 
     total_examples = len(test_dataloader.dataset)
     mode_desc = "Ground Truth Tool Inference" if use_ground_truth_tools else "Normal Tool Prediction"
@@ -1205,6 +1276,8 @@ def eval_native_function_calling(
         mode_desc += " + logit bias"
     if resolved_use_tool_head_replacement:
         mode_desc += " + tool head replacement"
+    if resolved_use_memory_bank_constraint:
+        mode_desc += " + memory-bank constraint"
 
     print(f"\n=== Native Function Calling Evaluation ({mode_desc}) ===")
     print(f"Evaluating on {total_examples} test examples")
@@ -1225,6 +1298,12 @@ def eval_native_function_calling(
     tool_precision_scores = []
     tool_recall_scores = []
     parse_errors = 0
+    constraint_trigger_count = 0
+    constraint_initial_trigger_count = 0
+    constraint_transition_trigger_count = 0
+    constraint_changed_token_count = 0
+    constraint_memory_mass_weighted_sum = 0.0
+    constraint_entropy_weighted_sum = 0.0
 
     call_count_breakdown = defaultdict(
         lambda: {
@@ -1278,6 +1357,8 @@ def eval_native_function_calling(
             batch_idx=batch_idx,
             use_logit_bias=resolved_use_logit_bias,
             use_tool_head_replacement=resolved_use_tool_head_replacement,
+            use_memory_bank_constraint=resolved_use_memory_bank_constraint,
+            memory_bank_probability_threshold=resolved_memory_bank_probability_threshold,
             use_eoc=resolved_use_eoc,
             use_ground_truth_tools=use_ground_truth_tools,
             max_new_tokens=max_new_tokens,
@@ -1286,6 +1367,26 @@ def eval_native_function_calling(
         for i in range(batch_size):
             example = batch["raw_data"][i]
             result = batch_results[i]
+            constraint_diagnostics = result.get("memory_bank_constraint") or {}
+            sample_trigger_count = int(constraint_diagnostics.get("trigger_count", 0))
+            constraint_trigger_count += sample_trigger_count
+            constraint_initial_trigger_count += int(
+                constraint_diagnostics.get("initial_trigger_count", 0)
+            )
+            constraint_transition_trigger_count += int(
+                constraint_diagnostics.get("transition_trigger_count", 0)
+            )
+            constraint_changed_token_count += int(
+                constraint_diagnostics.get("changed_token_count", 0)
+            )
+            constraint_memory_mass_weighted_sum += (
+                float(constraint_diagnostics.get("mean_trigger_memory_mass", 0.0))
+                * sample_trigger_count
+            )
+            constraint_entropy_weighted_sum += (
+                float(constraint_diagnostics.get("mean_trigger_normalized_entropy", 0.0))
+                * sample_trigger_count
+            )
             expected_tools = example.get("tools", [example.get("tool_name", "unknown")])
             expected_calls = example.get("function_calls", [example.get("function_call", "{}")])
             expected_call_count = len(expected_calls)
@@ -1377,6 +1478,33 @@ def eval_native_function_calling(
     avg_tool_precision = sum(tool_precision_scores) / len(tool_precision_scores) if tool_precision_scores else 0.0
     avg_tool_recall = sum(tool_recall_scores) / len(tool_recall_scores) if tool_recall_scores else 0.0
     parse_error_rate = parse_errors / total_examples
+    constraint_mean_memory_mass = (
+        constraint_memory_mass_weighted_sum / constraint_trigger_count
+        if constraint_trigger_count
+        else 0.0
+    )
+    constraint_mean_normalized_entropy = (
+        constraint_entropy_weighted_sum / constraint_trigger_count
+        if constraint_trigger_count
+        else 0.0
+    )
+    constraint_diagnostics = {
+        "enabled": resolved_use_memory_bank_constraint,
+        "mode": (
+            "eoc_boundary"
+            if resolved_use_memory_bank_constraint and resolved_use_eoc
+            else "probability_threshold"
+            if resolved_use_memory_bank_constraint
+            else "disabled"
+        ),
+        "probability_threshold": resolved_memory_bank_probability_threshold,
+        "trigger_count": constraint_trigger_count,
+        "initial_trigger_count": constraint_initial_trigger_count,
+        "transition_trigger_count": constraint_transition_trigger_count,
+        "changed_token_count": constraint_changed_token_count,
+        "mean_trigger_memory_mass": constraint_mean_memory_mass,
+        "mean_trigger_normalized_entropy": constraint_mean_normalized_entropy,
+    }
 
     print("\n" + "=" * 50)
     print("📊 EVALUATION RESULTS")
@@ -1406,6 +1534,15 @@ def eval_native_function_calling(
     print(f"   Average Tool Precision:   {avg_tool_precision:.3f}")
     print(f"   Average Tool Recall:      {avg_tool_recall:.3f}")
     print(f"   Parse Error Rate:         {parse_error_rate:.3f}")
+    if resolved_use_memory_bank_constraint:
+        print(
+            "   Memory-bank Constraint:   "
+            f"mode={constraint_diagnostics['mode']}, "
+            f"triggers={constraint_trigger_count}, "
+            f"changed={constraint_changed_token_count}, "
+            f"mean mass={constraint_mean_memory_mass:.4f}, "
+            f"mean entropy={constraint_mean_normalized_entropy:.4f}"
+        )
     print("=" * 50)
 
     print("\n📊 EXACT MATCH ACCURACY:")
@@ -1495,6 +1632,7 @@ def eval_native_function_calling(
         "avg_tool_precision": avg_tool_precision,
         "avg_tool_recall": avg_tool_recall,
         "parse_error_rate": parse_error_rate,
+        "memory_bank_constraint": constraint_diagnostics,
         "total_examples": total_examples,
         "call_count_breakdown": dict(call_count_breakdown),
     }

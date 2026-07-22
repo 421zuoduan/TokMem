@@ -247,7 +247,7 @@ def build_parser():
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override the epoch count for a single no-adaptation training round")
     parser.add_argument("--lr", type=float, default=5e-3,
-                        help="Learning rate for tokenized memory embeddings")
+                        help="Learning rate for tool-token embeddings")
     parser.add_argument("--lora_lr", type=float, default=5e-4,
                         help="Learning rate for LoRA parameters (default: 5e-4)")
     
@@ -267,11 +267,33 @@ def build_parser():
     parser.add_argument("--use_eoc", action="store_true",
                         help="Insert an explicit end-of-control token after each tool-controlled span")
     parser.add_argument("--use_logit_bias", action="store_true",
-                        help="Train an external detached tool prior head and use it as a soft decode-time logit bias")
+                        help="Train a detached tool prior head and use it as a soft decode-time logit bias")
     parser.add_argument("--use_logit_train_add", action=argparse.BooleanOptionalAction, default=True,
-                        help="Add detached prior bias to boundary tool-token logits during training")
+                        help="Add the head result to boundary tool-token logits during training")
+    parser.add_argument(
+        "--detach_head_from_ar_loss",
+        action="store_true",
+        help=(
+            "Detach the head from AR loss while keeping training-time "
+            "addition to tool-token logits enabled"
+        ),
+    )
     parser.add_argument("--use_tool_head_replacement", action="store_true",
                         help="Train the detached tool prior head and replace triggered tool tokens at EOC decision sites")
+    parser.add_argument(
+        "--use_memory_bank_constraint",
+        action="store_true",
+        help=(
+            "Constrain decode-time routing to memory tokens plus the ending token; "
+            "TokMem uses a probability-mass gate and EOC-only uses explicit boundaries"
+        ),
+    )
+    parser.add_argument(
+        "--memory_bank_probability_threshold",
+        type=float,
+        default=0.5,
+        help="Full-vocabulary memory-token probability mass required to trigger TokMem constraint",
+    )
     parser.add_argument("--logit_bias_loss_weight", type=float, default=0.1,
                         help="Weight for the detached tool-prior CE loss")
     parser.add_argument("--logit_bias_network", type=str, default="linear", choices=["mlp", "linear"],
@@ -279,7 +301,7 @@ def build_parser():
     parser.add_argument("--logit_bias_scale", type=float, default=1.0,
                         help="Multiplier applied to the prior head log-softmax bias at decode time")
     parser.add_argument("--detach", action=argparse.BooleanOptionalAction, default=True,
-                        help="Detach boundary hidden states before the auxiliary prior-head CE loss")
+                        help="Detach boundary hidden states before the head classification loss")
     # System arguments
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to use")
@@ -341,8 +363,21 @@ def build_parser():
 
 
 def validate_args(args, parser, argv=None):
+    if args.detach_head_from_ar_loss and args.use_tool_head_replacement:
+        parser.error("--detach_head_from_ar_loss does not apply to --use_tool_head_replacement")
+    if args.detach_head_from_ar_loss and not args.use_logit_bias:
+        parser.error("--detach_head_from_ar_loss requires --use_logit_bias")
+    if args.detach_head_from_ar_loss and not args.use_logit_train_add:
+        parser.error("--detach_head_from_ar_loss requires --use_logit_train_add")
     if args.use_logit_bias and args.use_tool_head_replacement:
         parser.error("--use_logit_bias and --use_tool_head_replacement are decode-time alternatives")
+    if args.use_memory_bank_constraint and args.use_tool_head_replacement:
+        parser.error(
+            "--use_memory_bank_constraint cannot be combined with "
+            "--use_tool_head_replacement"
+        )
+    if args.use_memory_bank_constraint and args.use_ground_truth_tools:
+        parser.error("--use_memory_bank_constraint cannot be combined with --use_ground_truth_tools")
     if args.use_logit_bias and not args.use_eoc:
         parser.error("--use_logit_bias requires --use_eoc")
     explicit_logit_train_add = False
@@ -365,6 +400,8 @@ def validate_args(args, parser, argv=None):
         parser.error("--epochs must be positive")
     if args.logit_bias_loss_weight < 0:
         parser.error("--logit_bias_loss_weight must be non-negative")
+    if not 0.0 <= args.memory_bank_probability_threshold <= 1.0:
+        parser.error("--memory_bank_probability_threshold must be between 0 and 1")
 
 
 def main():
@@ -506,11 +543,17 @@ def main():
     print(f"EOC: {'Enabled' if args.use_eoc else 'Disabled'}")
     print(f"Logit bias: {'Enabled' if args.use_logit_bias else 'Disabled'}")
     print(f"Logit train add: {'Enabled' if args.use_logit_train_add else 'Disabled'}")
+    print(f"Detach head from AR loss: {'Enabled' if args.detach_head_from_ar_loss else 'Disabled'}")
     print(f"Tool head replacement: {'Enabled' if args.use_tool_head_replacement else 'Disabled'}")
+    print(f"Memory-bank constraint: {'Enabled' if args.use_memory_bank_constraint else 'Disabled'}")
+    if args.use_memory_bank_constraint:
+        constraint_mode = "EOC boundary" if args.use_eoc else "TokMem probability threshold"
+        print(f"Memory-bank constraint mode: {constraint_mode}")
+        print(f"Memory-bank probability threshold: {args.memory_bank_probability_threshold}")
     if args.use_logit_bias or args.use_tool_head_replacement:
-        print(f"Auxiliary tool-head network: {args.logit_bias_network}")
-        print(f"Auxiliary tool-head loss weight: {args.logit_bias_loss_weight}")
-        print(f"Auxiliary tool-head detach: {args.detach}")
+        print(f"Tool-head network: {args.logit_bias_network}")
+        print(f"Tool-head classification loss weight: {args.logit_bias_loss_weight}")
+        print(f"Tool-head boundary-state detach: {args.detach}")
     if args.use_logit_bias:
         print(f"Logit bias scale: {args.logit_bias_scale}")
     print(f"Max length: {args.max_length}")
@@ -648,6 +691,8 @@ def main():
                 use_eoc=args.use_eoc,
                 use_logit_bias=args.use_logit_bias,
                 use_tool_head_replacement=args.use_tool_head_replacement,
+                use_memory_bank_constraint=args.use_memory_bank_constraint,
+                memory_bank_probability_threshold=args.memory_bank_probability_threshold,
                 logit_bias_network=args.logit_bias_network,
                 logit_bias_scale=args.logit_bias_scale,
             )
@@ -718,6 +763,7 @@ def main():
             use_logit_bias=args.use_logit_bias,
             use_tool_head_replacement=args.use_tool_head_replacement,
             use_logit_train_add=args.use_logit_train_add,
+            detach_head_from_ar_loss=args.detach_head_from_ar_loss,
             detach=args.detach,
             logit_bias_loss_weight=args.logit_bias_loss_weight,
             plot_history=plot_history,
@@ -770,6 +816,8 @@ def main():
                         use_eoc=args.use_eoc,
                         use_logit_bias=args.use_logit_bias,
                         use_tool_head_replacement=args.use_tool_head_replacement,
+                        use_memory_bank_constraint=args.use_memory_bank_constraint,
+                        memory_bank_probability_threshold=args.memory_bank_probability_threshold,
                     )
                 )
             
@@ -813,6 +861,8 @@ def main():
                                 use_eoc=args.use_eoc,
                                 use_logit_bias=args.use_logit_bias,
                                 use_tool_head_replacement=args.use_tool_head_replacement,
+                                use_memory_bank_constraint=args.use_memory_bank_constraint,
+                                memory_bank_probability_threshold=args.memory_bank_probability_threshold,
                             )
                         )
                     
@@ -874,6 +924,8 @@ def main():
                 use_eoc=args.use_eoc,
                 use_logit_bias=args.use_logit_bias,
                 use_tool_head_replacement=args.use_tool_head_replacement,
+                use_memory_bank_constraint=args.use_memory_bank_constraint,
+                memory_bank_probability_threshold=args.memory_bank_probability_threshold,
             )
         )
     
@@ -899,6 +951,8 @@ def main():
         "experiment_type": "tokmem_sequential",
         "run_name": run_context["run_name"],
         "eval_after_each_round": args.eval_after_each_round,
+        "use_memory_bank_constraint": args.use_memory_bank_constraint,
+        "memory_bank_probability_threshold": args.memory_bank_probability_threshold,
         "rounds": [
             {
                 "round": result["round"],

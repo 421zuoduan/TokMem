@@ -58,18 +58,29 @@ class FunctionCallingModel(nn.Module):
                  num_tools=100, tool_names=None, tokenizer=None, device="cuda", dtype=torch.bfloat16, 
                  decouple_embeddings=False, lora_config=None, use_eoc=False,
                  use_logit_bias=False, use_tool_head_replacement=False,
-                 logit_bias_network="linear", logit_bias_scale=1.0):
+                 logit_bias_network="linear", logit_bias_scale=1.0,
+                 use_memory_bank_constraint=False,
+                 memory_bank_probability_threshold=0.5):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name, local_files_only=True)
         self.use_eoc = use_eoc
         self.use_logit_bias = use_logit_bias
         self.use_tool_head_replacement = use_tool_head_replacement
+        self.use_memory_bank_constraint = use_memory_bank_constraint
+        self.memory_bank_probability_threshold = float(memory_bank_probability_threshold)
         self.logit_bias_network = logit_bias_network
         self.logit_bias_scale = logit_bias_scale
         if self.use_logit_bias and self.use_tool_head_replacement:
             raise ValueError("--use_logit_bias and --use_tool_head_replacement are decode-time alternatives")
+        if self.use_memory_bank_constraint and self.use_tool_head_replacement:
+            raise ValueError(
+                "--use_memory_bank_constraint cannot be combined with "
+                "--use_tool_head_replacement"
+            )
         if (self.use_logit_bias or self.use_tool_head_replacement) and not self.use_eoc:
             raise ValueError("--use_logit_bias and --use_tool_head_replacement require --use_eoc")
+        if not 0.0 <= self.memory_bank_probability_threshold <= 1.0:
+            raise ValueError("memory_bank_probability_threshold must be between 0 and 1")
         if self.logit_bias_network not in {"linear", "mlp"}:
             raise ValueError(f"Unsupported logit_bias_network: {self.logit_bias_network}")
 
@@ -452,7 +463,7 @@ class FunctionCallingModel(nn.Module):
         logit_bias_params = 0
         if self.logit_bias_head is not None:
             logit_bias_params = sum(p.numel() for p in self.logit_bias_head.parameters())
-            print(f"Auxiliary tool-head parameters: {logit_bias_params:,}")
+            print(f"Tool-head parameters: {logit_bias_params:,}")
 
         # Count LoRA parameters if using LoRA
         if self.lora_config:
@@ -504,6 +515,69 @@ class FunctionCallingModel(nn.Module):
         masked_logits[..., tool_token_ids] = logits[..., tool_token_ids]
         return masked_logits
 
+    def _compute_memory_bank_statistics(self, logits):
+        """Return full-vocabulary memory mass and bank-conditional normalized entropy."""
+        tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
+        float_logits = logits.float()
+        tool_logits = float_logits.index_select(-1, tool_token_ids)
+        log_tool_mass = torch.logsumexp(tool_logits, dim=-1)
+        log_full_mass = torch.logsumexp(float_logits, dim=-1)
+        memory_mass = torch.exp(log_tool_mass - log_full_mass)
+
+        if tool_logits.size(-1) <= 1:
+            normalized_entropy = torch.zeros_like(memory_mass)
+        else:
+            tool_log_probs = torch.log_softmax(tool_logits, dim=-1)
+            tool_probs = torch.exp(tool_log_probs)
+            entropy = -(tool_probs * tool_log_probs).sum(dim=-1)
+            normalized_entropy = entropy / math.log(tool_logits.size(-1))
+        return memory_mass, normalized_entropy
+
+    def _select_with_memory_bank_constraint(
+        self,
+        logits,
+        active_rows,
+        end_token_id,
+        temperature=0.6,
+        top_p=0.9,
+        do_sample=False,
+    ):
+        """Select from memory tokens plus the sequence-ending token on active rows."""
+        next_tokens = torch.empty(logits.size(0), dtype=torch.long, device=logits.device)
+        changed_rows = torch.zeros_like(active_rows)
+        inactive_rows = ~active_rows
+        if inactive_rows.any():
+            inactive_indices = inactive_rows.nonzero(as_tuple=False).squeeze(-1)
+            next_tokens[inactive_indices] = self._sample_next_tokens(
+                logits[inactive_indices],
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+            )
+        if not active_rows.any():
+            return next_tokens, changed_rows
+
+        active_indices = active_rows.nonzero(as_tuple=False).squeeze(-1)
+        unconstrained_greedy_tokens = torch.argmax(logits[active_indices], dim=-1)
+        tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
+        end_token_tensor = torch.tensor([end_token_id], dtype=torch.long, device=logits.device)
+        if (tool_token_ids == end_token_id).any():
+            candidate_token_ids = tool_token_ids
+        else:
+            candidate_token_ids = torch.cat([tool_token_ids, end_token_tensor])
+        candidate_logits = logits[active_indices].index_select(-1, candidate_token_ids)
+        candidate_indices = self._sample_next_tokens(
+            candidate_logits,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )
+        constrained_tokens = candidate_token_ids[candidate_indices]
+
+        changed_rows[active_indices] = unconstrained_greedy_tokens != constrained_tokens
+        next_tokens[active_indices] = constrained_tokens.to(dtype=next_tokens.dtype)
+        return next_tokens, changed_rows
+
     def _get_logit_bias_scores(self, hidden_states):
         """Project boundary hidden states to tool-selection logits."""
         if self.logit_bias_head is None:
@@ -538,7 +612,7 @@ class FunctionCallingModel(nn.Module):
         top_p=0.9,
         do_sample=False,
     ):
-        """Replace base-LM tool triggers with auxiliary-head tool predictions."""
+        """Replace base-LM tool triggers with tool-head predictions."""
         if self.logit_bias_head is None or not active_decision_rows.any():
             return next_tokens
         if hidden_states is None:
@@ -652,12 +726,23 @@ class FunctionCallingModel(nn.Module):
         return_last_hidden_state=False,
     ):
         """Run one cached generation step and return only the newest position outputs."""
-        outputs, final_hidden_states = self._forward_with_captured_final_hidden_states(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=True,
-        )
+        if return_last_hidden_state:
+            outputs, final_hidden_states = self._forward_with_captured_final_hidden_states(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+        else:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+            final_hidden_states = None
 
         next_logits = outputs.logits[:, -1, :]
         last_hidden_states = None
@@ -688,6 +773,9 @@ class FunctionCallingModel(nn.Module):
         do_sample=False,
         use_logit_bias=None,
         use_tool_head_replacement=None,
+        use_eoc=None,
+        use_memory_bank_constraint=None,
+        memory_bank_probability_threshold=None,
     ):
         """Generate complete sequence: predict tool, then generate function call"""
         self.eval()
@@ -697,11 +785,35 @@ class FunctionCallingModel(nn.Module):
             if use_tool_head_replacement is None
             else use_tool_head_replacement
         )
+        resolved_use_eoc = self.use_eoc if use_eoc is None else bool(use_eoc)
+        resolved_use_memory_bank_constraint = (
+            self.use_memory_bank_constraint
+            if use_memory_bank_constraint is None
+            else bool(use_memory_bank_constraint)
+        )
+        resolved_memory_bank_probability_threshold = (
+            self.memory_bank_probability_threshold
+            if memory_bank_probability_threshold is None
+            else float(memory_bank_probability_threshold)
+        )
         if resolved_use_logit_bias and resolved_use_tool_head_replacement:
             raise ValueError("use_logit_bias and use_tool_head_replacement are decode-time alternatives")
+        if resolved_use_memory_bank_constraint and resolved_use_tool_head_replacement:
+            raise ValueError(
+                "memory-bank constraint cannot be combined with tool-head replacement"
+            )
+        if not 0.0 <= resolved_memory_bank_probability_threshold <= 1.0:
+            raise ValueError("memory_bank_probability_threshold must be between 0 and 1")
+        end_token_id = tokenizer.eos_token_id
+        if resolved_use_memory_bank_constraint and end_token_id is None:
+            raise ValueError("memory-bank constraint requires tokenizer.eos_token_id")
         
-        with torch.no_grad():
-            if not resolved_use_logit_bias and not resolved_use_tool_head_replacement:
+        with torch.inference_mode():
+            if (
+                not resolved_use_logit_bias
+                and not resolved_use_tool_head_replacement
+                and not resolved_use_memory_bank_constraint
+            ):
                 # Use native generation - our overrides make the custom embeddings/logits transparent
                 generated = self.model.generate(
                     input_ids=user_tokens,
@@ -720,6 +832,13 @@ class FunctionCallingModel(nn.Module):
             input_ids = user_tokens.clone()
             attention_mask = user_mask.clone()
             finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            constraint_armed = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            constraint_trigger_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+            constraint_initial_trigger_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+            constraint_transition_trigger_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+            constraint_changed_token_count = torch.zeros(batch_size, dtype=torch.long, device=device)
+            constraint_memory_mass_sum = torch.zeros(batch_size, dtype=torch.float32, device=device)
+            constraint_entropy_sum = torch.zeros(batch_size, dtype=torch.float32, device=device)
             step_input_ids = user_tokens
             past_key_values = None
 
@@ -729,6 +848,7 @@ class FunctionCallingModel(nn.Module):
                     batch_size=batch_size,
                     device=device,
                     step=step,
+                    use_eoc=resolved_use_eoc,
                 )
                 active_decision_rows = decision_context & ~finished
                 need_last_hidden_state = bool(
@@ -741,7 +861,6 @@ class FunctionCallingModel(nn.Module):
                     past_key_values=past_key_values,
                     return_last_hidden_state=need_last_hidden_state,
                 )
-                next_logits = next_logits.clone()
 
                 selection_logits = next_logits
                 if resolved_use_logit_bias and active_decision_rows.any():
@@ -750,12 +869,68 @@ class FunctionCallingModel(nn.Module):
                         hidden_states=last_hidden_states,
                         active_decision_rows=active_decision_rows,
                     )
-                next_tokens = self._sample_next_tokens(
-                    selection_logits,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample
-                )
+                constraint_rows = torch.zeros(batch_size, dtype=torch.bool, device=device)
+                memory_mass = torch.zeros(batch_size, dtype=torch.float32, device=device)
+                normalized_entropy = torch.zeros(batch_size, dtype=torch.float32, device=device)
+                if resolved_use_memory_bank_constraint:
+                    if step == 0:
+                        constraint_rows = ~finished
+                    elif resolved_use_eoc:
+                        constraint_rows = decision_context & ~finished
+                    else:
+                        eligible_rows = constraint_armed & ~finished
+                        if eligible_rows.any():
+                            eligible_indices = eligible_rows.nonzero(as_tuple=False).squeeze(-1)
+                            eligible_mass, eligible_entropy = self._compute_memory_bank_statistics(
+                                selection_logits[eligible_indices]
+                            )
+                            memory_mass[eligible_indices] = eligible_mass
+                            normalized_entropy[eligible_indices] = eligible_entropy
+                        constraint_rows = eligible_rows & (
+                            memory_mass >= resolved_memory_bank_probability_threshold
+                        )
+
+                    if constraint_rows.any() and (step == 0 or resolved_use_eoc):
+                        constraint_indices = constraint_rows.nonzero(as_tuple=False).squeeze(-1)
+                        trigger_mass, trigger_entropy = self._compute_memory_bank_statistics(
+                            selection_logits[constraint_indices]
+                        )
+                        memory_mass[constraint_indices] = trigger_mass
+                        normalized_entropy[constraint_indices] = trigger_entropy
+
+                if resolved_use_memory_bank_constraint:
+                    next_tokens, changed_rows = self._select_with_memory_bank_constraint(
+                        logits=selection_logits,
+                        active_rows=constraint_rows,
+                        end_token_id=end_token_id,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample,
+                    )
+                    trigger_values = constraint_rows.to(dtype=torch.long)
+                    constraint_trigger_count += trigger_values
+                    if step == 0:
+                        constraint_initial_trigger_count += trigger_values
+                    else:
+                        constraint_transition_trigger_count += trigger_values
+                    constraint_changed_token_count += changed_rows.to(dtype=torch.long)
+                    constraint_memory_mass_sum += torch.where(
+                        constraint_rows,
+                        memory_mass,
+                        torch.zeros_like(memory_mass),
+                    )
+                    constraint_entropy_sum += torch.where(
+                        constraint_rows,
+                        normalized_entropy,
+                        torch.zeros_like(normalized_entropy),
+                    )
+                else:
+                    next_tokens = self._sample_next_tokens(
+                        selection_logits,
+                        temperature=temperature,
+                        top_p=top_p,
+                        do_sample=do_sample
+                    )
                 if resolved_use_tool_head_replacement and active_decision_rows.any():
                     next_tokens = self._replace_tool_triggers_with_head_predictions(
                         next_tokens=next_tokens,
@@ -767,15 +942,66 @@ class FunctionCallingModel(nn.Module):
                     )
                 next_tokens = next_tokens.masked_fill(finished, tokenizer.eos_token_id)
 
+                if resolved_use_memory_bank_constraint and not resolved_use_eoc:
+                    tool_token_ids = self._get_tool_reserved_token_ids_tensor(device)
+                    selected_tool = (next_tokens[:, None] == tool_token_ids[None, :]).any(dim=-1)
+                    selected_end = next_tokens == end_token_id
+                    constraint_armed = torch.where(
+                        selected_tool,
+                        torch.zeros_like(constraint_armed),
+                        constraint_armed | (~selected_end & ~finished),
+                    )
+
                 input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=-1)
-                attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device)], dim=-1)
+                attention_mask = torch.cat(
+                    [
+                        attention_mask,
+                        torch.ones(
+                            batch_size,
+                            1,
+                            dtype=attention_mask.dtype,
+                            device=device,
+                        ),
+                    ],
+                    dim=-1,
+                )
                 finished = finished | (next_tokens == tokenizer.eos_token_id)
                 if finished.all():
                     break
                 step_input_ids = next_tokens.unsqueeze(-1)
             
-            # Parse the generated sequences
-            return self._parse_generated_sequences(input_ids, user_tokens, tokenizer)
+            results = self._parse_generated_sequences(input_ids, user_tokens, tokenizer)
+            if resolved_use_memory_bank_constraint:
+                mode = "eoc_boundary" if resolved_use_eoc else "probability_threshold"
+                for index, result in enumerate(results):
+                    trigger_count = int(constraint_trigger_count[index].item())
+                    result["memory_bank_constraint"] = {
+                        "enabled": True,
+                        "mode": mode,
+                        "probability_threshold": resolved_memory_bank_probability_threshold,
+                        "end_token_id": int(end_token_id),
+                        "trigger_count": trigger_count,
+                        "initial_trigger_count": int(
+                            constraint_initial_trigger_count[index].item()
+                        ),
+                        "transition_trigger_count": int(
+                            constraint_transition_trigger_count[index].item()
+                        ),
+                        "changed_token_count": int(
+                            constraint_changed_token_count[index].item()
+                        ),
+                        "mean_trigger_memory_mass": (
+                            float(constraint_memory_mass_sum[index].item()) / trigger_count
+                            if trigger_count
+                            else 0.0
+                        ),
+                        "mean_trigger_normalized_entropy": (
+                            float(constraint_entropy_sum[index].item()) / trigger_count
+                            if trigger_count
+                            else 0.0
+                        ),
+                    }
+            return results
 
     def generate_with_ground_truth_tools(
         self,

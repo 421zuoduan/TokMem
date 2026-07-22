@@ -1,16 +1,23 @@
 # Rebuttal 大纲
 
+## 当前最高优先级
+
+**当前最重要的是以下两项，优先级高于其他未完成实验：**
+
+1. **与 tool-calling 方法对比**：在统一的数据和评测口径下，将 TokMem/TapMem 与现有 tool-calling 方法进行对比。
+2. **Memory token 增量更新**：在已训练的 memory bank 中新增 memory token，实现增量更新，并评估新旧 memory token 的路由效果及对原有能力的影响。
+
 ## 实验
 
 方法本身:
 
-1. [ ] 对比实验: 不用额外的 adapter, memory token 解码时直接约束在 memory bank 里, 对比有 adapter 的效果
-2. [ ] 对比实验: adapter logits 和 lm head logits 直接相加的实验, 不对 adapter logits 做额外操作
-3. [ ] 对比实验: AR loss 不影响 adapter, adapter 只受到 routing loss 更新
+1. [x] 对比实验: 不用额外的 adapter, memory token 解码时直接约束在 memory bank 里, 对比有 adapter 的效果
+2. **[不做]** 对比实验: adapter logits 和 lm head logits 直接相加的实验, 不对 adapter logits 做额外操作
+3. [x] 对比实验: AR loss 不影响 adapter, adapter 只受到 routing loss 更新
 
 实验设置
 
-1. [x] 使用合成数据集: 尝试在 TaskBench, APIGen, $\tau$-bench, StableToolBench, Berkeley Function Calling Leaderboard 上进行实验
+1. [x] 使用合成数据集: 已完成 TaskBench 和 TrajectBench 实验；**[不做]** 后续不再扩展 $\tau$-bench、StableToolBench 和 Berkeley Function Calling Leaderboard
 2. [x] 泛化性实验: 在训练上只跑过 4call 的模型在 10call 上测试
 3. [x] EOC 边界与作用验证
     1. [x] 在自由生成结果上计算 EOC-only 的 \<EOC\> F1, 证明显式边界可以被准确预测
@@ -20,19 +27,31 @@
     1. [x] 汇报下 procedure 格式错误的比例, 证明去掉格式错误的 procedure, 我们的方法依然减少了 transition error;
     2. [ ] 考虑到现有统计方法在格式错误时会判定参数生成错误, 实际存在格式错误但参数生成正确的情况, 如果上面的结果无法说明, 拿大模型逐个 procedure 分析再汇报一个结果
 5. [x] TokMem 的实验里, procedure 顺序错了但 set 一样仍会算是对的, 统计下这类错误的比例
-6. [ ] 消融实验: adapter 使用 linear 和 mlp 两种结构的效果对比
-7. [ ] 修正效果对比: adapter 修正 memory token logits 前后词表分布的熵对比和修正准确率对比
-8. [ ] memory 更新: 在已经训练好的 memory bank 基础上, 加入新的 memory token, 看原有 memory token 路由准确率的变化
+6. [x] 消融实验: adapter 使用 linear 和 mlp 两种结构的效果对比
+7. [ ] memory 更新: 在已经训练好的 memory bank 基础上, 加入新的 memory token, 看原有 memory token 路由准确率的变化, 看 TCRA 更新是否只需要新加列
+8. [ ] 混合回答设置实验: 将数据集改为 procedure 与普通文本混合的设置，使样本回答可包含 procedure 和普通文本，而非所有回答都只由 procedure 组成。
+9.  [ ] 对比方法
 
 额外分析:
 
 1. [x] 错误类型与 transition 分析：按下文最终口径对 TokMem 和 TapMem 重新计算六类样本级互斥错误，以及两个 later-step mismatch 指标；EOC 边界实验额外复用相同口径评测 EOC-only。
-2. [ ]
+2. [ ] 修正效果对比: adapter 修正 memory token logits 前后词表分布的熵对比和修正准确率对比
 
 
 无法回应的质疑:
 
 1. [ ] adapter 输出空间是 memory token + eoc token 的词表空间, 效果会不会更好
+2. [ ] 参数量不匹配问题
+
+## 论文写作与表述问题
+
+本节集中记录论文写作中需要澄清或修正的表述问题，并与补充实验任务分开管理。修订时需要核对正文、公式、伪代码和实际实现是否一致，同时确认问题是否影响方法理解、实验设置或结果解释。
+
+1. [ ] 修正论文伪代码的表述错误。
+   - token 表示错位, 现在伪代码的表示是当前 token 预测生成当前 token 的 embedding
+2. [ ] 摘要里 "an LLM" 表述错误
+3. [ ] Explicit Termination Signals 出现的太少了, 摘要里说 ETS 和 TCRA, 但是正文里总是说 EOC 和 TCRA
+4. [ ] 把 y 定义成多个 procedure 相邻的形式有些狭隘了, procedure 不一定是一种互斥或原子化的行为, 所以 y 和 boundary 的表示都有可能被质疑
 
 ## Rebuttal 补充实验的最终口径
 
@@ -195,15 +214,73 @@ TRAJECT-Bench 也已经满足 rebuttal 需求。最终只使用学习率搜索�
 4. [x] 从 TokMem 和 TapMem prediction 计算错误分析主表的 `Later-step mismatch rate (all)` 和 `Later-step mismatch rate (first-correct)`。
 5. [x] 按已选学习率汇总 TaskBench 1B/8B 最终表。
 6. [x] 按已选学习率汇总 TRAJECT-Bench 1B/8B 最终表。
+7. [x] 完成 Llama-1B/8B APIGen 4-call 的 routing-only adapter 对照：训练和推理时保留 logit train-add，但阻断 AR loss 对 adapter 的梯度。
 
-## 尚未开展的 Rebuttal 实验
+### Llama-1B APIGen 4-call：routing-only adapter
 
-1. [ ] 去掉额外 routing adapter，memory-token 解码时直接约束在 memory bank 中，与 TapMem 对比。
-2. [ ] adapter logits 与 LM-head logits 直接相加、不对 adapter logits 做额外处理的对比。
-3. [ ] 让 AR loss 不更新 adapter，adapter 只接收 routing loss 的对比。
-4. [ ] 参数量匹配的控制实验，验证无 adaptation 时的改善主要来自 transition-aware 机制，而不是参数量增加。
-5. [ ] Linear adapter 与 MLP adapter 的结构消融。
-6. [ ] adapter 修正前后 memory-token logit 分布的熵和路由准确率对比。
-7. [ ] 在已训练 memory bank 中加入新 memory token，评估原有 memory token 的路由准确率变化。
-8. [ ] 将 adapter 输出空间限制为 memory tokens + EOC token 的对比。
-9. [ ] 如果仍保留原始外部 benchmark 计划，补充 $\tau$-bench、StableToolBench 和 BFCL 实验。
+三种方法使用相同的 tools 51–100 数据集。下表均为 seed 42 的 3 次独立运行均值，括号内为样本标准差；只保留 rebuttal 使用的两个 F1 指标。
+
+| Method | Tool F1 | Arguments F1 |
+| --- | ---: | ---: |
+| TokMem | 0.8087 (0.0023) | 0.6594 (0.0101) |
+| TapMem | **0.8969 (0.0084)** | **0.7426 (0.0188)** |
+| TapMem，adapter 仅由 routing loss 更新 | 0.8805 (0.0109) | 0.7169 (0.0067) |
+
+### Llama-8B APIGen 4-call：routing-only adapter
+
+三种方法使用相同的 tools 51–100 数据集。下表均为 seed 42 的 3 次运行均值，括号内为样本标准差；只保留 rebuttal 使用的两个 F1 指标。
+
+| Method | Tool F1 | Arguments F1 |
+| --- | ---: | ---: |
+| TokMem | 0.8413 (0.0000) | 0.7121 (0.0000) |
+| TapMem | **0.8666 (0.0000)** | 0.7473 (0.0000) |
+| TapMem，adapter 仅由 routing loss 更新 | 0.8621 (0.0058) | **0.7616 (0.0015)** |
+
+结果解释：routing loss 只优化分类器自身的 $-\log p(y\mid h)$，但实际解码依赖 adapter prior 与 LM logits 的融合结果 $z_{\mathrm{final}}$。纯分类损失会推动 adapter 给出更高置信度；当测试上下文中的分类判断错误时，较大的 bias 可能覆盖 LM 原本正确的工具排序。相比之下，TapMem 中来自 AR loss 的梯度会使 adapter 学习针对当前 LM logits 的残差修正，并同时校准其置信度与影响强度。因此，routing-only adapter 即使更接近纯分类器，其融合后的 Tool F1 仍可能略低于 TapMem。当前差值仅为 $-0.0045$，小于 routing-only 结果的运行标准差 $0.0058$，该机制解释仍需结合 adapter-only routing accuracy、融合前后 correct-to-wrong / wrong-to-correct 翻转和 bias scale/temperature 校准实验进一步验证。
+
+## Rebuttal 实验进度
+
+1. [x] 去掉额外 routing adapter，memory-token 解码时直接约束在 memory bank 中，与 TapMem 对比。
+   - Llama-1B 与 Llama-8B 均已完成三组评测：`TokMem + bank constraint` 使用完整词表归一化后的 memory-bank 总概率 `>= 0.5` 触发；`EOC-only + bank constraint` 在 assistant-start 和实际生成的 EOC 后触发；`TapMem + bank constraint` 在相同显式边界先融合 TCRA bias，再约束候选。三组候选均为 memory tokens + `tokenizer.eos_token_id`；EOC-only/TapMem 的 `0.5` 阈值仅记录诊断，不控制触发。
+
+### Llama-1B APIGen 4-call：memory-bank constraint
+
+tools 51–100、500 个 4-call 测试样本，greedy decoding，测试 batch size 8。下表均为 seed 42 的 3 个论文 checkpoint 的均值，括号内为样本标准差。
+
+| Method | Tool F1 | Arguments F1 |
+| --- | ---: | ---: |
+| TokMem | 0.8087 (0.0023) | 0.6594 (0.0101) |
+| TokMem + bank constraint | 0.8112 (0.0034) | 0.6624 (0.0070) |
+| EOC-only | 0.8509 (0.0066) | 0.7126 (0.0113) |
+| EOC-only + bank constraint | 0.8522 (0.0052) | 0.7157 (0.0138) |
+| TapMem | **0.8969 (0.0084)** | **0.7426 (0.0188)** |
+| TapMem + bank constraint | 0.8950 (0.0075) | 0.7392 (0.0167) |
+
+TokMem + constraint 平均每个样本触发 3.0487 次，changed-trigger rate 为 0.0007；EOC-only + constraint 为 3.4893/0.0010；TapMem + constraint 为 3.5413/0.0004。TapMem 加约束后的 Tool/Arguments F1 相对原方法变化 `-0.0019/-0.0034`，小于运行间标准差。说明 greedy 解码在这些触发位置原本几乎总会把 memory token 或 EOS 作为融合分布的 top-1，hard constraint 对 TapMem 也没有额外增益。
+
+### Llama-8B APIGen 4-call：memory-bank constraint
+
+tools 51–100、500 个 4-call 测试样本，greedy decoding，测试 batch size 1。下表按现有 3 个 trial 条目取均值，括号内为样本标准差。
+
+| Method | Tool F1 | Arguments F1 |
+| --- | ---: | ---: |
+| TokMem | 0.8413 (0.0000) | 0.7121 (0.0000) |
+| TokMem + bank constraint | 0.8436 (0.0000) | 0.7109 (0.0000) |
+| EOC-only | 0.8578 (0.0000) | 0.7375 (0.0000) |
+| EOC-only + bank constraint | 0.8614 (0.0000) | 0.7428 (0.0000) |
+| TapMem | **0.8666 (0.0000)** | 0.7473 (0.0000) |
+| TapMem + bank constraint | 0.8652 (0.0000) | **0.7515 (0.0000)** |
+
+TokMem + constraint 平均每个样本触发 2.7620 次，changed-trigger rate 为 0.0007；EOC-only + constraint 为 3.5540/0.0011；TapMem + constraint 为 3.5900/0.0022。相对无约束基线，TokMem 的 Tool/Arguments F1 变化为 `+0.0023/-0.0012`，EOC-only 为 `+0.0037/+0.0053`，TapMem 为 `-0.0014/+0.0042`。所有变化都很小且没有一致方向，说明 hard constraint 不是主要性能来源。
+
+注意：Llama-8B 三种 constrained 方法各自的 3 个 trial 条目均具有完全相同的 checkpoint fingerprint，所以相应结果相同且标准差为 0；这里按用户要求计算了均值，但不能将其视为 3 个独立训练重复。
+
+2. **[不做]** adapter logits 与 LM-head logits 直接相加、不对 adapter logits 做额外处理的对比。
+3. [ ] 参数量匹配的控制实验，验证无 adaptation 时的改善主要来自 transition-aware 机制，而不是参数量增加。
+   - 使用 AR-only head 作为参数量匹配对照：保留与 TapMem 完全相同的 linear adapter、logit train-add 和推理时 logit fusion，将 routing-loss weight 设为 0，使 adapter 仅由正常 AR loss 更新。AR-only head 与 TapMem 参数量一致，两者的性能差异用于隔离显式 routing supervision 的贡献。
+4. [x] Linear adapter 与 MLP adapter 的结构消融。
+5. [ ] adapter 修正前后 memory-token logit 分布的熵和路由准确率对比。
+6. [ ] 在已训练 memory bank 中加入新 memory token，评估原有 memory token 的路由准确率变化。
+7. [ ] 将 adapter 输出空间限制为 memory tokens + EOS token 的对比。
+8. **[不做]** 原始外部 benchmark 计划：$\tau$-bench、StableToolBench 和 BFCL 实验后续不再考虑。
+9. [ ] 混合回答设置实验：将数据集改为 procedure 与普通文本混合的设置，使样本回答可包含 procedure 和普通文本，而非所有回答都只由 procedure 组成。
