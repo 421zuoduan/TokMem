@@ -70,6 +70,11 @@ Update docs in the same change when behavior affects:
 
 Use `docs/compositional/` or `docs/atomic/` for track-specific notes, nearby `README.md` files for stable usage, and `results/README.md` plus per-run `run_summary.md` for archived experiment records.
 
+Rebuttal 实验文档的口径：
+
+- `results/rebuttal/rebuttal-needs-exps.md` 记录论文出分后，针对评审意见补充开展的实验。
+- `results/rebuttal/summary.md` 记录论文出分前自行设计和完成的实验。
+
 ## Experiment Archival
 
 Archive successful runs under `results/<run_name>/` with the available logs, checkpoints, script snapshot, caches, and a concise Chinese `run_summary.md`.

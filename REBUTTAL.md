@@ -200,9 +200,16 @@ TaskBench 已经满足 rebuttal 需求，不再扩展 batch size、logit-bias sc
 TRAJECT-Bench 也已经满足 rebuttal 需求。最终只使用学习率搜索结果，每个模型规模内 TokMem 和 TapMem 使用相同学习率和 seed 42，重复运行 3 次。最终汇报：
 
 - Llama-1B：学习率 `8e-3`。
-- Llama-8B：学习率 `8e-3`。
+- Llama-8B：学习率 `7e-3`。
 
 两个模型规模上，TapMem 的 Tool F1 和 Argument F1 都高于 TokMem。主表只汇报 Tool F1 和 Argument F1，两者含义与上述 TaskBench 定义相同；不再使用早期单次运行的归档结果作为主表数据。
+
+| Model | LR | TokMem Tool F1 | TokMem Argument F1 | TapMem Tool F1 | TapMem Argument F1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Llama-1B | `8e-3` | 0.5864 | 0.2085 | 0.7863 | 0.4210 |
+| Llama-8B | `7e-3` | 0.6847 | 0.3077 | 0.8534 | 0.5565 |
+
+Llama-8B 的 `7e-3` 结果来自 2026-07-24 的补充学习率搜索。相对旧的共同学习率 `8e-3`，TapMem 的 Tool F1 / Argument F1 分别提高 `0.0322 / 0.0523`，TapMem 相对 TokMem 的差值扩大到 `0.1687 / 0.2488`。TokMem 的 Argument F1 提高 `0.0231`，Tool F1 小幅变化 `-0.0044`。
 
 ## 已完成的 Rebuttal 实验
 

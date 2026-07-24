@@ -31,6 +31,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 .cache/
+/tmp/
 *.log
 
 

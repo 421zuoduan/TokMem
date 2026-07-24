@@ -1,0 +1,113 @@
+{
+  "source": "paper_tapmem.pdf, Table 1",
+  "seed": 42,
+  "unit": "percent",
+  "note": "Published values are rounded to one decimal and each Avg is the overall run metric, not an arithmetic mean of call-count columns.",
+  "rows": [
+    {
+      "model": "llama1b",
+      "method": "icl",
+      "metrics": {"tool_2": 2.0, "tool_3": 0.9, "tool_4": 0.0, "tool_avg": 1.4, "argument_2": 1.2, "argument_3": 0.4, "argument_4": 0.0, "argument_avg": 0.8}
+    },
+    {
+      "model": "llama1b",
+      "method": "rag",
+      "metrics": {"tool_2": 15.5, "tool_3": 3.6, "tool_4": 0.0, "tool_avg": 9.0, "argument_2": 9.7, "argument_3": 2.0, "argument_4": 0.0, "argument_avg": 5.5}
+    },
+    {
+      "model": "llama1b",
+      "method": "tokmem",
+      "metrics": {"tool_2": 82.0, "tool_3": 80.9, "tool_4": 76.0, "tool_avg": 81.2, "argument_2": 67.6, "argument_3": 66.0, "argument_4": 55.7, "argument_avg": 66.2}
+    },
+    {
+      "model": "llama1b",
+      "method": "tapmem",
+      "metrics": {"tool_2": 89.8, "tool_3": 90.3, "tool_4": 83.3, "tool_avg": 89.7, "argument_2": 74.8, "argument_3": 74.6, "argument_4": 65.6, "argument_avg": 74.3}
+    },
+    {
+      "model": "llama1b",
+      "method": "lora",
+      "metrics": {"tool_2": 82.2, "tool_3": 80.3, "tool_4": 74.7, "tool_avg": 80.9, "argument_2": 79.3, "argument_3": 78.0, "argument_4": 65.0, "argument_avg": 78.0}
+    },
+    {
+      "model": "llama1b",
+      "method": "adap_tokmem",
+      "metrics": {"tool_2": 97.9, "tool_3": 98.3, "tool_4": 94.9, "tool_avg": 97.9, "argument_2": 83.3, "argument_3": 83.6, "argument_4": 75.4, "argument_avg": 83.1}
+    },
+    {
+      "model": "llama1b",
+      "method": "adap_tapmem",
+      "metrics": {"tool_2": 98.1, "tool_3": 98.2, "tool_4": 97.3, "tool_avg": 98.2, "argument_2": 85.9, "argument_3": 84.6, "argument_4": 77.9, "argument_avg": 84.9}
+    },
+    {
+      "model": "llama3b",
+      "method": "icl",
+      "metrics": {"tool_2": 59.5, "tool_3": 61.2, "tool_4": 56.9, "tool_avg": 60.2, "argument_2": 48.7, "argument_3": 49.4, "argument_4": 45.2, "argument_avg": 48.9}
+    },
+    {
+      "model": "llama3b",
+      "method": "rag",
+      "metrics": {"tool_2": 80.2, "tool_3": 77.0, "tool_4": 81.5, "tool_avg": 78.7, "argument_2": 55.2, "argument_3": 52.8, "argument_4": 47.3, "argument_avg": 53.7}
+    },
+    {
+      "model": "llama3b",
+      "method": "tokmem",
+      "metrics": {"tool_2": 77.6, "tool_3": 77.7, "tool_4": 74.0, "tool_avg": 77.4, "argument_2": 62.9, "argument_3": 61.7, "argument_4": 56.6, "argument_avg": 62.0}
+    },
+    {
+      "model": "llama3b",
+      "method": "tapmem",
+      "metrics": {"tool_2": 81.0, "tool_3": 83.6, "tool_4": 82.9, "tool_avg": 82.4, "argument_2": 63.4, "argument_3": 67.7, "argument_4": 64.6, "argument_avg": 65.5}
+    },
+    {
+      "model": "llama3b",
+      "method": "lora",
+      "metrics": {"tool_2": 97.3, "tool_3": 98.7, "tool_4": 92.4, "tool_avg": 97.7, "argument_2": 87.9, "argument_3": 87.3, "argument_4": 77.8, "argument_avg": 87.1}
+    },
+    {
+      "model": "llama3b",
+      "method": "adap_tokmem",
+      "metrics": {"tool_2": 99.6, "tool_3": 99.4, "tool_4": 97.2, "tool_avg": 99.4, "argument_2": 88.2, "argument_3": 86.6, "argument_4": 80.0, "argument_avg": 87.0}
+    },
+    {
+      "model": "llama3b",
+      "method": "adap_tapmem",
+      "metrics": {"tool_2": 99.1, "tool_3": 99.4, "tool_4": 100.0, "tool_avg": 99.3, "argument_2": 87.4, "argument_3": 88.3, "argument_4": 82.6, "argument_avg": 87.6}
+    },
+    {
+      "model": "llama8b",
+      "method": "icl",
+      "metrics": {"tool_2": 57.7, "tool_3": 63.6, "tool_4": 52.3, "tool_avg": 60.3, "argument_2": 49.6, "argument_3": 55.2, "argument_4": 49.7, "argument_avg": 52.3}
+    },
+    {
+      "model": "llama8b",
+      "method": "rag",
+      "metrics": {"tool_2": 79.0, "tool_3": 78.2, "tool_4": 74.1, "tool_avg": 78.4, "argument_2": 60.1, "argument_3": 60.7, "argument_4": 55.1, "argument_avg": 60.1}
+    },
+    {
+      "model": "llama8b",
+      "method": "tokmem",
+      "metrics": {"tool_2": 84.3, "tool_3": 85.1, "tool_4": 72.7, "tool_avg": 84.1, "argument_2": 72.7, "argument_3": 70.7, "argument_4": 62.5, "argument_avg": 71.2}
+    },
+    {
+      "model": "llama8b",
+      "method": "tapmem",
+      "metrics": {"tool_2": 87.9, "tool_3": 86.4, "tool_4": 78.5, "tool_avg": 86.7, "argument_2": 76.5, "argument_3": 73.7, "argument_4": 68.3, "argument_avg": 74.7}
+    },
+    {
+      "model": "llama8b",
+      "method": "lora",
+      "metrics": {"tool_2": 97.1, "tool_3": 98.2, "tool_4": 95.9, "tool_avg": 97.6, "argument_2": 88.8, "argument_3": 87.3, "argument_4": 84.9, "argument_avg": 87.9}
+    },
+    {
+      "model": "llama8b",
+      "method": "adap_tokmem",
+      "metrics": {"tool_2": 97.8, "tool_3": 98.7, "tool_4": 98.1, "tool_avg": 98.2, "argument_2": 87.1, "argument_3": 87.6, "argument_4": 82.3, "argument_avg": 87.1}
+    },
+    {
+      "model": "llama8b",
+      "method": "adap_tapmem",
+      "metrics": {"tool_2": 99.5, "tool_3": 98.9, "tool_4": 95.7, "tool_avg": 99.0, "argument_2": 87.9, "argument_3": 88.0, "argument_4": 79.6, "argument_avg": 87.5}
+    }
+  ]
+}

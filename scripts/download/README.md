@@ -87,4 +87,39 @@ bash run_n_rounds_main.sh
 python main_sequential.py
 ```
 
+## 5. 下载 Toolathlon 和 MCP-Atlas
+
+下载 Toolathlon-Verified 的 108 个公开任务、配套输入与评测资源，以及 MCP-Atlas
+的 500 条公开任务：
+
+```bash
+python scripts/download/download_tool_use_benchmarks.py
+```
+
+默认输出：
+
+```text
+datasets/toolathlon/tasks/finalpool/
+datasets/toolathlon/DOWNLOAD_INFO.json
+datasets/mcp-atlas/MCP-Atlas.parquet
+datasets/mcp-atlas/DOWNLOAD_INFO.json
+```
+
+下载器固定 Toolathlon 和 MCP-Atlas 的官方发布提交，支持断点续传，并分别用
+Git blob SHA-1 和官方 SHA-256 校验文件。若只下载其中一个 benchmark：
+
+```bash
+python scripts/download/download_tool_use_benchmarks.py --benchmark toolathlon
+python scripts/download/download_tool_use_benchmarks.py --benchmark mcp-atlas
+```
+
+如果当前机器无法连接 `raw.githubusercontent.com`，可以指定 GitHub 文件镜像；
+下载器仍会用官方文件树中的 Git blob SHA-1 校验每个文件：
+
+```bash
+python scripts/download/download_tool_use_benchmarks.py \
+  --benchmark toolathlon \
+  --github-raw-prefix https://ghfast.top/https://raw.githubusercontent.com
+```
+
 开始。
