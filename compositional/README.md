@@ -160,6 +160,7 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_loss_weight_ablation.sh`
 - `scripts/compositional/qwen_0_5b/tokmem_eoc_logit_bias_scale_ablation_qwen_0_5b_4calls_seed42_3x.sh`
 - `scripts/compositional/qwen_9b/tokmem_eoc_logit_bias_qwen_9b.sh`
+- `scripts/compositional/qwen35/run_qwen35_table1_rebuttal.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
 
@@ -168,6 +169,14 @@ Single-round maintained launchers for tools `51-100`:
 `run_memory_bank_constraint_eval.sh` performs eval-only inference on the paper TokMem checkpoints and matched EOC-only checkpoints. It produces `tokmem_bank_constraint` and `eoc_only_bank_constraint` predictions without retraining, defaults to threshold `0.5`, and writes `manifest.json`, per-trial JSONL, `summary.json`, and `summary.md` under `compositional/rebuttal/results/memory_bank_constraint/`. Use `--models llama1b --trial-ids 1 --limit 8` for a narrow smoke run.
 
 The Qwen-0.5B scale-ablation launcher runs `tokmem_eoc_logit_bias` on `models/Qwen2.5-0.5B-Instruct` with tools `51-100`, 4-call data, `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=64`, `max_length=512`, and `lr=5e-3`. It fixes `seed=42`, runs three trials per scale, assigns `logit_bias_scale=0.1` to GPU `5`, `0.5` to GPU `6`, and `2` to GPU `7`, then writes `manifest.tsv`, `summary.md`, and `results.json` under `results/compositional/<suite_name>/`.
+
+`scripts/compositional/qwen35/run_qwen35_table1_rebuttal.sh` runs the complete
+seven-method compositional Table 1 matrix for Qwen3.5-9B followed by
+Qwen3.5-4B. Each backbone first performs an independent seed-42 TapMem
+learning-rate sweep, then runs seeds 40/41/42 with the selected learning rate.
+The scheduler dynamically consumes all empty GPUs from the requested pool,
+does not save full-model sweep checkpoints, and writes the final three-seed
+mean and sample standard deviation with Bash, `jq`, and `awk`.
 
 Qwen3.5 uses a dedicated `Qwen35FunctionCallingModel`, selected internally by
 `backbone_registry.py` when the local Hugging Face config reports
