@@ -121,7 +121,7 @@ declare -A MODEL_PATHS=(
 )
 declare -A TOKMEM_BATCH_SIZES=(
     [qwen9b]=4
-    [qwen4b]=8
+    [qwen4b]=4
 )
 declare -A TOKMEM_EVAL_BATCH_SIZES=(
     [qwen9b]=16
@@ -137,7 +137,7 @@ declare -A LORA_EVAL_BATCH_SIZES=(
 )
 declare -A ADAPT_BATCH_SIZES=(
     [qwen9b]="2,4"
-    [qwen4b]="4,8"
+    [qwen4b]="4,4"
 )
 declare -A ICL_BATCH_SIZES=(
     [qwen9b]=4
