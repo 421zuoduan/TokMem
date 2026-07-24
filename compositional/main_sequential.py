@@ -15,7 +15,8 @@ from transformers import AutoTokenizer
 import json
 import logging
 
-from model import FunctionCallingModel, print_model_info
+from backbone_registry import resolve_function_calling_model_class
+from model import print_model_info
 from dataset import create_native_dataloader, discover_available_tools
 from training import (
     demo_native_function_calling,
@@ -678,8 +679,9 @@ def main():
         if model is None:
             # First round - create new model with ALL tool slots and actual tool names
             print(f"Initializing model with {total_tools} total tool slots...")
+            model_class = resolve_function_calling_model_class(args.model_name)
             model_kwargs = filter_supported_kwargs(
-                FunctionCallingModel,
+                model_class,
                 model_name=args.model_name,
                 num_tools=total_tools,  # Initialize with ALL tools
                 tool_names=all_tool_names,  # Use actual discovered tool names
@@ -696,7 +698,8 @@ def main():
                 logit_bias_network=args.logit_bias_network,
                 logit_bias_scale=args.logit_bias_scale,
             )
-            model = FunctionCallingModel(**model_kwargs)
+            model = model_class(**model_kwargs)
+            print(f"Backbone wrapper: {model_class.__name__}")
             print_model_info(model, f"Model with {total_tools} tool slots")
             print(f"Model initialized with all tool names: {model.tool_names[:5]}...{model.tool_names[-5:]}")
             

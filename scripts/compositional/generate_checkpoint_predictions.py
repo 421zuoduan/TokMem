@@ -17,7 +17,8 @@ COMPOSITIONAL_DIR = REPO_ROOT / "compositional"
 sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
 from eval import calculate_tool_metrics, compare_function_calls_advanced  # noqa: E402
-from model import FunctionCallingModel  # noqa: E402
+from backbone_registry import resolve_function_calling_model_class  # noqa: E402
+from backbone_prompting import format_user_assistant_prompt  # noqa: E402
 
 
 def parse_args():
@@ -64,7 +65,8 @@ def torch_dtype(name):
 def build_model(run_config, checkpoint, tokenizer, device, dtype):
     args = run_config["args"]
     tools = checkpoint["tools"]
-    model = FunctionCallingModel(
+    model_class = resolve_function_calling_model_class(args["model_name"])
+    model = model_class(
         model_name=args["model_name"],
         num_tools=len(tools),
         tool_names=tools,
@@ -84,9 +86,10 @@ def build_model(run_config, checkpoint, tokenizer, device, dtype):
 
 
 def generate_one(model, tokenizer, item, device, max_new_tokens):
-    user_text = (
-        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n"
-        f"{item['user_input']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+    user_text = format_user_assistant_prompt(
+        tokenizer,
+        item["user_input"],
+        model=model,
     )
     encoded = tokenizer(user_text, add_special_tokens=False, return_tensors="pt").to(device)
     with torch.no_grad():

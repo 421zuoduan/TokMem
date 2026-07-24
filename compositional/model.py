@@ -5,6 +5,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, TaskType
 import json
 
+from backbone_prompting import response_end_token_ids
+
 def build_logit_bias_head(hidden_size, num_tools, network_type):
     """Build the external prior head used to bias tool-token logits."""
     if network_type == "linear":
@@ -815,15 +817,29 @@ class FunctionCallingModel(nn.Module):
                 and not resolved_use_memory_bank_constraint
             ):
                 # Use native generation - our overrides make the custom embeddings/logits transparent
+                generate_kwargs = {
+                    "input_ids": user_tokens,
+                    "attention_mask": user_mask,
+                    "max_new_tokens": max_new_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "do_sample": do_sample,
+                    "pad_token_id": getattr(
+                        self,
+                        "_native_generation_pad_token_id",
+                        tokenizer.eos_token_id,
+                    ),
+                    "use_cache": True,
+                }
+                native_eos_token_id = getattr(
+                    self,
+                    "_native_generation_eos_token_id",
+                    None,
+                )
+                if native_eos_token_id is not None:
+                    generate_kwargs["eos_token_id"] = native_eos_token_id
                 generated = self.model.generate(
-                    input_ids=user_tokens,
-                    attention_mask=user_mask,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                    pad_token_id=tokenizer.eos_token_id,
-                    use_cache=True
+                    **generate_kwargs
                 )
                 return self._parse_generated_sequences(generated, user_tokens, tokenizer)
 
@@ -1204,10 +1220,13 @@ class FunctionCallingModel(nn.Module):
                     end_pos = tool_positions[idx + 1]['position']
                 if end_pos == len(valid_tokens):
                     # Last tool - function call goes to end of sequence (excluding EOT if present)
-                    eot_tokens = tokenizer('<|eot_id|>', add_special_tokens=False)['input_ids']
-                    if len(eot_tokens) > 0 and end_pos >= len(eot_tokens):
-                        if valid_tokens[-len(eot_tokens):] == eot_tokens:
-                            end_pos -= len(eot_tokens)
+                    end_tokens = response_end_token_ids(
+                        tokenizer,
+                        model=self,
+                    )
+                    if len(end_tokens) > 0 and end_pos >= len(end_tokens):
+                        if valid_tokens[-len(end_tokens):] == end_tokens:
+                            end_pos -= len(end_tokens)
                 
                 # Extract function call tokens
                 if start_pos < end_pos:

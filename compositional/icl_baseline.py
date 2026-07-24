@@ -16,6 +16,10 @@ import torch
 from typing import List, Dict, Any, Optional
 from contextlib import redirect_stdout
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from backbone_prompting import (
+    format_system_user_assistant_prompt,
+    qwen35_generation_token_ids,
+)
 from eval import (
     compare_function_calls_advanced,
     calculate_tool_metrics,
@@ -98,13 +102,15 @@ def format_tool_descriptions(tool_descriptions: Dict[str, Any]) -> str:
     """Format tool descriptions for the prompt using original JSON format"""
     return json.dumps(tool_descriptions, indent=2)
 
-def create_icl_prompt(user_query: str, tool_descriptions: Dict[str, Any]) -> str:
-    """Create the ICL prompt for the LLM"""
+def create_icl_prompt(
+    user_query: str,
+    tool_descriptions: Dict[str, Any],
+    tokenizer=None,
+    model_type=None,
+) -> str:
+    """Create the backbone-native ICL prompt for the LLM."""
     tools_text = format_tool_descriptions(tool_descriptions)
-    
-    prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-You are a function calling assistant. Given a user query and available tools, determine which functions to call and with what arguments.
+    system_content = f"""You are a function calling assistant. Given a user query and available tools, determine which functions to call and with what arguments.
 
 Available Tools:
 {tools_text}
@@ -120,14 +126,26 @@ Examples:
 - For multiple calls: 
 {{"contingency_table": [[100, 150], [50, 100]], "significance_level": 0.01}}
 {{"contingency_table": [[200, 100], [150, 50]], "significance_level": 0.01}}
-{{"numbers": [5.5, 2.2, 9.9, 3.3, 7.7], "descending": false}}
+{{"numbers": [5.5, 2.2, 9.9, 3.3, 7.7], "descending": false}}"""
+
+    legacy_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{system_content}
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {user_query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
-    return prompt
+    if tokenizer is None:
+        return legacy_prompt
+    return format_system_user_assistant_prompt(
+        tokenizer,
+        system_content,
+        user_query,
+        model_type=model_type,
+        legacy_prompt=legacy_prompt,
+    )
 
 class ICLBaseline:
     """In-Context Learning baseline using Hugging Face transformers"""
@@ -162,6 +180,7 @@ class ICLBaseline:
             device_map="auto" if device == "cuda" else None,
             local_files_only=True,
         )
+        self.model_type = self.model.config.model_type
         
         # Configure tokenizer for decoder-only models
         if self.tokenizer.pad_token is None:
@@ -185,16 +204,29 @@ class ICLBaseline:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
+        generate_kwargs = {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "do_sample": do_sample,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True,
+        }
+        qwen_token_ids = qwen35_generation_token_ids(
+            self.tokenizer,
+            model_type=self.model_type,
+        )
+        if qwen_token_ids is not None:
+            (
+                generate_kwargs["pad_token_id"],
+                generate_kwargs["eos_token_id"],
+            ) = qwen_token_ids
+
         with torch.no_grad():
             generated = self.model.generate(
-                input_ids=inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=do_sample,
-                pad_token_id=self.tokenizer.eos_token_id,
-                use_cache=True
+                **generate_kwargs
             )
         
         # Decode only the new tokens for each sequence
@@ -326,7 +358,12 @@ class ICLBaseline:
                 retrieval_recall = 1.0
                 retrieval_precision = len(target_tools) / len(tool_descriptions) if tool_descriptions else 0.0
             
-            prompt = create_icl_prompt(sample['user_input'], relevant_tools)
+            prompt = create_icl_prompt(
+                sample["user_input"],
+                relevant_tools,
+                tokenizer=self.tokenizer,
+                model_type=self.model_type,
+            )
             prompts.append(prompt)
             batch_info.append({
                 'target_tools': target_tools,

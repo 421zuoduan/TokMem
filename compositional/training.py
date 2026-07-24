@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from backbone_prompting import format_user_assistant_prompt
+
 
 LOSS_METRIC_ORDER = (
     "total_loss",
@@ -1170,9 +1172,10 @@ def demo_native_function_calling(
         print(f"Expected Call(s): {expected_calls}")
         print()
 
-        user_text = (
-            "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n"
-            f"{user_input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+        user_text = format_user_assistant_prompt(
+            tokenizer,
+            user_input,
+            model=model,
         )
         user_tokens = tokenizer(user_text, return_tensors="pt").to(device)
 

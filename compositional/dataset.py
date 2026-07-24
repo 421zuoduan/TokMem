@@ -6,6 +6,11 @@ import os
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoTokenizer
 
+from backbone_prompting import (
+    format_user_assistant_prompt,
+    response_end_token_ids,
+)
+
 def discover_available_tools(train_data_path="function_calling_train.json", test_data_path="function_calling_test.json"):   
     """Discover available tool names from split train/test files"""
 
@@ -94,7 +99,11 @@ class NativeFunctionCallingDataset(Dataset):
         # sys_text = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\nYou are a helpful function calling assistant.<|eot_id|>"
         
         # Create sequence: [User] [Reserved_Tool_Token1] [Function_Call1] [Reserved_Tool_Token2] [Function_Call2] ... <|eot_id|>
-        user_text = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{item['user_input']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"     
+        user_text = format_user_assistant_prompt(
+            self.tokenizer,
+            item["user_input"],
+            model=self.model,
+        )
         
         # Tokenize user input
         user_tokens = self.tokenizer(user_text, add_special_tokens=False)['input_ids']
@@ -149,10 +158,13 @@ class NativeFunctionCallingDataset(Dataset):
                 full_sequence.append(eoc_token_id)
                 labels.append(eoc_token_id)
         
-        # Add end-of-turn token
-        eot_token = self.tokenizer('<|eot_id|>', add_special_tokens=False)['input_ids']
-        full_sequence.extend(eot_token)
-        labels.extend(eot_token)
+        # Add the backbone-native response-ending token.
+        end_tokens = response_end_token_ids(
+            self.tokenizer,
+            model=self.model,
+        )
+        full_sequence.extend(end_tokens)
+        labels.extend(end_tokens)
 
         if self.max_length and len(full_sequence) > self.max_length:
             first_target_idx = next(

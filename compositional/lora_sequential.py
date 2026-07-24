@@ -15,6 +15,11 @@ import json
 import os
 import logging
 
+from backbone_prompting import (
+    format_user_assistant_prompt,
+    qwen35_generation_token_ids,
+    response_end_text,
+)
 from dataset import discover_available_tools
 from replay_buffer import SimpleReplayBuffer
 from run_layout import (
@@ -69,10 +74,18 @@ def build_assistant_only_labels(input_ids, attention_mask, prompt_token_count):
 
 
 class FunctionCallingDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512, mode="train"):
+    def __init__(
+        self,
+        data_path,
+        tokenizer,
+        max_length=512,
+        mode="train",
+        model_type=None,
+    ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.mode = mode
+        self.model_type = model_type
         
         with open(data_path, 'r') as f:
             self.data = json.load(f)
@@ -97,13 +110,18 @@ class FunctionCallingDataset(Dataset):
         example = self.data[idx]
         user_input = example['user_input']
         
+        prompt = format_user_assistant_prompt(
+            self.tokenizer,
+            user_input,
+            model_type=self.model_type,
+            legacy_assistant_newline=True,
+        )
+
         if self.mode == "train":
             # Training: include expected function calls in output
             tools = example.get('tools', [])
             function_calls = example.get('function_calls', [])
-            
-            conversation = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{user_input}<|eot_id|>"
-            conversation += f"<|start_header_id|>assistant<|end_header_id|>\n"
+            conversation = prompt
             
             if tools and function_calls:
                 # Use generic tool tokens for fair comparison
@@ -111,12 +129,14 @@ class FunctionCallingDataset(Dataset):
                     generic_tool = self.tool_mapping.get(tool, "tool_unknown")
                     conversation += f"\n[{generic_tool}]{func_call}"  # Add generic tool marker
             
-            conversation += "<|eot_id|>"
+            conversation += response_end_text(
+                self.tokenizer,
+                model_type=self.model_type,
+            )
             
         else:
             # Evaluation: only user input
-            conversation = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{user_input}<|eot_id|>"
-            conversation += f"<|start_header_id|>assistant<|end_header_id|>\n"
+            conversation = prompt
         
         encoding = self.tokenizer(
             conversation,
@@ -131,18 +151,15 @@ class FunctionCallingDataset(Dataset):
         
         if self.mode == "train":
             # Only train on assistant response
-            assistant_start = "<|start_header_id|>assistant<|end_header_id|>\n"
-            if assistant_start in conversation:
-                prefix = conversation.split(assistant_start)[0] + assistant_start
-                prefix_tokens = self.tokenizer(prefix, add_special_tokens=False)["input_ids"]
-                labels = build_assistant_only_labels(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    prompt_token_count=len(prefix_tokens),
-                )
-            else:
-                labels = input_ids.clone()
-                labels[attention_mask == 0] = -100
+            prefix_tokens = self.tokenizer(
+                prompt,
+                add_special_tokens=False,
+            )["input_ids"]
+            labels = build_assistant_only_labels(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                prompt_token_count=len(prefix_tokens),
+            )
         else:
             labels = torch.tensor(-100)
         
@@ -161,12 +178,25 @@ def create_lora_dataloader(
     batch_size=4,
     max_length=512,
     eval_batch_size=32,
+    model_type=None,
 ):
     """Create dataloaders for LoRA training"""
     
     # Create datasets
-    train_dataset = FunctionCallingDataset(train_data_path, tokenizer, max_length, "train")
-    test_dataset = FunctionCallingDataset(test_data_path, tokenizer, max_length, "eval")
+    train_dataset = FunctionCallingDataset(
+        train_data_path,
+        tokenizer,
+        max_length,
+        "train",
+        model_type=model_type,
+    )
+    test_dataset = FunctionCallingDataset(
+        test_data_path,
+        tokenizer,
+        max_length,
+        "eval",
+        model_type=model_type,
+    )
     
     # Create dataloaders with collate_fn
     train_dataloader = DataLoader(
@@ -448,15 +478,25 @@ def eval_lora_model(model, tokenizer, test_dataloader, device="cuda"):
                 print(f"   Progress: {processed_examples}/{total_examples} ({100 * processed_examples / total_examples:.1f}%)")
             
             # Generate responses
-            generated = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=256,
-                temperature=0.6,
-                top_p=0.9,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": 256,
+                "temperature": 0.6,
+                "top_p": 0.9,
+                "do_sample": False,
+                "pad_token_id": tokenizer.pad_token_id,
+            }
+            qwen_token_ids = qwen35_generation_token_ids(
+                tokenizer,
+                model_type=model.config.model_type,
             )
+            if qwen_token_ids is not None:
+                (
+                    generate_kwargs["pad_token_id"],
+                    generate_kwargs["eos_token_id"],
+                ) = qwen_token_ids
+            generated = model.generate(**generate_kwargs)
             
             # Process each example
             for i in range(batch_size):
@@ -898,6 +938,7 @@ def main():
         device_map="auto",
         local_files_only=True,
     )
+    backbone_model_type = base_model.config.model_type
     
     # Parse target modules once
     target_modules = [mod.strip() for mod in args.lora_target_modules.split(',')]
@@ -1001,6 +1042,7 @@ def main():
             batch_size=args.batch_size,
             max_length=args.max_length,
             eval_batch_size=args.eval_batch_size,
+            model_type=backbone_model_type,
         )
         
         # Create mixed dataloader with replay buffer if enabled

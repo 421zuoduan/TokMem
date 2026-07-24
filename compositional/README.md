@@ -159,6 +159,7 @@ Single-round maintained launchers for tools `51-100`:
 - `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_scale_ablation.sh`
 - `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_loss_weight_ablation.sh`
 - `scripts/compositional/qwen_0_5b/tokmem_eoc_logit_bias_scale_ablation_qwen_0_5b_4calls_seed42_3x.sh`
+- `scripts/compositional/qwen_9b/tokmem_eoc_logit_bias_qwen_9b.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_scale_ablation_8gpu_nohup.sh`
 - `scripts/compositional/run_paper_compositional_logit_bias_loss_weight_ablation.sh`
 
@@ -167,6 +168,20 @@ Single-round maintained launchers for tools `51-100`:
 `run_memory_bank_constraint_eval.sh` performs eval-only inference on the paper TokMem checkpoints and matched EOC-only checkpoints. It produces `tokmem_bank_constraint` and `eoc_only_bank_constraint` predictions without retraining, defaults to threshold `0.5`, and writes `manifest.json`, per-trial JSONL, `summary.json`, and `summary.md` under `compositional/rebuttal/results/memory_bank_constraint/`. Use `--models llama1b --trial-ids 1 --limit 8` for a narrow smoke run.
 
 The Qwen-0.5B scale-ablation launcher runs `tokmem_eoc_logit_bias` on `models/Qwen2.5-0.5B-Instruct` with tools `51-100`, 4-call data, `training_rounds=51-100:1`, `epochs=3`, `batch_size=16`, `eval_batch_size=64`, `max_length=512`, and `lr=5e-3`. It fixes `seed=42`, runs three trials per scale, assigns `logit_bias_scale=0.1` to GPU `5`, `0.5` to GPU `6`, and `2` to GPU `7`, then writes `manifest.tsv`, `summary.md`, and `results.json` under `results/compositional/<suite_name>/`.
+
+Qwen3.5 uses a dedicated `Qwen35FunctionCallingModel`, selected internally by
+`backbone_registry.py` when the local Hugging Face config reports
+`model_type=qwen3_5`. All other backbones continue to use the existing
+`FunctionCallingModel`, and their prompt strings, response targets, and
+generation settings remain unchanged. Qwen3.5 uses its native chat template
+with thinking disabled, supervises `<|im_end|>` as the response-ending token,
+and explicitly keeps `<|endoftext|>` as padding while both native TokMem and
+custom TapMem decoding stop on `<|im_end|>`. The standalone Qwen3.5-9B
+launcher uses the same `main_sequential.py` EOC + logit-bias path with
+conservative default capacity settings (`batch_size=1`, `eval_batch_size=4`,
+`max_length=512`);
+`TOKMEM_GPU`, `TOKMEM_MODEL_PATH`, `TOKMEM_BATCH_SIZE`,
+`TOKMEM_EVAL_BATCH_SIZE`, and `TOKMEM_MAX_LENGTH` are overridable.
 
 The Llama-1B paper-style scale-ablation nohup launcher starts `scripts/compositional/llama_1b/rerun_paper_compositional_logit_bias_scale_ablation.sh` on GPUs `0,1,2,3,4,5,6,7`. It runs `tokmem_eoc_logit_bias` with `--detach --use_logit_train_add` over `logit_bias_scale=0.1,0.5,0.8,1,1.1,1.2,1.3,1.4,1.5,2,3,5`, three trials per scale, tools `51-100`, 4-call data, `batch_size=24`, `eval_batch_size=256`, and writes `nohup.log`, `nohup.pid`, `manifest.tsv`, `summary.md`, `results.json`, and `gpu_availability.log` under `results/compositional/<suite_name>/`. The runner treats the GPU list as worker slots, takes a per-GPU `flock` under `/tmp/tokmem_gpu_locks`, and starts each GPU worker after `memory.used <= 2048 MiB` for 180 consecutive seconds. Extra scales queue round-robin onto the available worker slots. `manifest.tsv` records every attempted trial with `status` and `exit_code`; failed trials remain visible in `summary.md` and `results.json`. Mean metrics and loss summaries include trials whose manifest status is `success`. The summary table labels `avg_f1_score` as `Arguments F1`.
 

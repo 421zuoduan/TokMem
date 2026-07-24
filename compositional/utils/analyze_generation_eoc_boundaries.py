@@ -14,6 +14,8 @@ COMPOSITIONAL_DIR = REPO_ROOT / "compositional"
 if str(COMPOSITIONAL_DIR) not in sys.path:
     sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
+from backbone_prompting import format_user_assistant_prompt
+
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "compositional" / "rebuttal" / "results" / "eoc_boundary_accuracy"
 ALL_METHODS_STATUS = REPO_ROOT / "results" / "compositional" / "all_methods" / "task_status.json"
 PAPER_HEAD_STATUS = REPO_ROOT / "results" / "compositional" / "paper_compositional_head_8gpu" / "task_status.json"
@@ -187,11 +189,12 @@ def build_lora_config(run_args):
 
 
 def build_model(run_config, checkpoint, tokenizer, device, dtype):
-    from model import FunctionCallingModel
+    from backbone_registry import resolve_function_calling_model_class
 
     run_args = run_config["args"]
     tool_names = discover_all_tool_names(run_config)
-    model = FunctionCallingModel(
+    model_class = resolve_function_calling_model_class(run_args["model_name"])
+    model = model_class(
         model_name=run_args["model_name"],
         num_tools=len(tool_names),
         tool_names=tool_names,
@@ -211,10 +214,11 @@ def build_model(run_config, checkpoint, tokenizer, device, dtype):
     return model
 
 
-def build_user_text(item):
-    return (
-        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n"
-        f"{item['user_input']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+def build_user_text(item, tokenizer, model):
+    return format_user_assistant_prompt(
+        tokenizer,
+        item["user_input"],
+        model=model,
     )
 
 
@@ -387,7 +391,7 @@ def generate_raw_batch(model, tokenizer, batch, device, max_new_tokens):
 
     tokenizer.padding_side = "left"
     encoded = tokenizer(
-        [build_user_text(item) for item in batch],
+        [build_user_text(item, tokenizer, model) for item in batch],
         add_special_tokens=False,
         return_tensors="pt",
         padding=True,
@@ -397,17 +401,29 @@ def generate_raw_batch(model, tokenizer, batch, device, max_new_tokens):
     user_mask = encoded["attention_mask"]
 
     if not model.use_logit_bias and not model.use_tool_head_replacement:
+        generate_kwargs = {
+            "input_ids": user_tokens,
+            "attention_mask": user_mask,
+            "max_new_tokens": max_new_tokens,
+            "temperature": 0.6,
+            "top_p": 0.9,
+            "do_sample": False,
+            "pad_token_id": getattr(
+                model,
+                "_native_generation_pad_token_id",
+                tokenizer.eos_token_id,
+            ),
+            "use_cache": True,
+        }
+        native_eos_token_id = getattr(
+            model,
+            "_native_generation_eos_token_id",
+            None,
+        )
+        if native_eos_token_id is not None:
+            generate_kwargs["eos_token_id"] = native_eos_token_id
         with torch.no_grad():
-            generated = model.model.generate(
-                input_ids=user_tokens,
-                attention_mask=user_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=0.6,
-                top_p=0.9,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True,
-            )
+            generated = model.model.generate(**generate_kwargs)
     else:
         generated = generate_raw_with_custom_decoding(model, user_tokens, user_mask, tokenizer, max_new_tokens)
 

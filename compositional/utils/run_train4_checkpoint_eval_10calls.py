@@ -14,6 +14,8 @@ COMPOSITIONAL_DIR = REPO_ROOT / "compositional"
 if str(COMPOSITIONAL_DIR) not in sys.path:
     sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
+from backbone_prompting import format_user_assistant_prompt
+
 DEFAULT_DATA_PATH = (
     REPO_ROOT
     / "results"
@@ -302,11 +304,12 @@ def build_lora_config(run_args):
 
 
 def build_model(run_config, checkpoint, tokenizer, device, dtype):
-    from model import FunctionCallingModel
+    from backbone_registry import resolve_function_calling_model_class
 
     run_args = run_config["args"]
     tool_names = discover_all_tool_names(run_config)
-    model = FunctionCallingModel(
+    model_class = resolve_function_calling_model_class(run_args["model_name"])
+    model = model_class(
         model_name=run_args["model_name"],
         num_tools=len(tool_names),
         tool_names=tool_names,
@@ -326,10 +329,11 @@ def build_model(run_config, checkpoint, tokenizer, device, dtype):
     return model
 
 
-def build_user_text(item):
-    return (
-        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n"
-        f"{item['user_input']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+def build_user_text(item, tokenizer, model):
+    return format_user_assistant_prompt(
+        tokenizer,
+        item["user_input"],
+        model=model,
     )
 
 
@@ -346,7 +350,7 @@ def generate_batch(
     import torch
 
     encoded = tokenizer(
-        [build_user_text(item) for item in batch],
+        [build_user_text(item, tokenizer, model) for item in batch],
         add_special_tokens=False,
         return_tensors="pt",
         padding=True,
