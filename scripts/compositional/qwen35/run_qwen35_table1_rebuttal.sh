@@ -120,32 +120,32 @@ declare -A MODEL_PATHS=(
     [qwen4b]="$ROOT_DIR/models/Qwen3.5-4B"
 )
 declare -A TOKMEM_BATCH_SIZES=(
-    [qwen9b]=8
-    [qwen4b]=16
-)
-declare -A TOKMEM_EVAL_BATCH_SIZES=(
-    [qwen9b]=32
-    [qwen4b]=64
-)
-declare -A LORA_BATCH_SIZES=(
     [qwen9b]=4
     [qwen4b]=8
 )
+declare -A TOKMEM_EVAL_BATCH_SIZES=(
+    [qwen9b]=16
+    [qwen4b]=32
+)
+declare -A LORA_BATCH_SIZES=(
+    [qwen9b]=2
+    [qwen4b]=4
+)
 declare -A LORA_EVAL_BATCH_SIZES=(
-    [qwen9b]=32
-    [qwen4b]=64
+    [qwen9b]=16
+    [qwen4b]=32
 )
 declare -A ADAPT_BATCH_SIZES=(
-    [qwen9b]="4,8"
-    [qwen4b]="8,16"
+    [qwen9b]="2,4"
+    [qwen4b]="4,8"
 )
 declare -A ICL_BATCH_SIZES=(
-    [qwen9b]=8
-    [qwen4b]=16
+    [qwen9b]=4
+    [qwen4b]=8
 )
 declare -A RAG_BATCH_SIZES=(
-    [qwen9b]=32
-    [qwen4b]=64
+    [qwen9b]=16
+    [qwen4b]=32
 )
 declare -A LORA_LRS=(
     [qwen9b]=8e-5

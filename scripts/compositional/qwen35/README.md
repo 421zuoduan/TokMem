@@ -18,6 +18,14 @@ LoRA rank, target modules, and LoRA learning rates retain the previously
 agreed Table 1 settings; the sweep covers the shared synthetic-memory
 learning rate used by TokMem, TapMem, and their adaptation variants.
 
+The launcher uses conservative batches that fit the longest 512-token
+training examples with the Transformers PyTorch fallback:
+
+| Backbone | ICL | RAG | TokMem/TapMem train/eval | LoRA train/eval | Adaptation rounds/eval |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5-9B | 4 | 16 | 4 / 16 | 2 / 16 | 2,4 / 16 |
+| Qwen3.5-4B | 8 | 32 | 8 / 32 | 4 / 32 | 4,8 / 32 |
+
 The launcher dynamically polls every requested GPU and uses all currently
 empty cards. Tasks hold the shared `/tmp/tokmem_gpu_locks/gpu_<id>.lock`
 throughout execution, so they can coexist with the repository's other
