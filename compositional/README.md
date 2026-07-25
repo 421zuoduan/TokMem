@@ -176,7 +176,11 @@ Qwen3.5-4B. Each backbone first performs an independent seed-42 TapMem
 learning-rate sweep, then runs seeds 40/41/42 with the selected learning rate.
 The scheduler dynamically consumes all empty GPUs from the requested pool,
 does not save full-model sweep checkpoints, and writes the final three-seed
-mean and sample standard deviation with Bash, `jq`, and `awk`.
+mean and sample standard deviation with Bash, `jq`, and `awk`. Pass
+`--conda-env tokmem-qwen35` to use the validated Qwen3.5 FLA/causal-conv1d
+environment. The default remains `tokmem` for compatibility, and each suite
+records the environment name, package manifest, and critical implementation
+hashes in `suite_config.txt` to prevent mixed-environment resumes.
 
 Qwen3.5 uses a dedicated `Qwen35FunctionCallingModel`, selected internally by
 `backbone_registry.py` when the local Hugging Face config reports

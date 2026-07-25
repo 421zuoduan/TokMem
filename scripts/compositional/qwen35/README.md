@@ -3,6 +3,15 @@
 `run_qwen35_table1_rebuttal.sh` runs the complete compositional Table 1 method
 set for Qwen3.5-9B and then Qwen3.5-4B:
 
+The isolated fast-kernel environment and its validation requirements are
+documented in
+[`docs/compositional/qwen35-fast-environment.md`](../../../docs/compositional/qwen35-fast-environment.md).
+The reproducible validation command and recorded outputs are in
+[`docs/compositional/qwen35-fast-validation-20260725.md`](../../../docs/compositional/qwen35-fast-validation-20260725.md).
+The earlier `tokmem` fallback suite was stopped and retained as a partial
+archive. New formal runs should pass `--conda-env tokmem-qwen35`; omitting the
+flag preserves the previous `tokmem` default.
+
 - ICL
 - RAG with top-5 MiniLM retrieval
 - TokMem
@@ -36,7 +45,8 @@ Run in the foreground:
 ```bash
 bash scripts/compositional/qwen35/run_qwen35_table1_rebuttal.sh \
     --suite-name qwen35_table1_rebuttal_20260725 \
-    --gpus 0,1,2,3,4,5,6,7
+    --gpus 0,1,2,3,4,5,6,7 \
+    --conda-env tokmem-qwen35
 ```
 
 Run in the background:
@@ -46,11 +56,15 @@ mkdir -p results/compositional/qwen35_table1_rebuttal_20260725
 nohup bash scripts/compositional/qwen35/run_qwen35_table1_rebuttal.sh \
     --suite-name qwen35_table1_rebuttal_20260725 \
     --gpus 0,1,2,3,4,5,6,7 \
+    --conda-env tokmem-qwen35 \
     > results/compositional/qwen35_table1_rebuttal_20260725/launcher.log 2>&1 &
 ```
 
 Re-running the same command with the same suite name reuses successful tasks
 whose command is unchanged. Results are written to `metrics.tsv` and
 `summary.md` using Bash, `jq`, and `awk`; no Python result-summary script is
-used. After all runs finish, inspect those files and manually add the verified
-table to `results/rebuttal/rebuttal-needs-exps.md`.
+used. The selected conda environment, dependency manifest, and critical
+implementation hashes are recorded in `suite_config.txt`; a suite cannot be
+resumed after that runtime fingerprint changes. After all runs finish, inspect
+those files and manually add the verified table to
+`results/rebuttal/rebuttal-needs-exps.md`.

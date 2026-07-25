@@ -9,12 +9,13 @@ GPU_IDS_CSV="${GPU_IDS:-0,1,2,3,4,5,6,7}"
 POLL_SECONDS="${GPU_POLL_SECONDS:-10}"
 GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-2048}"
 MODEL_LOAD_STAGGER_SECONDS="${MODEL_LOAD_STAGGER_SECONDS:-20}"
+CONDA_ENV_NAME="${TOKMEM_CONDA_ENV:-tokmem}"
 DRY_RUN=0
 
 usage() {
     cat <<EOF
 Usage:
-  bash $0 [--suite-name NAME] [--gpus 0,1,...] [--poll-seconds N] [--dry-run]
+  bash $0 [--suite-name NAME] [--gpus 0,1,...] [--conda-env NAME] [--poll-seconds N] [--dry-run]
 
 Runs the Qwen3.5 compositional Table 1 rebuttal study in this order:
   1. Qwen3.5-9B TapMem seed-42 learning-rate sweep.
@@ -27,6 +28,9 @@ The scheduler dynamically uses every GPU in --gpus whose memory.used is at
 most ${GPU_MEMORY_LIMIT_MIB} MiB. It holds the repository-wide per-GPU flock
 for the entire task. Existing successful tasks are reused when the command is
 unchanged, so passing the same --suite-name resumes a stopped suite.
+
+The conda environment defaults to TOKMEM_CONDA_ENV when set, otherwise
+tokmem. Use --conda-env tokmem-qwen35 for the validated Qwen3.5 fast path.
 
 The script intentionally does not save full model checkpoints. A Qwen3.5-9B
 checkpoint is about 18 GiB, and saving one for every sweep/seed would consume
@@ -46,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --poll-seconds)
             POLL_SECONDS="$2"
+            shift 2
+            ;;
+        --conda-env)
+            CONDA_ENV_NAME="$2"
             shift 2
             ;;
         --dry-run)
@@ -89,6 +97,10 @@ if [[ "$POLL_SECONDS" -eq 0 ]]; then
     echo "--poll-seconds must be positive." >&2
     exit 2
 fi
+if ! [[ "$CONDA_ENV_NAME" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "--conda-env must be a nonempty conda environment name." >&2
+    exit 2
+fi
 
 RESULTS_ROOT="$ROOT_DIR/results/compositional"
 SUITE_DIR="$RESULTS_ROOT/$SUITE_NAME"
@@ -100,6 +112,7 @@ STATUS_FILE="$SUITE_DIR/task_status.tsv"
 METRICS_FILE="$SUITE_DIR/metrics.tsv"
 SUMMARY_FILE="$SUITE_DIR/summary.md"
 SCHEDULER_LOG="$SUITE_DIR/scheduler.log"
+SUITE_CONFIG_FILE="$SUITE_DIR/suite_config.txt"
 GPU_LOCK_DIR="/tmp/tokmem_gpu_locks"
 JQ_BIN="/home/shilong/anaconda3/bin/jq"
 
@@ -190,6 +203,101 @@ method_display_name() {
     esac
 }
 
+environment_fingerprint() {
+    local env_prefix="/home/shilong/anaconda3/envs/$CONDA_ENV_NAME"
+    local env_python="$env_prefix/bin/python"
+    local purelib
+    local tracked_file
+    local tracked_file_sha256
+
+    purelib="$("$env_python" -c \
+        'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+    printf 'conda_env=%s\n' "$CONDA_ENV_NAME"
+    "$env_python" -c '
+import hashlib
+import importlib.metadata
+import platform
+
+packages = (
+    "torch",
+    "torchvision",
+    "triton",
+    "transformers",
+    "fla-core",
+    "flash-linear-attention",
+    "causal-conv1d",
+    "einops",
+)
+print(f"python={platform.python_version()}")
+for package in packages:
+    try:
+        distribution = importlib.metadata.distribution(package)
+    except importlib.metadata.PackageNotFoundError:
+        print(f"package.{package}=missing")
+        print(f"record.{package}=missing")
+        continue
+    record = distribution.read_text("RECORD")
+    record_sha256 = (
+        hashlib.sha256(record.encode("utf-8")).hexdigest()
+        if record is not None
+        else "missing"
+    )
+    print(f"package.{package}={distribution.version}")
+    print(f"record.{package}={record_sha256}")
+
+installed_distributions = []
+for distribution in importlib.metadata.distributions():
+    name = distribution.metadata["Name"] or "unknown"
+    record = distribution.read_text("RECORD") or ""
+    direct_url = distribution.read_text("direct_url.json") or ""
+    installed_distributions.append(
+        "\t".join(
+            (
+                name.lower(),
+                distribution.version,
+                hashlib.sha256(record.encode("utf-8")).hexdigest(),
+                hashlib.sha256(direct_url.encode("utf-8")).hexdigest(),
+            )
+        )
+    )
+manifest = "\n".join(sorted(installed_distributions)) + "\n"
+print(
+    "installed_distributions_sha256="
+    + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+)
+'
+
+    for tracked_file in \
+        "$purelib/sitecustomize.py" \
+        "$purelib/tokmem_qwen35_inspect_patch.py" \
+        "$purelib/tokmem_qwen35_inspect_patch.pth" \
+        "$purelib/transformers/models/qwen3_5/modeling_qwen3_5.py" \
+        "$purelib/torch/_inductor/ir.py" \
+        "$purelib/triton/runtime/jit.py"; do
+        if [[ -f "$tracked_file" ]]; then
+            tracked_file_sha256="$(sha256sum "$tracked_file" | awk '{print $1}')"
+        else
+            tracked_file_sha256="missing"
+        fi
+        printf 'file.%s=%s\n' "${tracked_file#"$purelib/"}" \
+            "$tracked_file_sha256"
+    done
+
+    tracked_file="$(
+        find "$purelib" -maxdepth 1 -type f \
+            -name 'causal_conv1d_cuda*.so' -print \
+            | LC_ALL=C sort \
+            | head -n 1
+    )"
+    if [[ -n "$tracked_file" ]]; then
+        tracked_file_sha256="$(sha256sum "$tracked_file" | awk '{print $1}')"
+    else
+        tracked_file_sha256="missing"
+    fi
+    printf 'file.causal_conv1d_cuda=%s\n' "$tracked_file_sha256"
+}
+
 preflight() {
     local required_file
     for required_file in \
@@ -214,6 +322,10 @@ preflight() {
     done
     if [[ ! -x "$JQ_BIN" ]]; then
         echo "Required jq executable is missing: $JQ_BIN" >&2
+        exit 2
+    fi
+    if [[ ! -x "/home/shilong/anaconda3/envs/$CONDA_ENV_NAME/bin/python" ]]; then
+        echo "Conda environment is missing: $CONDA_ENV_NAME" >&2
         exit 2
     fi
     if [[ "$("$JQ_BIN" 'length' "$TRAIN_51_100")" -ne 5000 ]]; then
@@ -244,6 +356,8 @@ preflight() {
 }
 
 initialize_suite() {
+    local current_environment_fingerprint
+
     if [[ "$DRY_RUN" -eq 1 ]]; then
         return
     fi
@@ -257,6 +371,15 @@ initialize_suite() {
     if [[ ! -f "$MANIFEST_FILE" ]]; then
         printf 'phase\tmodel\tmethod\tseed\tmemory_lr\tlora_lr\ttask_dir\n' \
             > "$MANIFEST_FILE"
+    fi
+    current_environment_fingerprint="$(environment_fingerprint)"
+    if [[ ! -f "$SUITE_CONFIG_FILE" ]]; then
+        printf '%s\n' "$current_environment_fingerprint" \
+            > "$SUITE_CONFIG_FILE"
+    elif [[ "$(cat "$SUITE_CONFIG_FILE")" != \
+        "$current_environment_fingerprint" ]]; then
+        echo "Refusing to resume because the conda environment or its package fingerprint changed." >&2
+        exit 2
     fi
     if [[ ! -f "$STATUS_FILE" ]]; then
         printf 'task\tstatus\texit_code\tgpu\tstarted_at\tfinished_at\n' \
@@ -588,7 +711,7 @@ run_task() {
     {
         printf '#!/usr/bin/env bash\nset -euo pipefail\n'
         printf 'source /home/shilong/anaconda3/etc/profile.d/conda.sh\n'
-        printf 'conda activate tokmem\n'
+        printf 'conda activate %q\n' "$CONDA_ENV_NAME"
         printf 'export CUDA_VISIBLE_DEVICES=%q\n' "$gpu"
         printf 'export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n'
         printf 'export HF_HOME=%q\n' "$HF_CACHE_DIR"
@@ -729,7 +852,7 @@ run_task_queue() {
 
     if [[ "$task_failed" -ne 0 ]]; then
         echo "$stage_label has failed tasks. Inspect $RUNS_ROOT/*/stdout.log and resume with:" >&2
-        echo "  bash $SCRIPT_PATH --suite-name $SUITE_NAME --gpus $GPU_IDS_CSV" >&2
+        echo "  bash $SCRIPT_PATH --suite-name $SUITE_NAME --gpus $GPU_IDS_CSV --conda-env $CONDA_ENV_NAME" >&2
         exit 1
     fi
 }
@@ -1132,13 +1255,14 @@ main() {
     fi
 
     source /home/shilong/anaconda3/etc/profile.d/conda.sh
-    conda activate tokmem
+    conda activate "$CONDA_ENV_NAME"
     export HF_HOME="$HF_CACHE_DIR"
     export HF_DATASETS_CACHE="$HF_HOME/datasets"
     export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
     export TOKENIZERS_PARALLELISM=false
 
     log "Suite directory: $SUITE_DIR"
+    log "Conda environment: $CONDA_ENV_NAME"
     log "Dynamic GPU pool: $GPU_IDS_CSV"
     log "GPU memory eligibility threshold: <= ${GPU_MEMORY_LIMIT_MIB} MiB used"
 

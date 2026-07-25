@@ -1,0 +1,7 @@
+245e314ea21064ded7a5bf6b3b842b644aa6f92e45cecfe3e935629744c35ff4  causal_conv1d-1.6.2.post1.tar.gz
+8776fc06b41772b62e824bad15edd50d30ea8fdb19079b1f6c5626d7cd09abdb  causal_conv1d-1.6.2.post1-cp310-cp310-linux_x86_64.whl
+d6c3cba198dc93f93422a8545f48a6697890366e4b9701f54351fc27e2304bd3  torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl
+538f4db667286d939b4eee0a66d31ed21b51186668006b0e0ffe20338ecc7e00  torchvision-0.22.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl
+b74db445b1c562844d3cfad6e9679c72e93fdfb1a90a24052b03bb5c49d1242e  triton-3.3.1-cp310-cp310-manylinux_2_28_x86_64.whl
+6d011159a158f3cfc47bf851aea79e31bcff60d530b70ef70474c84cac484d07  nvidia_cudnn_cu12-9.7.1.26-py3-none-manylinux_2_27_x86_64.whl
+694cf3879a206553cc9d7dbda76b13efaf610fdb70a50cba303de1b0d1530ac6  nvidia_nccl_cu12-2.26.2-py3-none-manylinux2014_x86_64.whl
