@@ -1,0 +1,11 @@
+Create one original, objectively checkable local tool-use task.
+
+Choose several supplied tools with plausible overlap. Make only a strict subset
+necessary, while every offered tool remains executable in the generated
+workspace. Add at least three distractors, then generate deterministic assets,
+oracle state, a workspace_assertions_v1 evaluator, and a concise instruction.
+Follow the supplied declarative task-spec contract and use only relative
+paths; never emit evaluator code. Use fictional names and values. Do not copy
+any benchmark structure or content.
+
+Return compact task-spec JSON only. Omit explanations and trajectory.

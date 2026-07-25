@@ -15,6 +15,7 @@ if str(COMPOSITIONAL_DIR) not in sys.path:
     sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
 from backbone_prompting import format_user_assistant_prompt
+from checkpoint_io import checkpoint_tool_names, load_checkpoint_into_model
 
 DEFAULT_DATA_PATH = (
     REPO_ROOT
@@ -307,7 +308,11 @@ def build_model(run_config, checkpoint, tokenizer, device, dtype):
     from backbone_registry import resolve_function_calling_model_class
 
     run_args = run_config["args"]
-    tool_names = discover_all_tool_names(run_config)
+    discovered_tool_names = discover_all_tool_names(run_config)
+    tool_names = checkpoint_tool_names(
+        checkpoint,
+        fallback=discovered_tool_names,
+    )
     model_class = resolve_function_calling_model_class(run_args["model_name"])
     model = model_class(
         model_name=run_args["model_name"],
@@ -321,10 +326,16 @@ def build_model(run_config, checkpoint, tokenizer, device, dtype):
         use_eoc=bool(run_args.get("use_eoc", False)),
         use_logit_bias=bool(run_args.get("use_logit_bias", False)),
         use_tool_head_replacement=bool(run_args.get("use_tool_head_replacement", False)),
+        use_memory_bank_constraint=bool(
+            run_args.get("use_memory_bank_constraint", False)
+        ),
+        memory_bank_probability_threshold=float(
+            run_args.get("memory_bank_probability_threshold", 0.5)
+        ),
         logit_bias_network=run_args.get("logit_bias_network", "linear"),
         logit_bias_scale=float(run_args.get("logit_bias_scale", 1.0)),
     )
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    load_checkpoint_into_model(model, checkpoint)
     model.eval()
     return model
 

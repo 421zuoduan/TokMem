@@ -1,0 +1,4 @@
+# Minimal client needed by the GPU model process. Toolathlon's full locked
+# dependency set remains in the separate Python 3.12.11 environment.
+mcp==1.9.0
+jsonschema==4.25.1

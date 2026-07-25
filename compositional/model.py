@@ -64,6 +64,7 @@ class FunctionCallingModel(nn.Module):
                  use_memory_bank_constraint=False,
                  memory_bank_probability_threshold=0.5):
         super().__init__()
+        self.model_name = model_name
         self.config = AutoConfig.from_pretrained(model_name, local_files_only=True)
         self.use_eoc = use_eoc
         self.use_logit_bias = use_logit_bias

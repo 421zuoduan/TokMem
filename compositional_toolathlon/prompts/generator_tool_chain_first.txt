@@ -1,0 +1,12 @@
+Create one original multi-step local task from the supplied MCP schemas.
+
+First define a 2-15 step dependency graph. At least one later argument must be
+derived from an earlier real observation. Then create deterministic fictional
+assets, oracle state, a workspace_assertions_v1 evaluator, and a concise user
+instruction. Follow the supplied declarative task-spec contract and relative
+paths; never emit evaluator code. Include at least three distinct real but
+irrelevant tools. Do not use external services or any benchmark prompt,
+entity, file, answer, or trajectory.
+
+Return task-spec JSON only. Do not include prose, hidden reasoning, or a
+solution trajectory.

@@ -16,6 +16,7 @@ import json
 import logging
 
 from backbone_registry import resolve_function_calling_model_class
+from checkpoint_io import CHECKPOINT_FORMAT_CHOICES, build_checkpoint_payload
 from model import print_model_info
 from dataset import create_native_dataloader, discover_available_tools
 from training import (
@@ -345,6 +346,15 @@ def build_parser():
     
     parser.add_argument("--save_checkpoints", action="store_true",
                         help="Save model checkpoints after each round")
+    parser.add_argument(
+        "--checkpoint_format",
+        choices=CHECKPOINT_FORMAT_CHOICES,
+        default="full",
+        help=(
+            "Checkpoint payload format. 'full' preserves the historical full "
+            "model_state_dict; 'trainable_only' stores memory/head/LoRA deltas."
+        ),
+    )
     parser.add_argument("--checkpoint_dir", type=str, default=None,
                         help="Directory to save checkpoints")
     parser.add_argument("--log_file", type=str, default=None,
@@ -560,6 +570,8 @@ def main():
     print(f"Max length: {args.max_length}")
     print(f"Max new tokens: {args.max_new_tokens}")
     print(f"Run directory: {run_context['run_dir']}")
+    if args.save_checkpoints:
+        print(f"Checkpoint format: {args.checkpoint_format}")
     if args.use_lora and args.freeze_lora_after_first:
         print("LoRA will be frozen after first round")
     print()
@@ -891,13 +903,19 @@ def main():
         # Save checkpoint if requested
         if args.save_checkpoints:
             checkpoint_path = os.path.join(checkpoint_dir, f"round_{round_num}_tools_{tools_range.replace('-', '_')}.pt")
-            print(f"Saving checkpoint to {checkpoint_path}")
-            torch.save({
-                'round': round_num,
-                'tools': round_tools,
-                'model_state_dict': model.state_dict(),
-                'results': round_results,
-            }, checkpoint_path)
+            print(
+                f"Saving {args.checkpoint_format} checkpoint to "
+                f"{checkpoint_path}"
+            )
+            checkpoint_payload = build_checkpoint_payload(
+                model,
+                round_num,
+                round_tools,
+                round_results,
+                checkpoint_format=args.checkpoint_format,
+                base_model_name=args.model_name,
+            )
+            torch.save(checkpoint_payload, checkpoint_path)
             all_results[-1]["checkpoint_path"] = checkpoint_path
     
     # Final summary

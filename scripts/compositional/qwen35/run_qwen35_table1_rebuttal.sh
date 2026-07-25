@@ -11,11 +11,12 @@ GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-2048}"
 MODEL_LOAD_STAGGER_SECONDS="${MODEL_LOAD_STAGGER_SECONDS:-20}"
 CONDA_ENV_NAME="${TOKMEM_CONDA_ENV:-tokmem}"
 DRY_RUN=0
+TRAINED_ONLY=0
 
 usage() {
     cat <<EOF
 Usage:
-  bash $0 [--suite-name NAME] [--gpus 0,1,...] [--conda-env NAME] [--poll-seconds N] [--dry-run]
+  bash $0 [--suite-name NAME] [--gpus 0,1,...] [--conda-env NAME] [--poll-seconds N] [--trained-only] [--dry-run]
 
 Runs the Qwen3.5 compositional Table 1 rebuttal study in this order:
   1. Qwen3.5-9B TapMem seed-42 learning-rate sweep.
@@ -32,9 +33,14 @@ unchanged, so passing the same --suite-name resumes a stopped suite.
 The conda environment defaults to TOKMEM_CONDA_ENV when set, otherwise
 tokmem. Use --conda-env tokmem-qwen35 for the validated Qwen3.5 fast path.
 
-The script intentionally does not save full model checkpoints. A Qwen3.5-9B
-checkpoint is about 18 GiB, and saving one for every sweep/seed would consume
-hundreds of GiB without being needed for the requested result table.
+Learning-rate sweeps do not save checkpoints. Final trained runs save only
+their learned state: TokMem memory embeddings, TapMem/TCRA heads, and PEFT
+LoRA adapters. The frozen Qwen3.5 backbone is loaded separately at inference
+time, avoiding an approximately 18 GiB full checkpoint for every 9B run.
+
+With --trained-only, the completed learning-rate search is reused
+(9B: 5e-3; 4B: 3e-3), and only the five trained methods are run. ICL, RAG,
+and learning-rate sweeps are skipped.
 EOF
 }
 
@@ -55,6 +61,10 @@ while [[ $# -gt 0 ]]; do
         --conda-env)
             CONDA_ENV_NAME="$2"
             shift 2
+            ;;
+        --trained-only)
+            TRAINED_ONLY=1
+            shift
             ;;
         --dry-run)
             DRY_RUN=1
@@ -124,7 +134,11 @@ TOOL_DESCRIPTIONS="$DATA_DIR/tool_descriptions_tools51-100.json"
 RETRIEVER_MODEL="$ROOT_DIR/models/all-MiniLM-L6-v2"
 
 MODEL_KEYS=(qwen9b qwen4b)
-METHODS=(icl rag tokmem tapmem lora adap_tokmem adap_tapmem)
+if [[ "$TRAINED_ONLY" -eq 1 ]]; then
+    METHODS=(tokmem tapmem lora adap_tokmem adap_tapmem)
+else
+    METHODS=(icl rag tokmem tapmem lora adap_tokmem adap_tapmem)
+fi
 SEEDS=(42 40 41)
 INITIAL_SWEEP_LRS=(1e-3 2e-3 3e-3 5e-3 7e-3 1e-2)
 
@@ -167,6 +181,10 @@ declare -A LORA_LRS=(
 declare -A ADAP_TAPMEM_LORA_LRS=(
     [qwen9b]=8e-5
     [qwen4b]=8e-5
+)
+declare -A PRESELECTED_MEMORY_LRS=(
+    [qwen9b]=5e-3
+    [qwen4b]=3e-3
 )
 
 log() {
@@ -484,6 +502,7 @@ add_task() {
 build_task_command() {
     local index="$1"
     local task_id="${TASK_IDS[$index]}"
+    local phase="${TASK_PHASES[$index]}"
     local model="${TASK_MODELS[$index]}"
     local method="${TASK_METHODS[$index]}"
     local seed="${TASK_SEEDS[$index]}"
@@ -549,6 +568,7 @@ build_task_command() {
                 --run_root_dir "$RUNS_ROOT"
                 --run_name "$task_id"
                 --run_tag "${model}_${method}_table1"
+                --save_checkpoints
             )
             ;;
         tokmem|tapmem)
@@ -582,6 +602,12 @@ build_task_command() {
                     --logit_bias_scale 1.0
                 )
             fi
+            if [[ "$phase" == "final" ]]; then
+                COMMAND+=(
+                    --save_checkpoints
+                    --checkpoint_format trainable_only
+                )
+            fi
             ;;
         adap_tokmem|adap_tapmem)
             COMMAND=(
@@ -608,6 +634,8 @@ build_task_command() {
                 --run_root_dir "$RUNS_ROOT"
                 --run_name "$task_id"
                 --run_tag "${model}_${method}_table1"
+                --save_checkpoints
+                --checkpoint_format trainable_only
             )
             if [[ "$method" == "adap_tapmem" ]]; then
                 COMMAND+=(
@@ -641,6 +669,9 @@ task_is_complete() {
     if [[ ! -f "$task_dir/SUCCESS" || ! -f "$task_dir/evaluation_results.json" ]]; then
         return 1
     fi
+    if ! task_checkpoint_is_complete "$index"; then
+        return 1
+    fi
     local expected_command
     expected_command="$(command_line_for_task "$index")"
     if [[ ! -f "$task_dir/command.txt" ]] || \
@@ -649,6 +680,34 @@ task_is_complete() {
         return 2
     fi
     return 0
+}
+
+task_checkpoint_is_complete() {
+    local index="$1"
+    local phase="${TASK_PHASES[$index]}"
+    local method="${TASK_METHODS[$index]}"
+    local task_dir="$RUNS_ROOT/${TASK_IDS[$index]}"
+
+    if [[ "$phase" != "final" || "$method" == "icl" || "$method" == "rag" ]]; then
+        return 0
+    fi
+
+    case "$method" in
+        tokmem|tapmem)
+            [[ -s "$task_dir/round_1_tools_51_100.pt" ]]
+            ;;
+        lora)
+            [[ -s "$task_dir/round_1_tools_51_100/adapter_config.json" && \
+                -s "$task_dir/round_1_tools_51_100/adapter_model.safetensors" ]]
+            ;;
+        adap_tokmem|adap_tapmem)
+            [[ -s "$task_dir/round_1_tools_1_50.pt" && \
+                -s "$task_dir/round_2_tools_51_100.pt" ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 gpu_memory_used_mib() {
@@ -740,7 +799,8 @@ run_task() {
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "$exit_code" > "$task_dir/exit_code.txt"
 
-    if [[ "$exit_code" -eq 0 && -f "$task_dir/evaluation_results.json" ]]; then
+    if [[ "$exit_code" -eq 0 && -f "$task_dir/evaluation_results.json" ]] && \
+        task_checkpoint_is_complete "$index"; then
         touch "$task_dir/SUCCESS"
         record_status "$task_id" success 0 "$gpu" "$started_at" "$finished_at"
         log "Completed $task_id on GPU $gpu"
@@ -1173,7 +1233,12 @@ write_summary() {
         echo "# Qwen3.5 compositional Table 1 rebuttal experiments"
         echo
         echo "- Dataset: frozen APIGen compositional split, tools 51–100, 500 test examples, 2–4 calls."
-        echo "- Methods: ICL, RAG, TokMem, TapMem, Fine-Tuning (LoRA), TokMem + adaptation, TapMem + adaptation."
+        if [[ "$TRAINED_ONLY" -eq 1 ]]; then
+            echo "- Methods: TokMem, TapMem, Fine-Tuning (LoRA), TokMem + adaptation, TapMem + adaptation."
+            echo "- Checkpoint rerun: the completed 9B/4B learning-rate searches are reused; ICL, RAG, and sweep candidates are intentionally omitted."
+        else
+            echo "- Methods: ICL, RAG, TokMem, TapMem, Fine-Tuning (LoRA), TokMem + adaptation, TapMem + adaptation."
+        fi
         echo "- Seeds: 40, 41, and 42; cells are mean ± sample standard deviation in percent."
         echo "- TapMem memory-token learning rate is selected independently for each backbone on seed 42."
         echo "- The initial TapMem grid is 1e-3 through 1e-2; boundary winners are extended for at most two rounds, with a hard range of 2e-4 through 5e-2."
@@ -1234,9 +1299,13 @@ write_summary() {
 dry_run_all_commands() {
     local model lr best_lr seed method task_id lora_lr
     for model in "${MODEL_KEYS[@]}"; do
-        prepare_sweep_tasks "$model" "${INITIAL_SWEEP_LRS[@]}"
-        run_task_queue "$model dry-run sweep"
-        best_lr="5e-3"
+        if [[ "$TRAINED_ONLY" -eq 1 ]]; then
+            best_lr="${PRESELECTED_MEMORY_LRS[$model]}"
+        else
+            prepare_sweep_tasks "$model" "${INITIAL_SWEEP_LRS[@]}"
+            run_task_queue "$model dry-run sweep"
+            best_lr="5e-3"
+        fi
         prepare_final_tasks "$model" "$best_lr"
         run_task_queue "$model dry-run final"
     done
@@ -1265,11 +1334,23 @@ main() {
     log "Conda environment: $CONDA_ENV_NAME"
     log "Dynamic GPU pool: $GPU_IDS_CSV"
     log "GPU memory eligibility threshold: <= ${GPU_MEMORY_LIMIT_MIB} MiB used"
+    if [[ "$TRAINED_ONLY" -eq 1 ]]; then
+        log "Trained-only checkpoint rerun: skipping ICL, RAG, and LR sweeps"
+    fi
 
     local model best_lr
     for model in "${MODEL_KEYS[@]}"; do
         log "Beginning $(model_display_name "$model")"
-        if [[ -f "$SUITE_DIR/${model}_sweep_complete" && \
+        if [[ "$TRAINED_ONLY" -eq 1 ]]; then
+            best_lr="${PRESELECTED_MEMORY_LRS[$model]}"
+            if [[ -f "$SUITE_DIR/${model}_best_memory_lr.txt" && \
+                "$(cat "$SUITE_DIR/${model}_best_memory_lr.txt")" != "$best_lr" ]]; then
+                echo "Recorded $model memory LR differs from trained-only value $best_lr." >&2
+                exit 2
+            fi
+            echo "$best_lr" > "$SUITE_DIR/${model}_best_memory_lr.txt"
+            log "Reusing completed $model memory LR search result: $best_lr"
+        elif [[ -f "$SUITE_DIR/${model}_sweep_complete" && \
             -f "$SUITE_DIR/${model}_best_memory_lr.txt" ]]; then
             best_lr="$(cat "$SUITE_DIR/${model}_best_memory_lr.txt")"
             log "Reusing selected $model memory LR: $best_lr"

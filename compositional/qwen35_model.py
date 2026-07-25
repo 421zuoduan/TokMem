@@ -76,6 +76,7 @@ class Qwen35FunctionCallingModel(FunctionCallingModel):
         memory_bank_probability_threshold=0.5,
     ):
         nn.Module.__init__(self)
+        self.model_name = model_name
 
         self.full_config = AutoConfig.from_pretrained(
             model_name,

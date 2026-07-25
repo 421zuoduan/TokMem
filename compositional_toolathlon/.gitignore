@@ -1,0 +1,14 @@
+.venv/
+.toolathlon-venv/
+.python/
+.uv-cache/
+__pycache__/
+*.py[cod]
+
+# The official checkout and generated experiment data are reproducible inputs.
+vendor/
+data/generated/
+artifacts/*
+!artifacts/README.md
+runs/*
+!runs/README.md

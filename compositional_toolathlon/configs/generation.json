@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "models": {
+    "generator": "gpt-5.6",
+    "teacher": "gpt-5.6",
+    "verifier": "gpt-5.6"
+  },
+  "generator_sessions": [
+    {
+      "session_id": "environment-first-v1",
+      "prompt": "generator_environment_first.txt",
+      "seed_offset": 11000,
+      "max_completion_tokens": 2400
+    },
+    {
+      "session_id": "tool-chain-first-v1",
+      "prompt": "generator_tool_chain_first.txt",
+      "seed_offset": 23000,
+      "max_completion_tokens": 2400
+    },
+    {
+      "session_id": "distractor-first-v1",
+      "prompt": "generator_distractor_first.txt",
+      "seed_offset": 37000,
+      "max_completion_tokens": 2400
+    }
+  ],
+  "teacher": {
+    "prompt": "teacher_action_only.txt",
+    "prompt_version": "teacher-action-only-v1",
+    "candidate_rollouts": 3,
+    "max_tool_calls": 30,
+    "max_completion_tokens_per_action": 768,
+    "max_visible_assistant_characters": 0,
+    "max_argument_characters_per_call": 1600
+  },
+  "verifier": {
+    "prompt": "verifier.txt",
+    "prompt_version": "verifier-reject-only-v1",
+    "max_completion_tokens": 1200
+  }
+}

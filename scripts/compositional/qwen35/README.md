@@ -40,6 +40,39 @@ empty cards. Tasks hold the shared `/tmp/tokmem_gpu_locks/gpu_<id>.lock`
 throughout execution, so they can coexist with the repository's other
 maintained suites.
 
+Learning-rate sweeps do not save checkpoints. Final TokMem, TapMem, and
+adaptation runs pass
+`--save_checkpoints --checkpoint_format trainable_only`; pure LoRA uses
+PEFT's adapter-only `save_pretrained()`. At inference time the original
+Qwen3.5 backbone is loaded first, followed by the saved memory embeddings,
+TCRA head, and/or LoRA adapter. No final run duplicates the frozen 4B/9B
+backbone weights.
+
+For a saved pure-LoRA run, use
+`scripts/compositional/evaluate_lora_checkpoint.py` with its
+`run_config.json` and `round_<round>_tools_<range>/` adapter directory. The
+script validates the adapter's recorded base model before running inference.
+
+The completed
+`results/compositional/qwen35_table1_rebuttal_20260725_fast_v1` suite predates
+this checkpoint behavior and contains no recoverable trained weights. Its
+metrics remain valid, but producing checkpoints requires rerunning the trained
+methods (TokMem, TapMem, Fine-Tuning, and both adaptation variants); ICL and
+RAG do not train parameters and therefore need no checkpoint rerun.
+
+For that checkpoint-only rerun, use `--trained-only`. This reuses the selected
+memory learning rates (`5e-3` for 9B and `3e-3` for 4B), skips ICL, RAG, and
+the learning-rate sweep, and requires the expected `.pt` or PEFT adapter files
+before a task can be marked successful:
+
+```bash
+bash scripts/compositional/qwen35/run_qwen35_table1_rebuttal.sh \
+    --suite-name qwen35_table1_checkpoint_rerun_20260725 \
+    --gpus 1,3,5,6 \
+    --conda-env tokmem-qwen35 \
+    --trained-only
+```
+
 Run in the foreground:
 
 ```bash

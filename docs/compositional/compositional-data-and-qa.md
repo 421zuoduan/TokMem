@@ -86,6 +86,59 @@ python xlam_datasets.py \
 
 当前合成 query 多数是并列任务，不保证工具之间存在真实依赖关系。这是数据设计 caveat，不是代码 bug。
 
+## 冷启动混合测试集
+
+TapMem 冷启动实验使用独立脚本：
+
+```text
+compositional/synthesize_cold_start_mixed_test.py
+```
+
+它不会修改 `xlam_datasets.py`，而是复用原来的 XLAM 读取、单工具样本提取和
+训练/测试划分函数，再单独完成新旧工具混合抽样。旧工具固定为 tools 51–100，
+20 个新工具记录在：
+
+```text
+compositional/cold_start_selected_tools_20.json
+```
+
+数据划分和原 4-calls 数据保持一致：
+
+- 每个工具最多读取 50 个原始单工具样本；
+- 划分随机种子为 42，训练集与测试集比例为 5000:500；
+- 合成随机种子为 200；
+- 同一工具多次调用的抽取概率为 0.1；
+- 每条样本最多包含 4 次函数调用。
+
+默认生成 500 条测试样本：
+
+| 新工具数 | 旧工具数 | 不同工具总数 | 样本数 |
+| ---: | ---: | ---: | ---: |
+| 1 | 1 | 2 | 200 |
+| 1 | 2 | 3 | 100 |
+| 2 | 1 | 3 | 100 |
+| 2 | 2 | 4 | 34 |
+| 1 | 3 | 4 | 33 |
+| 3 | 1 | 4 | 33 |
+
+工具顺序和连接词继续随机抽取。因为保留了原数据中“同一工具调用多次”的样本，
+“不同工具数”和“函数调用次数”不一定相同。
+
+生成命令：
+
+```bash
+source /home/shilong/anaconda3/etc/profile.d/conda.sh
+conda activate tokmem
+python compositional/synthesize_cold_start_mixed_test.py
+```
+
+输出：
+
+```text
+compositional/data/test/function_calling_test_tools51-100_plus_cold20_4calls.json
+compositional/data/tool_descriptions_tools51-100_plus_cold20.json
+```
+
 ## TokMem 监督格式
 
 TokMem 训练时，每个 tool name 映射到一个 reserved special token。

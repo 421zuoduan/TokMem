@@ -1,0 +1,26 @@
+{
+  "base_tool_range": "51-100",
+  "candidate_tool_range": "1-50",
+  "new_tools": [
+    "calculate_investment_return",
+    "average",
+    "find_majority_element",
+    "find_pairs_with_sum",
+    "bacterial_growth",
+    "get_ip_zipcode",
+    "triangle_area",
+    "find_n_largest_numbers",
+    "min_meeting_rooms",
+    "is_valid_email",
+    "is_perfect_square",
+    "std_deviation",
+    "euclidean_distance",
+    "numerical_derivative",
+    "get_ip_location",
+    "get_order",
+    "find_kth_smallest_number",
+    "is_power_of_two",
+    "least_common_multiple",
+    "calculate_electric_field"
+  ]
+}

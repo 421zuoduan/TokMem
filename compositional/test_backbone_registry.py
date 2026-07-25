@@ -17,6 +17,10 @@ if str(COMPOSITIONAL_DIR) not in sys.path:
     sys.path.insert(0, str(COMPOSITIONAL_DIR))
 
 from backbone_registry import resolve_function_calling_model_class  # noqa: E402
+from checkpoint_io import (  # noqa: E402
+    build_checkpoint_payload,
+    load_checkpoint_into_model,
+)
 from model import FunctionCallingModel  # noqa: E402
 from qwen35_model import (  # noqa: E402
     Qwen35FunctionCallingModel,
@@ -170,6 +174,64 @@ class BackboneRegistryTest(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (1, 3, 10))
         logits.sum().backward()
         self.assertIsNotNone(model.trainable_tool_embeddings.grad)
+
+    def test_qwen35_trainable_checkpoint_round_trip(self):
+        outer_config = SimpleNamespace(model_type="qwen3_5")
+
+        def build_model():
+            with (
+                patch(
+                    "qwen35_model.AutoConfig.from_pretrained",
+                    return_value=outer_config,
+                ),
+                patch(
+                    "qwen35_model.AutoModelForCausalLM.from_pretrained",
+                    return_value=FakeCausalLM(),
+                ),
+            ):
+                return Qwen35FunctionCallingModel(
+                    model_name="/unused/qwen35",
+                    num_tools=2,
+                    tool_names=["tool_a", "tool_b"],
+                    tokenizer=FakeTokenizer(),
+                    device="cpu",
+                    dtype=torch.float32,
+                    use_eoc=True,
+                    use_logit_bias=True,
+                )
+
+        source = build_model()
+        source.trainable_tool_embeddings.data.copy_(
+            torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        )
+        source.logit_bias_head.weight.data.fill_(0.25)
+        source.logit_bias_head.bias.data.fill_(0.5)
+        checkpoint = build_checkpoint_payload(
+            source,
+            1,
+            source.tool_names,
+            {},
+            checkpoint_format="trainable_only",
+            base_model_name="/unused/qwen35",
+        )
+
+        target = build_model()
+        base_before = target.model.embed_tokens.weight.detach().clone()
+        load_checkpoint_into_model(target, checkpoint)
+
+        torch.testing.assert_close(
+            target.trainable_tool_embeddings,
+            source.trainable_tool_embeddings,
+        )
+        torch.testing.assert_close(
+            target.logit_bias_head.weight,
+            source.logit_bias_head.weight,
+        )
+        torch.testing.assert_close(
+            target.logit_bias_head.bias,
+            source.logit_bias_head.bias,
+        )
+        torch.testing.assert_close(target.model.embed_tokens.weight, base_before)
 
     def test_qwen35_cached_generation_step_uses_hybrid_cache(self):
         try:

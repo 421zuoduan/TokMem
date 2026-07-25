@@ -175,8 +175,9 @@ seven-method compositional Table 1 matrix for Qwen3.5-9B followed by
 Qwen3.5-4B. Each backbone first performs an independent seed-42 TapMem
 learning-rate sweep, then runs seeds 40/41/42 with the selected learning rate.
 The scheduler dynamically consumes all empty GPUs from the requested pool,
-does not save full-model sweep checkpoints, and writes the final three-seed
-mean and sample standard deviation with Bash, `jq`, and `awk`. Pass
+does not save sweep checkpoints, and saves only memory/head/LoRA deltas for
+the final trained runs. The final three-seed mean and sample standard
+deviation are written with Bash, `jq`, and `awk`. Pass
 `--conda-env tokmem-qwen35` to use the validated Qwen3.5 FLA/causal-conv1d
 environment. The default remains `tokmem` for compatibility, and each suite
 records the environment name, package manifest, and critical implementation
@@ -325,6 +326,14 @@ Maintained runs keep:
 - `loss_step.png` when `--tensorboard` is passed
 - `lr_step.png` when `--tensorboard` is passed
 
+`--save_checkpoints` retains the historical full `model_state_dict` format by
+default. Add `--checkpoint_format trainable_only` to save only the TokMem
+memory embeddings, optional TapMem/TCRA head, and optional PEFT LoRA adapter.
+Trainable-only checkpoints also record the complete ordered tool list and
+reserved-token mapping. Loading first reconstructs the wrapper from the
+original pretrained model and then applies these deltas. Existing full
+checkpoints continue to load with the original strict state-dict path.
+
 Training methods keep metrics in `evaluation_results.json` under the latest round payload:
 
 ```text
@@ -358,7 +367,15 @@ Passing `--tensorboard` on the maintained TokMem path saves two static PNG trend
 
 ## Per-Sample Prediction Comparison
 
-Use `scripts/compositional/generate_checkpoint_predictions.py` to run a saved TokMem-family checkpoint over every example in a compositional test split and write one JSONL record per sample. The script reads `run_config.json` for the model path, data path, and maintained mode flags such as `use_eoc` and `use_logit_bias`.
+Use `scripts/compositional/generate_checkpoint_predictions.py` to run a saved
+TokMem-family checkpoint over every example in a compositional test split and
+write one JSONL record per sample. The script reads `run_config.json` for the
+model path, data path, and maintained mode flags such as `use_eoc`,
+`use_logit_bias`, and adaptation LoRA configuration. Both historical full
+checkpoints and versioned trainable-only checkpoints are supported.
+Unless overridden with `--max-new-tokens`, generation reuses the training
+run's `max_new_tokens` value; older run configs without that field fall back
+to 256.
 
 Example for the Llama-1B TokMem and EOC+logit-bias checkpoints:
 
@@ -377,6 +394,20 @@ python scripts/compositional/generate_checkpoint_predictions.py \
 ```
 
 Each JSONL record keeps the sample index, user input, expected tools/calls, predicted tools/calls, reserved tool tokens, `tool_sequence_exact`, `call_exact`, F1, Tool F1, and parse-error counts.
+
+Standalone Fine-Tuning checkpoints are PEFT adapter directories rather than
+TokMem `.pt` files. Evaluate one by loading its original backbone plus adapter:
+
+```bash
+python scripts/compositional/evaluate_lora_checkpoint.py \
+  --run-config results/compositional/<suite>/runs/<run>/run_config.json \
+  --adapter-checkpoint results/compositional/<suite>/runs/<run>/round_1_tools_51_100 \
+  --output results/compositional/<suite>/runs/<run>/adapter_evaluation.json
+```
+
+The evaluator derives the final-round test split from `run_config.json`,
+loads the base model locally, applies the saved adapter with PEFT, and then
+uses the same maintained LoRA evaluation routine.
 
 ## Legacy Entry Points
 

@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "benchmark": {
+    "name": "Toolathlon-Verified",
+    "source_url": "https://github.com/hkust-nlp/Toolathlon",
+    "revision": "2aed2468858f15818acafa178518390cc4b0f5cb",
+    "snapshot_path": "datasets/toolathlon",
+    "vendor_path": "compositional_toolathlon/vendor/toolathlon",
+    "task_directory": "tasks/finalpool",
+    "prepared_image": "lockon0927/toolathlon-task-image:1016beta"
+  },
+  "interface": {
+    "name": "no-tool-doc-memory-token",
+    "student_receives_tool_docs": false,
+    "tokmem_tool_capacity": 248,
+    "tapmem_tool_capacity": 247,
+    "eoc_only_tool_capacity": 247
+  },
+  "runtime_policy": {
+    "primary_condition": "toolathlon_default_decoupled",
+    "gateway_terminal_wire_name": "local-claim_done",
+    "host_local_groups": ["python_execute"],
+    "filtered_host_groups": [
+      "claim_done",
+      "manage_context",
+      "history",
+      "handle_overlong_tool_outputs"
+    ],
+    "python_execute_requires_disposable_container": true,
+    "python_execute_sandbox": "bubblewrap_workspace_only"
+  },
+  "metric_policy": {
+    "official_primary": "original_evaluator_pass",
+    "tool_f1_primary_scope": "environment_and_effectful_task_tools",
+    "report_all_model_selected_actions_separately": true,
+    "arguments_f1_definition": "normalized_complete_function_call_set_f1"
+  },
+  "mcp_servers": [
+    "filesystem",
+    "terminal",
+    "excel",
+    "pdf-tools"
+  ],
+  "tasks": [
+    {
+      "id": "arrange-workspace",
+      "servers": ["filesystem", "terminal", "pdf-tools", "excel"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": true
+    },
+    {
+      "id": "courses-ta-hws",
+      "servers": ["terminal", "excel", "filesystem"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": true
+    },
+    {
+      "id": "detect-revised-terms",
+      "servers": ["filesystem", "pdf-tools"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": false
+    },
+    {
+      "id": "excel-data-transformation",
+      "servers": ["excel", "filesystem", "terminal"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": false
+    },
+    {
+      "id": "excel-market-research",
+      "servers": ["excel", "filesystem", "terminal"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": false
+    },
+    {
+      "id": "imagenet",
+      "servers": ["filesystem", "pdf-tools"],
+      "local_tools": ["claim_done", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": false
+    },
+    {
+      "id": "paper-checker",
+      "servers": ["filesystem", "terminal"],
+      "local_tools": ["claim_done", "python_execute", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": true
+    },
+    {
+      "id": "privacy-desensitization",
+      "servers": ["filesystem", "terminal"],
+      "local_tools": ["python_execute", "claim_done", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": true
+    },
+    {
+      "id": "reimbursement-form-filler",
+      "servers": ["filesystem", "excel", "pdf-tools", "terminal"],
+      "local_tools": ["python_execute", "claim_done", "handle_overlong_tool_outputs", "manage_context", "history"],
+      "has_preprocess": true
+    },
+    {
+      "id": "university-course-selection",
+      "servers": ["filesystem", "pdf-tools", "terminal", "excel"],
+      "local_tools": ["python_execute", "manage_context", "history", "claim_done", "handle_overlong_tool_outputs"],
+      "has_preprocess": false
+    }
+  ],
+  "training_data_protected_paths": [
+    "docs/task.md",
+    "docs/task_cn.md",
+    "initial_workspace",
+    "groundtruth_workspace",
+    "evaluation",
+    "preprocess"
+  ],
+  "required_runner_paths": [
+    "configs",
+    "global_preparation",
+    "scripts/run_single_decoupled.sh",
+    "scripts/decoupled/container_tool_gateway.py",
+    "utils"
+  ]
+}

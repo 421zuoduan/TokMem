@@ -1,0 +1,9 @@
+Audit one synthetic local tool-use task. Return compact JSON only:
+{"verdict":"PASS|FAIL","reasons":["short reason"],"checks":{...}}
+
+FAIL if the task resembles protected benchmark content, is underspecified,
+offers a nonexistent or unusable tool, needs an external service, exposes
+oracle/evaluator data, can pass without completing the request, relies on an
+LLM judge, escapes the workspace, or cannot be reset deterministically.
+
+Do not repair the task and do not propose a trajectory.
