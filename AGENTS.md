@@ -56,6 +56,15 @@ For `compositional/`, prefer `main_sequential.py` and maintained `scripts/compos
 - For `atomic/` model/data changes, use `python test_sbert_retriever.py` or a reduced `main_in_domain.py` run.
 - Add `test_*.py` files only when they are meant to be kept and run directly.
 
+## Checkpoints
+
+- For new training runs, checkpoint files should contain only parameters that are
+  updated during training. Do not save an additional copy of a frozen LLM
+  backbone.
+- Preserve compatibility with existing checkpoints that already include frozen
+  LLM-backbone parameters. Load those checkpoints in full rather than filtering
+  out the frozen-backbone entries.
+
 ## Documentation
 
 Update docs in the same change when behavior affects:

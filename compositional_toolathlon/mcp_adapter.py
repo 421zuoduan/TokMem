@@ -18,6 +18,14 @@ from .manifest import (
 
 
 RAW_GATEWAY_NAMESPACE = "toolathlon-gateway"
+SEMANTIC_ERROR_PREFIXES = (
+    "error:",
+    "error ",
+    "failed:",
+    "failed to ",
+    "tool call failed",
+    "access denied:",
+)
 
 
 def _model_dump(value: Any) -> dict[str, Any]:
@@ -26,6 +34,18 @@ def _model_dump(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     raise TypeError(f"MCP value is not serializable: {type(value).__name__}")
+
+
+def observation_reports_error(observation: Any) -> bool:
+    if isinstance(observation, str):
+        normalized = observation.strip().casefold()
+        return normalized.startswith(SEMANTIC_ERROR_PREFIXES)
+    if isinstance(observation, list):
+        return any(observation_reports_error(item) for item in observation)
+    if isinstance(observation, dict):
+        text = observation.get("text")
+        return isinstance(text, str) and observation_reports_error(text)
+    return False
 
 
 def assert_runtime_tool_set(
@@ -68,6 +88,9 @@ def assert_runtime_tool_set(
 def resolve_runtime_gateway_tool_ids(
     manifest: dict[str, Any],
     runtime_tools: list[dict[str, Any]],
+    *,
+    require_schema_match: bool = True,
+    ignore_unknown: bool = False,
 ) -> list[str]:
     record_by_wire = {
         record["wire_name"]: record
@@ -75,13 +98,23 @@ def resolve_runtime_gateway_tool_ids(
         if record.get("origin") == "gateway_mcp"
     }
     resolved = []
+    seen_wire_names: set[str] = set()
     for tool in runtime_tools:
         wire_name = tool.get("name")
+        if not isinstance(wire_name, str) or not wire_name:
+            raise ValueError("runtime tools/list returned an invalid name")
+        if wire_name in seen_wire_names:
+            raise ValueError(f"runtime tools/list duplicated {wire_name!r}")
+        seen_wire_names.add(wire_name)
         record = record_by_wire.get(wire_name)
         if record is None:
+            if ignore_unknown:
+                continue
             raise ValueError(f"runtime exposed a tool absent from manifest: {wire_name!r}")
-        if canonical_json(normalized_input_schema(tool)) != canonical_json(
-            record["input_schema"]
+        if (
+            require_schema_match
+            and canonical_json(normalized_input_schema(tool))
+            != canonical_json(record["input_schema"])
         ):
             raise ValueError(f"runtime schema drift for MCP wire tool {wire_name!r}")
         resolved.append(record["stable_id"])
@@ -192,11 +225,16 @@ class RawSseMcpClient:
             observation: Any = content[0]
         else:
             observation = content
+        semantic_error = observation_reports_error(observation)
         return {
+            # The MCP protocol's isError field is authoritative.  Text such as
+            # "Error:" may be legitimate file content, so semantic detection
+            # is diagnostic only and must not change rollout control flow.
             "success": not bool(payload.get("isError", False)),
             "observation": observation,
             "runtime_metadata": {
                 "is_error": bool(payload.get("isError", False)),
+                "semantic_error": semantic_error,
                 "meta": payload.get("_meta"),
             },
         }

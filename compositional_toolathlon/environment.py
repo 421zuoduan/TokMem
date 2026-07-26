@@ -144,18 +144,19 @@ def audit_environment(config: ExperimentConfig) -> dict[str, Any]:
         checks[f"executable_{executable}"] = {"ok": path is not None, "path": path}
     bwrap_path = checks["executable_bwrap"]["path"]
     if bwrap_path:
+        bwrap_probe = [
+            bwrap_path,
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-net",
+            "--new-session",
+        ]
+        for system_path in ("/usr", "/bin", "/lib", "/lib64"):
+            if Path(system_path).exists():
+                bwrap_probe.extend(["--ro-bind", system_path, system_path])
+        bwrap_probe.append("/usr/bin/true")
         checks["python_execute_jail"] = run_probe(
-            [
-                bwrap_path,
-                "--die-with-parent",
-                "--unshare-user",
-                "--unshare-net",
-                "--new-session",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-                "/usr/bin/true",
-            ]
+            bwrap_probe
         )
     else:
         checks["python_execute_jail"] = {

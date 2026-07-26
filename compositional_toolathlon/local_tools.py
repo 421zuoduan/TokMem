@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_experiment_config
+from .context import materialize_workspace_paths, normalize_workspace_paths
 from .manifest import (
     finalize_manifest,
     load_manifest,
@@ -32,6 +34,7 @@ PYTHON_EXECUTE_SCHEMA = {
     "additionalProperties": False,
 }
 MAX_CAPTURED_STREAM_BYTES = 200_000
+PYTHON_JAIL_WORKSPACE_ROOT = "/workspace"
 
 
 async def _read_bounded_stream(
@@ -123,18 +126,19 @@ class PythonExecuteTool:
                 "local-python-execute requires bubblewrap; unsafe host execution "
                 "has no fallback"
             )
+        probe_command = [
+            self.bwrap_binary,
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-net",
+            "--new-session",
+        ]
+        for system_path in ("/usr", "/bin", "/lib", "/lib64"):
+            if Path(system_path).exists():
+                probe_command.extend(["--ro-bind", system_path, system_path])
+        probe_command.append("/usr/bin/true")
         probe = subprocess.run(
-            [
-                self.bwrap_binary,
-                "--die-with-parent",
-                "--unshare-user",
-                "--unshare-net",
-                "--new-session",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-                "/usr/bin/true",
-            ],
+            probe_command,
             check=False,
             capture_output=True,
             text=True,
@@ -337,16 +341,32 @@ class CompositeToolExecutor:
         manifest: dict[str, Any],
         mcp_executor: Any,
         workspace_root: str | Path,
+        mcp_workspace_root: str | Path | None = None,
         enable_python_execute: bool,
+        validate_mcp_arguments: bool = True,
     ) -> None:
         self.manifest = manifest
         self.mcp_executor = mcp_executor
+        self.workspace_root = Path(workspace_root).resolve()
+        raw_mcp_workspace_root = str(
+            mcp_workspace_root
+            if mcp_workspace_root is not None
+            else self.workspace_root
+        )
+        if (
+            not posixpath.isabs(raw_mcp_workspace_root)
+            or posixpath.normpath(raw_mcp_workspace_root)
+            != raw_mcp_workspace_root
+        ):
+            raise ValueError("MCP workspace root must be a normalized absolute path")
+        self.mcp_workspace_root = raw_mcp_workspace_root
+        self.validate_mcp_arguments = validate_mcp_arguments
         self.records = {
             record["stable_id"]: record for record in manifest["tools"]
         }
         self.python_execute = (
             PythonExecuteTool(
-                workspace_root,
+                self.workspace_root,
             )
             if enable_python_execute
             else None
@@ -361,14 +381,41 @@ class CompositeToolExecutor:
             record = self.records[stable_tool_id]
         except KeyError as exc:
             raise ValueError(f"unknown stable tool ID: {stable_tool_id}") from exc
-        validate_tool_arguments(record, arguments)
         dispatch = record["dispatch_kind"]
         if dispatch in {"mcp", "terminal"}:
-            return await self.mcp_executor.call_tool(stable_tool_id, arguments)
+            runtime_arguments = materialize_workspace_paths(
+                arguments,
+                self.mcp_workspace_root,
+            )
+            if self.validate_mcp_arguments:
+                validate_tool_arguments(record, runtime_arguments)
+            outcome = await self.mcp_executor.call_tool(
+                stable_tool_id,
+                runtime_arguments,
+            )
+            if isinstance(outcome, dict) and "observation" in outcome:
+                outcome = dict(outcome)
+                outcome["observation"] = normalize_workspace_paths(
+                    outcome["observation"],
+                    self.mcp_workspace_root,
+                )
+            return outcome
         if dispatch == "local_python":
             if self.python_execute is None:
                 raise RuntimeError("local-python-execute is not enabled for this task")
-            return await self.python_execute.call(arguments)
+            runtime_arguments = materialize_workspace_paths(
+                arguments,
+                PYTHON_JAIL_WORKSPACE_ROOT,
+            )
+            validate_tool_arguments(record, runtime_arguments)
+            outcome = await self.python_execute.call(runtime_arguments)
+            if isinstance(outcome, dict) and "observation" in outcome:
+                outcome = dict(outcome)
+                outcome["observation"] = normalize_workspace_paths(
+                    outcome["observation"],
+                    PYTHON_JAIL_WORKSPACE_ROOT,
+                )
+            return outcome
         raise ValueError(f"unsupported tool dispatch kind: {dispatch}")
 
 

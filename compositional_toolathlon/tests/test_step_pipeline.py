@@ -1,3 +1,5 @@
+import asyncio
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -6,10 +8,12 @@ from pathlib import Path
 import torch
 
 from compositional_toolathlon.audit_dataset import audit_dataset
+from compositional_toolathlon.collect_teacher_episode import resolve_teacher_settings
 from compositional_toolathlon.config import load_experiment_config
 from compositional_toolathlon.context import (
     ObservationPolicy,
     compact_observation,
+    materialize_workspace_paths,
     normalize_workspace_paths,
     render_step_context,
 )
@@ -32,7 +36,12 @@ from compositional_toolathlon.manifest import (
     schema_hash,
     validate_tool_arguments,
 )
-from compositional_toolathlon.mcp_adapter import assert_runtime_tool_set
+from compositional_toolathlon.mcp_adapter import (
+    RawSseMcpClient,
+    assert_runtime_tool_set,
+    observation_reports_error,
+    resolve_runtime_gateway_tool_ids,
+)
 from compositional_toolathlon.local_tools import (
     PythonExecuteTool,
     augment_default_decoupled_manifest,
@@ -53,6 +62,7 @@ from compositional_toolathlon.rollout import Action, run_closed_loop_rollout
 from compositional_toolathlon.run_official_agent import (
     build_official_trajectory_envelope,
     load_official_agent_bundle,
+    official_provider_tools,
     rollout_to_official_messages,
 )
 from compositional_toolathlon.teacher import TeacherSettings, collect_teacher_candidate
@@ -66,6 +76,7 @@ from compositional_toolathlon.training import (
     compute_stepwise_loss,
     gather_assistant_start_boundaries,
 )
+from compositional_toolathlon.verify_tasks import load_usable_tools
 
 
 def make_manifest():
@@ -346,12 +357,113 @@ class CoverageAuditTests(unittest.TestCase):
             "train",
         )
 
+    def test_episode_metadata_must_match_verified_task(self):
+        manifest = make_manifest()
+        episode, task, target_tool_id = make_coverage_fixture(
+            manifest,
+            0,
+            "train",
+        )
+        episode["instruction"] = "tampered instruction"
+        with self.assertRaisesRegex(ValueError, "does not match verified task"):
+            audit_dataset(
+                episodes=[episode],
+                task_specs=[task],
+                manifest=manifest,
+                target_tool_ids={target_tool_id},
+                min_successful_episodes=1,
+                min_argument_shapes=1,
+                min_templates=1,
+                require_distractor_role=False,
+            )
+
+    def test_formal_audit_rejects_episode_without_real_execution_evidence(self):
+        manifest = make_manifest()
+        episode, task, target_tool_id = make_coverage_fixture(
+            manifest,
+            0,
+            "train",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "teacher.real_execution=true",
+        ):
+            audit_dataset(
+                episodes=[episode],
+                task_specs=[task],
+                manifest=manifest,
+                target_tool_ids={target_tool_id},
+                min_successful_episodes=1,
+                min_argument_shapes=1,
+                min_templates=1,
+                require_distractor_role=False,
+                require_real_execution=True,
+            )
+
 
 class ManifestTests(unittest.TestCase):
     def test_schema_hash_is_key_order_invariant(self):
         left = {"type": "object", "properties": {"a": {"type": "string"}, "b": {}}}
         right = {"properties": {"b": {}, "a": {"type": "string"}}, "type": "object"}
         self.assertEqual(schema_hash("demo", left), schema_hash("demo", right))
+
+    def test_usable_tool_list_rejects_empty_and_duplicate_ids(self):
+        manifest = make_manifest()
+        tool_id = manifest["tools"][0]["stable_id"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "usable.json"
+            for tools, message in (
+                ([], "cannot be empty"),
+                ([tool_id, tool_id], "cannot contain duplicates"),
+            ):
+                path.write_text(
+                    json.dumps(
+                        {
+                            "tool_manifest_hash": manifest["manifest_hash"],
+                            "usable_tool_ids": tools,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    load_usable_tools(path, manifest["manifest_hash"])
+
+    def test_textual_mcp_error_detection_is_diagnostic(self):
+        self.assertTrue(
+            observation_reports_error(
+                {"type": "text", "text": "Error: workbook is missing"}
+            )
+        )
+        self.assertTrue(
+            observation_reports_error(
+                [{"type": "text", "text": "Failed to read the PDF"}]
+            )
+        )
+        self.assertFalse(
+            observation_reports_error(
+                {"type": "text", "text": "No matches found for pattern: X"}
+            )
+        )
+
+    def test_mcp_is_error_remains_authoritative_over_text_prefix(self):
+        class FakeSession:
+            async def call_tool(self, *, name, arguments):
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Error: this is legitimate file content",
+                        }
+                    ],
+                    "isError": False,
+                }
+
+        client = RawSseMcpClient("http://unused.invalid/sse")
+        client._session = FakeSession()
+        outcome = asyncio.run(client.call_tool("filesystem-read", {"path": "x"}))
+        self.assertTrue(outcome["success"])
+        self.assertTrue(outcome["runtime_metadata"]["semantic_error"])
+        self.assertFalse(outcome["runtime_metadata"]["is_error"])
 
     def test_manifest_is_stable_and_sorted(self):
         first = make_manifest()
@@ -398,6 +510,54 @@ class ManifestTests(unittest.TestCase):
                     }
                 ],
             )
+
+    def test_official_wire_compatibility_maps_schema_drift_and_ignores_unknown(self):
+        manifest = build_manifest(
+            {
+                "toolathlon-gateway": {
+                    "tools": [
+                        {
+                            "name": "filesystem-directory_tree",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "path": {"type": "string"},
+                                    "excludePatterns": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["path"],
+                            },
+                        }
+                    ]
+                }
+            },
+            "2aed2468858f15818acafa178518390cc4b0f5cb",
+        )
+        runtime_tools = [
+            {
+                "name": "filesystem-directory_tree",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "runtime-only-tool",
+                "inputSchema": {"type": "object"},
+            },
+        ]
+        with self.assertRaisesRegex(ValueError, "schema drift"):
+            resolve_runtime_gateway_tool_ids(manifest, runtime_tools[:1])
+        resolved = resolve_runtime_gateway_tool_ids(
+            manifest,
+            runtime_tools,
+            require_schema_match=False,
+            ignore_unknown=True,
+        )
+        self.assertEqual(resolved, [manifest["tools"][0]["stable_id"]])
 
     def test_host_local_python_is_explicit_and_not_checked_as_mcp_wire(self):
         base = make_manifest()
@@ -519,6 +679,13 @@ class OfficialAgentBridgeTests(unittest.TestCase):
                             "agent_workspace": str(workspace),
                             "log_file": str(root / "dump" / "traj_log.json"),
                         },
+                        "container_paths": {
+                            "task_root": "/workspace/dumps",
+                            "agent_workspace": (
+                                "/workspace/dumps/agent_workspace"
+                            ),
+                            "log_file": "/workspace/dumps/traj_log.json",
+                        },
                         "needed_local_tools": ["claim_done"],
                         "max_steps_under_single_turn_mode": 20,
                         "resolved_task_config": {"task_name": "fixture"},
@@ -531,6 +698,10 @@ class OfficialAgentBridgeTests(unittest.TestCase):
             self.assertEqual(
                 bundle["_resolved_output_root"],
                 str((root / "dump").resolve()),
+            )
+            self.assertEqual(
+                bundle["_resolved_container_workspace"],
+                "/workspace/dumps/agent_workspace",
             )
 
     def test_bundle_rejects_workspace_outside_dump_root(self):
@@ -548,6 +719,13 @@ class OfficialAgentBridgeTests(unittest.TestCase):
                             "task_root": str(root / "dump"),
                             "agent_workspace": str(outside),
                             "log_file": str(root / "dump" / "traj_log.json"),
+                        },
+                        "container_paths": {
+                            "task_root": "/workspace/dumps",
+                            "agent_workspace": (
+                                "/workspace/dumps/agent_workspace"
+                            ),
+                            "log_file": "/workspace/dumps/traj_log.json",
                         },
                         "needed_local_tools": [],
                         "max_steps_under_single_turn_mode": 10,
@@ -611,6 +789,72 @@ class OfficialAgentBridgeTests(unittest.TestCase):
         self.assertEqual(envelope["key_stats"]["tool_calls"], 1)
         self.assertIsNone(envelope["history_file"])
 
+    def test_live_gateway_schema_is_recorded_without_entering_model_context(self):
+        manifest = make_manifest()
+        record = next(
+            item
+            for item in manifest["tools"]
+            if item["tool_name"] == "list_directory"
+        )
+        live_schema = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "runtimeOption": {"type": "boolean"},
+            },
+            "required": ["path"],
+        }
+        runtime_tools = [
+            {
+                "name": record["wire_name"],
+                "description": "Live runtime description",
+                "inputSchema": live_schema,
+            }
+        ]
+        tools = official_provider_tools(
+            manifest,
+            [record["stable_id"]],
+            runtime_tools,
+        )
+        self.assertEqual(
+            tools[0]["function"]["description"],
+            "Live runtime description",
+        )
+        self.assertEqual(tools[0]["function"]["parameters"], live_schema)
+
+        compatibility = {
+            "mapped_wire_names": [record["wire_name"]],
+            "unavailable_manifest_wire_names": [],
+            "ignored_runtime_wire_names": [],
+            "schema_changed_wire_names": [record["wire_name"]],
+        }
+        envelope = build_official_trajectory_envelope(
+            bundle={
+                "task_str": "Inspect the workspace.",
+                "resolved_task_config": {"task_name": "fixture"},
+            },
+            rollout={
+                "termination_reason": "claim_done",
+                "events": [],
+                "tool_call_count": 0,
+                "available_tool_ids": [record["stable_id"]],
+                "runtime_gateway_tools": runtime_tools,
+                "runtime_tool_compatibility": compatibility,
+            },
+            manifest=manifest,
+            fresh_environment_id="fixture-container-1",
+            started_at="2026-07-25T00:00:00+00:00",
+        )
+        self.assertEqual(
+            envelope["tool_calls"]["tools"][0]["function"]["parameters"],
+            live_schema,
+        )
+        self.assertEqual(
+            envelope["tokmem_runtime"]["runtime_tool_compatibility"],
+            compatibility,
+        )
+        self.assertNotIn("tools", envelope["messages"][0])
+
 
 class SyntheticWorkspaceTests(unittest.TestCase):
     def make_task(self):
@@ -662,6 +906,62 @@ class SyntheticWorkspaceTests(unittest.TestCase):
             apply_workspace_recipe(temporary, task["initial_workspace"], require_empty=True)
             self.assertFalse(evaluate_workspace(temporary, task["evaluator"])["passed"])
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("reportlab"),
+        "reportlab is installed only in the Toolathlon runtime",
+    )
+    def test_generated_pdf_assets_are_byte_deterministic(self):
+        recipe = {
+            "directories": [],
+            "files": [
+                {
+                    "path": "brief.pdf",
+                    "format": "pdf",
+                    "content": ["stable page one", "stable page two"],
+                }
+            ],
+            "remove": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            left = Path(temporary) / "left"
+            right = Path(temporary) / "right"
+            apply_workspace_recipe(left, recipe, require_empty=True)
+            apply_workspace_recipe(right, recipe, require_empty=True)
+            self.assertEqual(
+                (left / "brief.pdf").read_bytes(),
+                (right / "brief.pdf").read_bytes(),
+            )
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl"),
+        "openpyxl is installed only in the Toolathlon runtime",
+    )
+    def test_generated_xlsx_assets_are_byte_deterministic(self):
+        recipe = {
+            "directories": [],
+            "files": [
+                {
+                    "path": "report.xlsx",
+                    "format": "xlsx",
+                    "content": {
+                        "sheets": [
+                            {"name": "Data", "rows": [["key", "value"], ["A", 1]]}
+                        ]
+                    },
+                }
+            ],
+            "remove": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            left = Path(temporary) / "left"
+            right = Path(temporary) / "right"
+            apply_workspace_recipe(left, recipe, require_empty=True)
+            apply_workspace_recipe(right, recipe, require_empty=True)
+            self.assertEqual(
+                (left / "report.xlsx").read_bytes(),
+                (right / "report.xlsx").read_bytes(),
+            )
+
     def test_parent_and_absolute_paths_are_rejected(self):
         for unsafe in ("../escape", "/absolute", "a/../b"):
             with self.assertRaises(ValueError):
@@ -695,6 +995,14 @@ class EpisodeTests(unittest.TestCase):
         self.assertNotIn('"moved": true', json.dumps(steps[1]["history"]).lower())
         self.assertIn("<WORKSPACE>", json.dumps(steps[1]))
         self.assertEqual(steps[0]["episode_step_count"], 2)
+
+    def test_episode_workspace_root_is_used_when_cli_override_is_absent(self):
+        self.episode["workspace_root"] = "/tmp/workspace"
+        steps = flatten_episode(self.episode)
+        self.assertEqual(
+            steps[0]["target_arguments"]["path"],
+            "<WORKSPACE>",
+        )
 
     def test_rejects_teacher_prose_and_failed_calls(self):
         with_prose = json.loads(json.dumps(self.episode))
@@ -800,6 +1108,12 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(normalized["path"], "<WORKSPACE>/a")
         self.assertEqual(normalized["nested"][0], "<WORKSPACE>/b")
 
+    def test_workspace_materialization_is_recursive(self):
+        value = {"path": "<WORKSPACE>/a", "nested": ["<WORKSPACE>/b"]}
+        materialized = materialize_workspace_paths(value, "/tmp/ws")
+        self.assertEqual(materialized["path"], "/tmp/ws/a")
+        self.assertEqual(materialized["nested"][0], "/tmp/ws/b")
+
 
 class MaskTests(unittest.TestCase):
     def setUp(self):
@@ -865,6 +1179,38 @@ class GenerationConfigTests(unittest.TestCase):
         prompts = [session["prompt"] for session in config["generator_sessions"]]
         self.assertGreaterEqual(len(prompts), 3)
         self.assertEqual(len(prompts), len(set(prompts)))
+
+    def test_llm_config_selects_distinct_teacher_sessions(self):
+        package_dir = Path(__file__).resolve().parents[1]
+        config = load_generation_config(
+            package_dir / "configs" / "generation_llm_v1.json"
+        )
+        self.assertEqual(set(config["models"].values()), {"gpt-5.6-sol"})
+        sessions = config["teacher_sessions"]
+        self.assertEqual(len(sessions), 3)
+        self.assertTrue(
+            all(
+                set(session) == {"session_id", "prompt", "prompt_version"}
+                for session in sessions
+            )
+        )
+        settings, session_id = resolve_teacher_settings(config, "state-first-v1")
+        self.assertEqual(session_id, "state-first-v1")
+        self.assertEqual(settings.model, "gpt-5.6-sol")
+        self.assertEqual(settings.prompt_version, "teacher-state-first-v1")
+        self.assertEqual(settings.max_tool_calls, config["teacher"]["max_tool_calls"])
+
+    def test_legacy_config_keeps_single_teacher_prompt(self):
+        config = load_generation_config(
+            Path(__file__).resolve().parents[1] / "configs" / "generation.json"
+        )
+        settings, session_id = resolve_teacher_settings(config)
+        self.assertIsNone(session_id)
+        self.assertEqual(settings.model, config["models"]["teacher"])
+        self.assertEqual(
+            settings.prompt_version,
+            config["teacher"]["prompt_version"],
+        )
 
 
 class FakeActionClient:

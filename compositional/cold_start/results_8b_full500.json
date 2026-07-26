@@ -1,0 +1,60 @@
+{
+  "metric": "first_full_vocabulary_greedy_tool_routing",
+  "data_path": "compositional/data/test/function_calling_test_tools51-100_plus_cold20_4calls.json",
+  "examples": 500,
+  "new_tool_targets": 250,
+  "old_tool_targets": 250,
+  "configuration": {
+    "model_size": "8B",
+    "fusion_rule": "query-prototype-bridge",
+    "bridge_prototype_samples_per_tool": 3,
+    "affine_top_k": 9,
+    "document_ridge_relative": 0.1,
+    "query_ridge_relative": 0.1,
+    "bridge_extrapolate_to_cap": true,
+    "identity_tail_quantile": 0.85,
+    "renorm_applied": false
+  },
+  "results": [
+    {
+      "method": "TokMem",
+      "negative_mass_cap": 0.5,
+      "correct": 147,
+      "new_tool_correct": 15,
+      "old_tool_correct": 132,
+      "predicted_new_tools": 94,
+      "old_to_new": 32,
+      "tool_token_predictions": 499
+    },
+    {
+      "method": "TapMem",
+      "negative_mass_cap": 0.5,
+      "correct": 167,
+      "new_tool_correct": 17,
+      "old_tool_correct": 150,
+      "predicted_new_tools": 104,
+      "old_to_new": 33,
+      "tool_token_predictions": 500
+    },
+    {
+      "method": "TokMem",
+      "negative_mass_cap": 0.6,
+      "correct": 144,
+      "new_tool_correct": 21,
+      "old_tool_correct": 123,
+      "predicted_new_tools": 145,
+      "old_to_new": 61,
+      "tool_token_predictions": 499
+    },
+    {
+      "method": "TapMem",
+      "negative_mass_cap": 0.6,
+      "correct": 164,
+      "new_tool_correct": 24,
+      "old_tool_correct": 140,
+      "predicted_new_tools": 145,
+      "old_to_new": 50,
+      "tool_token_predictions": 500
+    }
+  ]
+}

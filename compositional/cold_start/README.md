@@ -1,149 +1,321 @@
-# Llama-1B 冷启动实验
+# TokMem / TapMem 冷启动方案
 
-这套代码做的事情很简单：先正常加载只见过 tools 51–100 的 TokMem 或
-TapMem checkpoint，再一次性接入 20 个没训练过的新工具。整个接入过程不读
-新工具训练样本，也不更新任何模型参数。
+## 这套方法要解决什么
 
-## 新参数从哪里来
+模型只训练过 tools 51–100，现在要直接加入 20 个从未训练过的工具。接入时可以读
+新工具说明，也可以使用旧工具的训练查询，但不能使用任何新工具调用样本，不能反向
+传播，也不能更新原 checkpoint。
 
-新工具需要一行 memory-token embedding。这里直接沿用 compositional 实验原来的
-初始化办法：用同一个随机种子，对 70 行工具 embedding 一起做正交初始化，然后
-把前 50 行换回 checkpoint 中已经学好的旧工具 embedding。留下的后 20 行就是
-新工具 embedding。
+最终方案不再使用完整 renorm。它分两步：
+
+1. 根据工具说明和旧查询，合成新工具的 memory-token embedding 与 TCRA 参数；
+2. 保持“是否调用新工具”的分数不变，只修正“调用哪个新工具”。
+
+## 先分清 hidden state 和 embedding
+
+这两种张量不是一回事。
+
+- hidden state 是冻结 Llama 读完一段文本后临时产生的表示。工具说明 hidden
+  state 用来比较工具关系；查询 hidden state 用来描述模型在工具调用位置真正看重
+  什么。
+- embedding 是 checkpoint 中长期保存、直接参与工具 token 打分的参数。新工具
+  最终必须新增一行 embedding。
+
+工具说明 hidden state 和查询 hidden state 都不会直接复制成新 embedding。代码
+只用它们算融合系数，再用融合系数组合已经训练好的旧 embedding。
+
+## 第一步：得到工具说明 hidden state
+
+所有旧工具和新工具都使用同一个说明模板，只包含工具名、功能和参数结构。冻结模型
+编码说明后，取最后一个有效 token 的 final hidden state。
+
+旧工具说明 hidden state 的均值为：
 
 $$
-E_{\mathrm{expanded}}
+\boldsymbol{\mu}_{d}
 =
-\left[
-E_{\mathrm{old}};
-E_{\mathrm{new}}^{\mathrm{orth}};
-e_{\mathrm{EOC}}
-\right].
+\frac{1}{50}
+\sum_{i=1}^{50}
+\mathbf{d}_{i}.
 $$
 
-TokMem 没有最后一行 EOC。TapMem 会保留 checkpoint 中原来的 EOC embedding，
-也保留原来的 EOC token ID；20 个新工具使用 EOC 后面尚未占用的 reserved
-token。
+计算 cosine 前，旧工具和新工具都减去这个旧工具均值。这样能削弱“这是一个工具
+说明”之类的公共模板信息，更多保留不同工具之间的功能差异。
 
-这里必须分清两种张量：
+## 第二步：得到旧工具的查询 prototype
 
-- embedding 是模型中长期保存的参数。新工具 embedding 来自正交初始化；
-- hidden state 是把工具文档送进冻结模型后，在文档末尾读出的向量。它只用来
-  判断工具之间有多相似，不会被当作 embedding 写进模型。
+对每个旧工具，从 tools 51–100 的原训练集取前三条“该工具是第一个目标工具”的
+查询。冻结模型读到 assistant 即将开始输出的位置，取最后一个 prompt token 的
+final hidden state。这里没有插入 memory token，也没有执行工具。
 
-TapMem 还要给每个新工具增加一行 TCRA 参数。代码先把每个工具的名称、功能说明
-和参数结构整理成完全相同的文档格式。冻结的 TapMem 分别编码 50 份旧工具文档和
-20 份新工具文档，每份文档只取最后一个有效位置的 final hidden state，并先缩放
-到单位长度。这个阶段不构造测试问题，也不插入任何 memory token 或 EOC。
-
-先计算全部旧工具文档 hidden state 的均值：
+第一个旧工具的三条查询产生三个 query hidden state，其他旧工具同理。每个工具取
+均值得到一个 query prototype：
 
 $$
-\mu
+\mathbf{p}_{i}
 =
-\frac{1}{50}\sum_{i=1}^{50}h_i.
+\frac{1}{3}
+\sum_{r=1}^{3}
+\mathbf{h}^{\mathrm{query}}_{i,r}.
 $$
 
-旧工具和新工具都减去这个均值，再次缩放到单位长度：
+因此，工具说明 hidden state 回答“文档看起来像什么”，query prototype 回答
+“模型在什么查询语境下会调用这个工具”。
+
+## 第三步：从文档关系走到参数融合系数
+
+先在旧工具说明之间建立核相似度。新工具说明通过旧工具说明的关系，预测一个新工具
+的 query prototype：
 
 $$
-q_i
+\widehat{\mathbf{p}}_{j}
 =
-\operatorname{Norm}(h_i-\mu),
+\sum_{i=1}^{50}
+c_{ji}\mathbf{p}_{i},
 \qquad
-q_{\mathrm{new}}
+\sum_{i=1}^{50}c_{ji}=1.
+$$
+
+其中，系数由带和为一约束的 kernel ridge 闭式求解得到，不需要训练。接着在 50
+个旧 query prototype 构成的空间中重建这个预测结果，得到一组仿射参数融合系数：
+
+$$
+\mathbf{a}^{\mathrm{raw}}_{j}
 =
-\operatorname{Norm}(h_{\mathrm{new}}-\mu).
-$$
-
-新工具与每个旧工具的相似度为：
-
-$$
-s_i
-=
-q_{\mathrm{new}}^\mathsf{T}q_i.
-$$
-
-只保留最相似的 4 个旧工具，并减去第 5 名的分数。剩余分数归一化后得到权重：
-
-$$
-a_i
-=
-\frac{\max(s_i-s_{(5)},0)}
-{\sum_{j\in\mathrm{Top4}}\max(s_j-s_{(5)},0)}.
-$$
-
-最后用这些权重聚合旧 TCRA 的权重和偏置：
-
-$$
-w_{\mathrm{new}}=\sum_i a_iw_i,
+\operatorname{KRR}
+\left(
+\widehat{\mathbf{p}}_{j},
+\left\{\mathbf{p}_{i}\right\}_{i=1}^{50}
+\right),
 \qquad
-\beta_{\mathrm{new}}=\sum_i a_i\beta_i.
+\sum_{i=1}^{50}a^{\mathrm{raw}}_{ji}=1.
 $$
 
-旧 TCRA 仍只按原来的 50 个工具计算归一化基准，所以接入新工具不会改变旧工具
-的 TCRA 修正值。扩容后的模型只用于推理，不能继续训练。
+纯凸组合无法让新工具超过 donor 旧工具，所以代码从文档 Top-K 凸组合出发，沿着
+上述仿射解的方向继续走。停止条件不是 embedding 模长，而是负系数总量达到上限：
 
-## 文件说明
+$$
+\mathbf{a}_{j}
+=
+\mathbf{a}^{\mathrm{convex}}_{j}
++
+t_{j}
+\left(
+\mathbf{a}^{\mathrm{raw}}_{j}
+-
+\mathbf{a}^{\mathrm{convex}}_{j}
+\right),
+$$
 
-- `build_delta.py`：加载旧 checkpoint，生成新 embedding 和新 TCRA，保存小型
-  delta 文件；
-- `runtime.py`：在内存中把 50-tool 模型扩成 70-tool 模型；
-- `probes.py`：只根据工具说明构造提示并读取 hidden state；
-- `similarity.py`：计算去公共成分后的 cosine 和 Top-4 权重；
-- `evaluate.py`：在新旧工具混合测试集上自由生成并统计结果；
-- `selected_tools_20.json`：固定的 20 个新增工具；
-- `test_cold_start.py`：不加载大模型的 CPU 小测试。
+$$
+\sum_{i:a_{ji}<0}
+\left|a_{ji}\right|
+=
+0.60.
+$$
 
-## 先生成 delta
+同一组系数同时合成新 embedding 和新 TCRA 参数：
 
-TapMem seed 42 的例子：
+$$
+\mathbf{e}^{\mathrm{new}}_{j}
+=
+\sum_{i=1}^{50}
+a_{ji}\mathbf{e}^{\mathrm{old}}_{i},
+$$
+
+$$
+\mathbf{w}^{\mathrm{new}}_{j}
+=
+\sum_{i=1}^{50}
+a_{ji}\mathbf{w}^{\mathrm{old}}_{i},
+\qquad
+b^{\mathrm{new}}_{j}
+=
+\sum_{i=1}^{50}
+a_{ji}b^{\mathrm{old}}_{i}.
+$$
+
+TokMem 只使用第一条式子。TapMem 同时使用 embedding、TCRA weight 和 TCRA
+bias。这里不做 renorm。
+
+## 第四步：只修正新工具身份，不改变新旧工具开关
+
+前面的仿射外推能召回新工具，但少数新工具可能在很多查询上都偏高。例如某个数学
+工具可能吃掉其他数学新工具的预测。直接给它减分会同时减少新工具调用次数，因此
+这里把“是否调用新工具”和“具体调用哪个新工具”分开。
+
+每个旧工具再取第 4、5 条训练查询，共 100 条旧查询，只用于估计新工具的背景响应。
+新工具联合分数为：
+
+$$
+u_{j}(\mathbf{h})
+=
+\mathbf{h}^{\mathsf T}\mathbf{e}^{\mathrm{new}}_{j}
++
+\operatorname{TCRA}_{j}(\mathbf{h}).
+$$
+
+对每个新工具，计算它相对原模型最佳非新工具输出的背景 margin，并取一个分位数：
+
+$$
+m_{j}(\mathbf{h})
+=
+u_{j}(\mathbf{h})
+-
+B_{\mathrm{old}}(\mathbf{h}),
+$$
+
+$$
+q_{j}
+=
+\operatorname{Quantile}_{\tau}
+\left(
+\left\{
+m_{j}(\mathbf{h})
+:
+\mathbf{h}\in\mathcal{C}_{\mathrm{old}}
+\right\}
+\right).
+$$
+
+每个新工具自己的校准量仍然只由旧训练查询计算。全局分位数是在混合数据前 100 条
+组成的开发子集上选择的；开发子集只选择这一个全局超参数，不会为某条测试查询或
+某个新工具单独调值。最佳配置为：
+
+$$
+\tau=0.85.
+$$
+
+推理时，先保留原始新工具最高分：
+
+$$
+G(\mathbf{h})
+=
+\max_{j}u_{j}(\mathbf{h}).
+$$
+
+再用背景校准后的分数决定新工具身份，并把最高值平移回原值：
+
+$$
+\widetilde{u}_{j}(\mathbf{h})
+=
+G(\mathbf{h})
++
+\left(
+u_{j}(\mathbf{h})-q_{j}
+\right)
+-
+\max_{k}
+\left(
+u_{k}(\mathbf{h})-q_{k}
+\right).
+$$
+
+这个变换严格满足：
+
+$$
+\max_{j}\widetilde{u}_{j}(\mathbf{h})
+=
+\max_{j}u_{j}(\mathbf{h}).
+$$
+
+所以它不会额外把旧查询改成新工具，也不会减少原本已经进入新工具分支的查询。它只
+在新工具已经胜出时，重新判断 20 个新工具中谁更合适。
+
+## 数据使用边界
+
+- 工具说明：50 个旧工具和 20 个新工具；
+- query prototype：每个旧工具 3 条，共 150 条旧训练查询；
+- identity 校准：每个旧工具 2 条，共 100 条旧训练查询；
+- 新工具训练样本和用于合成参数的新工具调用样本：0 条；
+- 梯度更新：0 次；
+- 混合数据前 100 条：只作为开发子集选择一个全局分位数；
+- 表中的结果也是该 100 条开发子集结果，不能再称为未见测试集结果。
+
+因此更准确的表述是：**使用旧数据校准、对新工具零样本、无梯度的冷启动**，而不是
+“完全不读任何数据”。
+
+## 代码结构
+
+- `build_query_prototypes.py`：保存旧查询 hidden state 和 prototype；
+- `similarity.py`：文档到 query prototype 的两阶段 bridge，以及仿射射线；
+- `build_delta.py`：合成新 embedding、新 TCRA 和 identity 校准量；
+- `runtime.py`：扩充工具 token，并执行保持 gate 不变的身份重排；
+- `sweep_renorm.py`：快速回放不同融合方案；文件名为历史遗留，最终方法不使用
+  renorm；
+- `evaluate_first_tool.py`：统计第一次全词表工具路由；
+- `test_cold_start.py`：不加载大模型的 CPU 单元测试。
+
+## 8B TapMem 复现命令
+
+先提取每个旧工具 5 条查询 hidden state：
 
 ```bash
-source /home/shilong/anaconda3/etc/profile.d/conda.sh
-conda activate tokmem
+python compositional/cold_start/build_query_prototypes.py \
+  --run-config <tapmem-run-config> \
+  --checkpoint <tapmem-checkpoint> \
+  --data compositional/data/training/function_calling_train_tools51-100_4calls.json \
+  --samples-per-tool 5 \
+  --output /tmp/llama8b_old_query_prototypes_5.pt \
+  --device cpu
+```
 
+生成最终 delta：
+
+```bash
 python compositional/cold_start/build_delta.py \
-  --run-config results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/run_config.json \
-  --checkpoint results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt \
-  --output /tmp/llama1b_tapmem_cold20.pt
+  --run-config <tapmem-run-config> \
+  --checkpoint <tapmem-checkpoint> \
+  --query-prototypes /tmp/llama8b_old_query_prototypes_5.pt \
+  --embedding-initialization document-query-prototype-bridge \
+  --bridge-prototype-samples-per-tool 3 \
+  --top-k 9 \
+  --document-ridge-relative 0.1 \
+  --query-ridge-relative 0.1 \
+  --bridge-negative-mass 0.60 \
+  --bridge-extrapolate-to-cap \
+  --identity-calibration-quantile 0.85 \
+  --identity-calibration-start-index 3 \
+  --identity-calibration-end-index 5 \
+  --output /tmp/llama8b_tapmem_cold20.pt \
+  --device cpu
 ```
 
-TokMem 使用相同命令，只需换成 TokMem 的配置和 checkpoint：
+快速评测时可使用 `sweep_renorm.py` 的 routing-state cache。正式生成评测仍使用
+`evaluate.py`；第一次工具选择指标使用 `evaluate_first_tool.py`。
 
-```bash
-python compositional/cold_start/build_delta.py \
-  --run-config results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/run_config.json \
-  --checkpoint results/compositional/all_methods/runs/llama1b_tokmem_trial1_seed42/round_1_tools_51_100.pt \
-  --output /tmp/llama1b_tokmem_cold20.pt
-```
+## 完整测试集结果
 
-TokMem 没有 TCRA，因此它的 delta 只包含 20 行正交初始化的新 embedding。
-TapMem 的 delta 还会保存新 TCRA 行、20 行 50 列的聚合权重，以及每个新工具
-的 4 个近邻。
+下面是全部 500 条混合数据的第一次工具路由结果，其中新工具目标和旧工具目标各
+250 条。表中同时保留负系数上限为 0.50 和 0.60 的结果。
 
-## 再跑混合测试
+| 方法 | 负系数上限 | 总正确 | 新工具正确 | 旧工具正确 | 预测新工具 | 旧→新误选 |
+|---|---:|---:|---:|---:|---:|---:|
+| TokMem | 0.50 | 147/500 | 15/250 | 132/250 | 94 | 32 |
+| TapMem | 0.50 | 167/500 | 17/250 | 150/250 | 104 | 33 |
+| TokMem | 0.60 | 144/500 | 21/250 | 123/250 | 145 | 61 |
+| TapMem | 0.60 | 164/500 | 24/250 | 140/250 | 145 | 50 |
 
-```bash
-python compositional/cold_start/evaluate.py \
-  --run-config results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/run_config.json \
-  --checkpoint results/compositional/paper_compositional_head_8gpu/runs/llama1b_tokmem_eoc_logit_bias_trial1_seed42/round_1_tools_51_100.pt \
-  --delta /tmp/llama1b_tapmem_cold20.pt \
-  --data-path compositional/data/test/function_calling_test_tools51-100_plus_cold20_4calls.json \
-  --output /tmp/llama1b_tapmem_cold20_predictions.jsonl
-```
+对 TapMem 来说，负系数上限为 0.50 时总正确数更高；改为 0.60 后多正确调用 7
+个新工具，但少正确调用 10 个旧工具，因此总正确数减少 3。
 
-测试集包含 2 工具、3 工具和 4 工具样本。4 工具样本同时包含下面三种新旧工具
-比例：
+这里 TokMem 使用相同的文档到 query-prototype bridge、相同的仿射
+射线和相同的 identity-tail 重排；TokMem 本身没有 TCRA。TapMem 的提升不是靠
+多报新工具：identity-tail 前后预测为新工具的样本集合不变，只修改已经进入新工具
+分支后的工具身份。
 
-$$
-2:2,\qquad 1:3,\qquad 3:1.
-$$
+机器可读的汇总保存在 `results_8b_full500.json`。
 
-脚本会输出整体 Tool F1 和调用参数 F1，并分别统计新工具、旧工具的选择指标与
-调用参数 F1。
+## 指标应该怎么读
 
-正式跑 500 条之前，可以先加 `--limit 2 --max-new-tokens 128` 做生成冒烟测试。
-把 `--data-path` 换成
-`compositional/data/test/function_calling_test_tools51-100_4calls.json`，还可以在
-相同的 70 工具候选集合下单独检查旧工具回归。
+第一次工具路由至少同时报告：
+
+- 总正确数；
+- 新工具正确数；
+- 旧工具正确数；
+- 被预测为新工具的样本数；
+- 旧查询被新工具抢走的数量。
+
+只报告“预测了多少次新工具”没有意义，因为同一个新工具反复抢答也会让这个数字很
+高。identity 校准的重点是：在新工具调用次数完全不变的前提下，提高新工具身份
+判断的正确数。

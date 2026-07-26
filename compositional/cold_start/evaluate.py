@@ -263,12 +263,16 @@ def main():
             ):
                 print(f"Generated {index + 1}/{len(data)} predictions")
 
+    avg_tool_f1_score = _mean(records, "tool_f1")
+    avg_f1_score = _mean(records, "call_f1")
     summary = {
         "examples": len(records),
         "base_tools": len(old_tool_set),
         "new_tools": len(new_tool_set),
-        "mean_tool_f1": _mean(records, "tool_f1"),
-        "mean_call_f1": _mean(records, "call_f1"),
+        "avg_tool_f1_score": avg_tool_f1_score,
+        "avg_f1_score": avg_f1_score,
+        "mean_tool_f1": avg_tool_f1_score,
+        "mean_call_f1": avg_f1_score,
         "mean_new_call_f1": _mean(records, "new_call_f1"),
         "mean_old_call_f1": _mean(records, "old_call_f1"),
         "tool_sequence_exact": _mean(records, "tool_sequence_exact"),

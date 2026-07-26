@@ -1,0 +1,1246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "template_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "available_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "intended_required_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "distractor_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 3
+    },
+    "initial_workspace": {
+      "$ref": "#/$defs/workspace"
+    },
+    "oracle_final_state": {
+      "$ref": "#/$defs/workspace"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/evaluator"
+    }
+  },
+  "required": [
+    "task_id",
+    "template_id",
+    "instruction",
+    "available_tools",
+    "intended_required_tools",
+    "distractor_tools",
+    "initial_workspace",
+    "oracle_final_state",
+    "evaluator"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "cell_value": {
+      "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+      ]
+    },
+    "row": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/cell_value"
+      }
+    },
+    "xlsx_style": {
+      "type": "object",
+      "properties": {
+        "start_cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "end_cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bold": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "font_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bg_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alignment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "start_cell",
+        "end_cell",
+        "bold",
+        "font_color",
+        "bg_color",
+        "alignment"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_table": {
+      "type": "object",
+      "properties": {
+        "data_range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_style": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "data_range",
+        "table_name",
+        "table_style"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_chart": {
+      "type": "object",
+      "properties": {
+        "data_range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chart_type": {
+          "type": "string",
+          "enum": [
+            "bar",
+            "line",
+            "pie",
+            "area"
+          ]
+        },
+        "target_cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x_axis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "y_axis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "data_range",
+        "chart_type",
+        "target_cell",
+        "title",
+        "x_axis",
+        "y_axis"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_sheet": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "styles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_style"
+          }
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_table"
+          }
+        },
+        "charts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_chart"
+          }
+        },
+        "merged_ranges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "rows",
+        "styles",
+        "tables",
+        "charts",
+        "merged_ranges"
+      ],
+      "additionalProperties": false
+    },
+    "text_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "type": "string",
+          "const": "text"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "csv_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "type": "string",
+          "const": "csv"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "type": "string",
+          "const": "xlsx"
+        },
+        "content": {
+          "type": "object",
+          "properties": {
+            "sheets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/xlsx_sheet"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "sheets"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "pdf_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "type": "string",
+          "const": "pdf"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "base64_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "type": "string",
+          "const": "base64"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "workspace_file": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text_file"
+        },
+        {
+          "$ref": "#/$defs/csv_file"
+        },
+        {
+          "$ref": "#/$defs/xlsx_file"
+        },
+        {
+          "$ref": "#/$defs/pdf_file"
+        },
+        {
+          "$ref": "#/$defs/base64_file"
+        }
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workspace_file"
+          }
+        },
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "directories",
+        "files",
+        "remove"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_cell": {
+      "type": "object",
+      "properties": {
+        "cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "$ref": "#/$defs/cell_value"
+        }
+      },
+      "required": [
+        "cell",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_table_definition": {
+      "type": "object",
+      "properties": {
+        "data_range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_style": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "data_range",
+        "table_style"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_chart_assertion_properties": {
+      "type": "object",
+      "properties": {
+        "chart_type": {
+          "type": "string",
+          "enum": [
+            "bar",
+            "line",
+            "pie",
+            "area"
+          ]
+        },
+        "data_range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x_axis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "y_axis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chart_type",
+        "data_range",
+        "target_cell",
+        "title",
+        "x_axis",
+        "y_axis"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_style_assertion_properties": {
+      "type": "object",
+      "properties": {
+        "bold": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "font_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bg_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alignment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bold",
+        "font_color",
+        "bg_color",
+        "alignment"
+      ],
+      "additionalProperties": false
+    },
+    "exists_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "exists"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "file",
+            "directory",
+            null
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "absent_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "absent"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "op",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "text_equals_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "text_equals"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "text_contains_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "text_contains"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "json_equals_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "json_equals"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "csv_equals_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "csv_equals"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_cells_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_cells_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_cell"
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_nonempty_cells_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_nonempty_cells_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_cell"
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_sheet_names_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_sheet_names_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheets"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_table_names_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_table_names_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "tables"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_table_properties_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_table_properties"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data_range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_style": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "table_name",
+        "data_range",
+        "table_style"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_table_definitions_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_table_definitions_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/xlsx_table_definition"
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "tables"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_chart_count_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_chart_count"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "count"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_chart_properties_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_chart_properties"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "properties": {
+          "$ref": "#/$defs/xlsx_chart_assertion_properties"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "index",
+        "properties"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_cell_style_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_cell_style"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cell": {
+          "type": "string",
+          "minLength": 1
+        },
+        "properties": {
+          "$ref": "#/$defs/xlsx_style_assertion_properties"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "cell",
+        "properties"
+      ],
+      "additionalProperties": false
+    },
+    "xlsx_merged_ranges_equal_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "xlsx_merged_ranges_equal"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "sheet",
+        "ranges"
+      ],
+      "additionalProperties": false
+    },
+    "pdf_text_contains_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "pdf_text_contains"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "pdf_page_count_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "pdf_page_count"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "count"
+      ],
+      "additionalProperties": false
+    },
+    "pdf_page_text_contains_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "pdf_page_text_contains"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "page",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "pdf_page_text_equals_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "pdf_page_text_equals"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "page",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "sha256_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "sha256"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "file_size_at_least_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "file_size_at_least"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "op",
+        "path",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "tree_equals_assertion": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "const": "tree_equals"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "op",
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "assertion": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/exists_assertion"
+        },
+        {
+          "$ref": "#/$defs/absent_assertion"
+        },
+        {
+          "$ref": "#/$defs/text_equals_assertion"
+        },
+        {
+          "$ref": "#/$defs/text_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/json_equals_assertion"
+        },
+        {
+          "$ref": "#/$defs/csv_equals_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_cells_equal_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_sheet_names_equal_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_table_names_equal_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_table_properties_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_table_definitions_equal_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_chart_count_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_chart_properties_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_cell_style_assertion"
+        },
+        {
+          "$ref": "#/$defs/xlsx_merged_ranges_equal_assertion"
+        },
+        {
+          "$ref": "#/$defs/pdf_text_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/pdf_page_count_assertion"
+        },
+        {
+          "$ref": "#/$defs/pdf_page_text_contains_assertion"
+        },
+        {
+          "$ref": "#/$defs/pdf_page_text_equals_assertion"
+        },
+        {
+          "$ref": "#/$defs/sha256_assertion"
+        },
+        {
+          "$ref": "#/$defs/file_size_at_least_assertion"
+        },
+        {
+          "$ref": "#/$defs/tree_equals_assertion"
+        }
+      ]
+    },
+    "evaluator": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "workspace_assertions_v1"
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assertion"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "type",
+        "assertions"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

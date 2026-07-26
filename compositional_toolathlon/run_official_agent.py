@@ -4,14 +4,16 @@ import argparse
 import asyncio
 import json
 import os
+import posixpath
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .local_tools import CompositeToolExecutor
-from .manifest import canonical_json, load_manifest
+from .manifest import canonical_json, load_manifest, normalized_input_schema
 from .mcp_adapter import (
     ManifestMcpExecutor,
     RawSseMcpClient,
@@ -41,9 +43,20 @@ def load_official_agent_bundle(path: str | Path) -> dict[str, Any]:
     if not isinstance(task_str, str) or not task_str.strip():
         raise ValueError("official agent bundle has no canonical task_str")
     host_paths = _require_mapping(bundle, "host_paths")
+    container_paths = _require_mapping(bundle, "container_paths")
     for field in ("task_root", "agent_workspace", "log_file"):
         if not isinstance(host_paths.get(field), str) or not host_paths[field]:
             raise ValueError(f"official bundle host_paths requires {field!r}")
+        container_value = container_paths.get(field)
+        if (
+            not isinstance(container_value, str)
+            or not posixpath.isabs(container_value)
+            or posixpath.normpath(container_value) != container_value
+        ):
+            raise ValueError(
+                f"official bundle container_paths requires normalized absolute "
+                f"{field!r}"
+            )
     needed_local_tools = bundle.get("needed_local_tools")
     if (
         not isinstance(needed_local_tools, list)
@@ -65,6 +78,24 @@ def load_official_agent_bundle(path: str | Path) -> dict[str, Any]:
     ):
         if not resolved_path.is_relative_to(output_root):
             raise ValueError(f"official {label} must stay inside the dump root")
+    container_root = container_paths["task_root"]
+    container_workspace = container_paths["agent_workspace"]
+    container_log_file = container_paths["log_file"]
+    for label, container_path in (
+        ("agent workspace", container_workspace),
+        ("trajectory log", container_log_file),
+    ):
+        if posixpath.commonpath((container_root, container_path)) != container_root:
+            raise ValueError(
+                f"official container {label} must stay inside the container dump root"
+            )
+    if (
+        workspace.relative_to(output_root).as_posix()
+        != posixpath.relpath(container_workspace, container_root)
+        or log_file.relative_to(output_root).as_posix()
+        != posixpath.relpath(container_log_file, container_root)
+    ):
+        raise ValueError("official host/container phase paths do not map one-to-one")
     # The official shell may keep this bundle in a private trusted-stash directory
     # outside the public dump root. The runner supplies the path; output paths are
     # still constrained to the dump root above.
@@ -72,6 +103,7 @@ def load_official_agent_bundle(path: str | Path) -> dict[str, Any]:
     bundle["_resolved_output_root"] = str(output_root)
     bundle["_resolved_workspace"] = str(workspace)
     bundle["_resolved_log_file"] = str(log_file)
+    bundle["_resolved_container_workspace"] = container_workspace
     return bundle
 
 
@@ -84,9 +116,15 @@ def _official_model_tool_name(record: dict[str, Any]) -> str:
 def official_provider_tools(
     manifest: dict[str, Any],
     available_tool_ids: list[str],
+    runtime_gateway_tools: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     records = {
         record["stable_id"]: record for record in manifest["tools"]
+    }
+    runtime_by_wire = {
+        tool["name"]: tool
+        for tool in runtime_gateway_tools or []
+        if isinstance(tool.get("name"), str)
     }
     tools = []
     names = []
@@ -98,14 +136,27 @@ def official_provider_tools(
                 f"available tool is absent from manifest: {stable_id}"
             ) from exc
         name = _official_model_tool_name(record)
+        runtime_tool = (
+            runtime_by_wire.get(record["wire_name"])
+            if record["origin"] == "gateway_mcp"
+            else None
+        )
         names.append(name)
         tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
-                    "description": record.get("description", ""),
-                    "parameters": record["input_schema"],
+                    "description": (
+                        runtime_tool.get("description", "")
+                        if runtime_tool is not None
+                        else record.get("description", "")
+                    ),
+                    "parameters": (
+                        normalized_input_schema(runtime_tool)
+                        if runtime_tool is not None
+                        else record["input_schema"]
+                    ),
                 },
             }
         )
@@ -190,6 +241,7 @@ def build_official_trajectory_envelope(
         exposed_tools = official_provider_tools(
             manifest,
             list(rollout["available_tool_ids"]),
+            list(rollout.get("runtime_gateway_tools", [])),
         )
         agent_llm_requests = tool_call_count + int(
             rollout.get("decode_error_count", 0)
@@ -229,6 +281,11 @@ def build_official_trajectory_envelope(
                 manifest["manifest_hash"] if manifest is not None else None
             ),
             "failure": failure,
+            "runtime_tool_compatibility": (
+                rollout.get("runtime_tool_compatibility")
+                if rollout is not None
+                else None
+            ),
         },
     }
 
@@ -271,9 +328,47 @@ async def run_official_agent(
 
     async with RawSseMcpClient(gateway_url) as client:
         runtime_tools = await client.list_tools()
+        manifest_gateway_tools = {
+            record["wire_name"]: record
+            for record in manifest["tools"]
+            if record["origin"] == "gateway_mcp"
+        }
+        runtime_gateway_tools = {
+            tool["name"]: tool
+            for tool in runtime_tools
+            if isinstance(tool.get("name"), str)
+        }
+        overlapping_wire_names = (
+            set(manifest_gateway_tools) & set(runtime_gateway_tools)
+        )
+        runtime_tool_compatibility = {
+            "mapped_wire_names": sorted(overlapping_wire_names),
+            "unavailable_manifest_wire_names": sorted(
+                set(manifest_gateway_tools) - set(runtime_gateway_tools)
+            ),
+            "ignored_runtime_wire_names": sorted(
+                set(runtime_gateway_tools) - set(manifest_gateway_tools)
+            ),
+            "schema_changed_wire_names": sorted(
+                wire_name
+                for wire_name in overlapping_wire_names
+                if canonical_json(
+                    normalized_input_schema(runtime_gateway_tools[wire_name])
+                )
+                != canonical_json(
+                    manifest_gateway_tools[wire_name]["input_schema"]
+                )
+            ),
+        }
         available_tool_ids = resolve_runtime_gateway_tool_ids(
             manifest,
             runtime_tools,
+            # The frozen official image ships older MCP package revisions than
+            # the host gateway used to build the training manifest.  Stable
+            # wire names identify the overlapping tools; the live server, not
+            # the stale training schema, remains authoritative for arguments.
+            require_schema_match=False,
+            ignore_unknown=True,
         )
         if enable_python_execute:
             local_python_ids = [
@@ -287,24 +382,14 @@ async def run_official_agent(
                 )
             available_tool_ids.extend(local_python_ids)
             available_tool_ids.sort()
-        gateway_available_ids = {
-            tool_id
-            for tool_id in available_tool_ids
-            if tool_id in {
-                record["stable_id"]
-                for record in manifest["tools"]
-                if record["origin"] == "gateway_mcp"
-            }
-        }
         mcp_executor = ManifestMcpExecutor(client, manifest)
-        await mcp_executor.verify_runtime(
-            expected_stable_ids=gateway_available_ids,
-        )
         executor = CompositeToolExecutor(
             manifest=manifest,
             mcp_executor=mcp_executor,
             workspace_root=workspace,
+            mcp_workspace_root=bundle["_resolved_container_workspace"],
             enable_python_execute=enable_python_execute,
+            validate_mcp_arguments=False,
         )
         result = await run_closed_loop_rollout(
             instruction=bundle["task_str"].strip(),
@@ -327,6 +412,8 @@ async def run_official_agent(
             "fresh_environment_id": fresh_environment_id,
             "official_evaluator_pending": True,
             "task_dir": bundle.get("task_dir"),
+            "runtime_gateway_tools": runtime_tools,
+            "runtime_tool_compatibility": runtime_tool_compatibility,
         }
     )
     return result
@@ -392,6 +479,7 @@ def main() -> int:
         failure = {
             "error_type": type(exc).__name__,
             "error": str(exc),
+            "traceback": "".join(traceback.format_exception(exc)),
         }
 
     envelope = build_official_trajectory_envelope(

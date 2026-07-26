@@ -8,6 +8,11 @@ __pycache__/
 # The official checkout and generated experiment data are reproducible inputs.
 vendor/
 data/generated/
+data/archive/
+data/llm_v1/
+data/mixed_v1/*
+!data/mixed_v1/README.md
+data/*/runtime/
 artifacts/*
 !artifacts/README.md
 runs/*

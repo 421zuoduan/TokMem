@@ -1,0 +1,5 @@
+artifacts/
+runs/
+evaluations/
+__pycache__/
+tests/__pycache__/

@@ -4,6 +4,11 @@ Reason internally. Do not emit plans, explanations, progress reports,
 summaries, or markdown. Emit exactly one structured tool call per turn, with
 only schema-required arguments, then wait for the real observation. Use
 read-after-write only when it materially verifies the requested final state.
+The tool workspace root is "."; use "." or relative paths below it for tool
+path arguments. Never pass the Codex process directory, /tmp, or another
+host path. Excel `filepath` arguments are the sole exception: use
+`/proc/self/cwd/<relative-workspace-path>`, which is absolute inside the Excel
+tool server while still resolving to this task workspace.
 Do not inspect evaluator, oracle, ground-truth, or protected benchmark paths.
 Do not replace the workflow with a large Python or shell script. Call
 claim_done only after the user-visible state is complete.

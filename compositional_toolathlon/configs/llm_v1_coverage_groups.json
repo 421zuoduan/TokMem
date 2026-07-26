@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "group_id": "excel-workbook-build",
+      "task_family": "excel-workbook-build",
+      "must_require_tool_names": [
+        "excel-create_workbook",
+        "excel-create_worksheet",
+        "excel-write_data_to_excel",
+        "excel-get_workbook_metadata"
+      ]
+    },
+    {
+      "group_id": "excel-formula-check",
+      "task_family": "excel-formula-check",
+      "must_require_tool_names": [
+        "excel-validate_formula_syntax",
+        "excel-apply_formula",
+        "excel-validate_excel_range",
+        "excel-read_data_from_excel"
+      ]
+    },
+    {
+      "group_id": "excel-presentation",
+      "task_family": "excel-presentation",
+      "must_require_tool_names": [
+        "excel-format_range",
+        "excel-create_table",
+        "excel-create_chart"
+      ]
+    },
+    {
+      "group_id": "excel-copy-structure",
+      "task_family": "excel-copy-structure",
+      "must_require_tool_names": [
+        "excel-get_data_validation_info",
+        "excel-copy_range",
+        "excel-copy_worksheet",
+        "excel-rename_worksheet"
+      ]
+    },
+    {
+      "group_id": "excel-layout-cleanup",
+      "task_family": "excel-layout-cleanup",
+      "must_require_tool_names": [
+        "excel-merge_cells",
+        "excel-unmerge_cells",
+        "excel-delete_range",
+        "excel-delete_worksheet"
+      ]
+    },
+    {
+      "group_id": "excel-pivot-summary",
+      "task_family": "excel-pivot-summary",
+      "must_require_tool_names": [
+        "excel-create_pivot_table",
+        "excel-read_data_from_excel",
+        "excel-get_workbook_metadata"
+      ]
+    },
+    {
+      "group_id": "filesystem-find-and-read",
+      "task_family": "filesystem-find-and-read",
+      "must_require_tool_names": [
+        "filesystem-list_directory",
+        "filesystem-search_files",
+        "filesystem-read_text_file"
+      ]
+    },
+    {
+      "group_id": "filesystem-inventory",
+      "task_family": "filesystem-inventory",
+      "must_require_tool_names": [
+        "filesystem-list_directory_with_sizes",
+        "filesystem-get_file_info",
+        "filesystem-directory_tree"
+      ]
+    },
+    {
+      "group_id": "filesystem-batch-output",
+      "task_family": "filesystem-batch-output",
+      "must_require_tool_names": [
+        "filesystem-read_multiple_files",
+        "filesystem-create_directory",
+        "filesystem-write_file"
+      ]
+    },
+    {
+      "group_id": "filesystem-revise-and-move",
+      "task_family": "filesystem-revise-and-move",
+      "must_require_tool_names": [
+        "filesystem-edit_file",
+        "filesystem-move_file",
+        "filesystem-list_directory"
+      ]
+    },
+    {
+      "group_id": "terminal-local-check",
+      "task_family": "terminal-local-check",
+      "must_require_tool_names": [
+        "terminal-run_command",
+        "filesystem-read_text_file"
+      ]
+    },
+    {
+      "group_id": "python-local-transform",
+      "task_family": "python-local-transform",
+      "must_require_tool_names": [
+        "local-python-execute",
+        "filesystem-write_file",
+        "filesystem-read_text_file"
+      ]
+    },
+    {
+      "group_id": "pdf-inspection",
+      "task_family": "pdf-inspection",
+      "must_require_tool_names": [
+        "pdf-tools-get_pdf_info",
+        "pdf-tools-read_pdf_pages",
+        "pdf-tools-search_pdf_content"
+      ]
+    },
+    {
+      "group_id": "pdf-compose",
+      "task_family": "pdf-compose",
+      "must_require_tool_names": [
+        "pdf-tools-extract_pdf_pages",
+        "pdf-tools-merge_pdfs",
+        "pdf-tools-get_pdf_info"
+      ]
+    }
+  ]
+}

@@ -209,7 +209,6 @@ def train_stepwise_model(
     detach: bool = True,
     logit_bias_loss_weight: float = 0.1,
     gradient_accumulation_steps: int = 1,
-    validation_dataloader: Any | None = None,
 ) -> dict[str, Any]:
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
@@ -221,8 +220,6 @@ def train_stepwise_model(
 
     if len(dataloader) == 0:
         raise ValueError("Toolathlon training dataloader is empty")
-    if validation_dataloader is not None and len(validation_dataloader) == 0:
-        raise ValueError("Toolathlon validation dataloader is empty")
 
     trainable_parameters = list(model.get_trainable_parameters())
     if not trainable_parameters:
@@ -244,9 +241,6 @@ def train_stepwise_model(
     optimizer.zero_grad(set_to_none=True)
     model.train()
     global_optimizer_step = 0
-    best_validation_loss = float("inf")
-    best_epoch: int | None = None
-    best_trainable_state: list[torch.Tensor] | None = None
     for epoch in range(num_epochs):
         sampler = getattr(dataloader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
@@ -334,42 +328,6 @@ def train_stepwise_model(
                 ],
             }
         )
-        if validation_dataloader is not None:
-            validation_metrics = evaluate_stepwise_loss(
-                model=model,
-                dataloader=validation_dataloader,
-                device=device,
-                use_logit_bias=use_logit_bias,
-                use_logit_train_add=use_logit_train_add,
-                detach=detach,
-                logit_bias_loss_weight=logit_bias_loss_weight,
-            )
-            history[-1]["validation"] = validation_metrics
-            validation_loss = float(validation_metrics["avg_total_loss"])
-            if validation_loss < best_validation_loss:
-                best_validation_loss = validation_loss
-                best_epoch = epoch + 1
-                best_trainable_state = [
-                    parameter.detach().cpu().clone()
-                    for parameter in trainable_parameters
-                ]
-            model.train()
-
-    if best_trainable_state is not None:
-        with torch.no_grad():
-            for parameter, saved_parameter in zip(
-                trainable_parameters,
-                best_trainable_state,
-                strict=True,
-            ):
-                parameter.copy_(
-                    saved_parameter.to(
-                        device=parameter.device,
-                        dtype=parameter.dtype,
-                    )
-                )
-    else:
-        best_epoch = num_epochs
     return {
         "epochs": history,
         "optimizer_steps": global_optimizer_step,
@@ -378,17 +336,9 @@ def train_stepwise_model(
         "detach": detach,
         "logit_bias_loss_weight": logit_bias_loss_weight,
         "checkpoint_selection": {
-            "metric": (
-                "validation.avg_total_loss"
-                if validation_dataloader is not None
-                else "final_epoch"
-            ),
-            "best_epoch": best_epoch,
-            "best_value": (
-                best_validation_loss
-                if validation_dataloader is not None
-                else None
-            ),
+            "metric": "final_epoch",
+            "best_epoch": num_epochs,
+            "best_value": None,
         },
     }
 

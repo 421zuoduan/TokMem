@@ -17,6 +17,25 @@ def _task_id_hash(task_ids: list[str]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _task_content_hash(tasks: list[dict[str, Any]]) -> str:
+    material = json.dumps(
+        sorted(
+            (
+                {
+                    "task_id": task["task_id"],
+                    "instruction": task["instruction"],
+                }
+                for task in tasks
+            ),
+            key=lambda record: record["task_id"],
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def semantic_leakage_audit(
     *,
     tasks: list[dict[str, Any]],
@@ -82,6 +101,7 @@ def semantic_leakage_audit(
         "schema_version": 1,
         "passed": all(record["passed"] for record in per_task),
         "task_id_hash": _task_id_hash(task_ids),
+        "task_content_hash": _task_content_hash(tasks),
         "metric": "normalized_embedding_cosine",
         "embedding_model_path": str(model_path),
         "embedding_model_name": model_path.name,

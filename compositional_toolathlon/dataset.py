@@ -346,10 +346,15 @@ def create_step_dataloader(
         if shuffle:
             raise ValueError("shuffle and balance_by_episode cannot both be enabled")
         sampler = EpisodeBalancedSampler(dataset.data, seed=sampler_seed)
+    shuffle_generator = None
+    if shuffle:
+        shuffle_generator = torch.Generator()
+        shuffle_generator.manual_seed(int(sampler_seed))
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle if sampler is None else False,
         sampler=sampler,
+        generator=shuffle_generator,
         collate_fn=lambda batch: collate_step_batch(batch, tokenizer),
     )

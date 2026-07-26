@@ -30,7 +30,8 @@ mask，不接收自然语言工具说明或 JSON schema。正式任务以 Toolat
 compositional_toolathlon/
 ├── configs/experiment.json       # 版本、十题、容量和泄漏边界
 ├── prompts/                      # 多生成器、紧凑 teacher、独立 verifier
-├── scripts/                      # 官方 checkout、镜像和 smoke 脚本
+├── scripts/                      # 官方 checkout、rootless Docker、镜像和 smoke 脚本
+├── rootless_helpers/             # 无 sudo、单 UID rootless 兼容层
 ├── TOOLATHLON_RUNNER_HOOK.md     # 正式 decoupled host-loop 接口
 ├── tests/                        # CPU-only 数据与 mask 测试
 ├── config.py                     # 冻结配置读取和校验
@@ -49,7 +50,7 @@ compositional_toolathlon/
 ├── episode_to_steps.py           # 成功 episode -> 下一调用样本
 ├── dataset.py                    # 单调用 TokMem/TapMem 训练数据集
 ├── masked_routing.py             # backbone/TCRA 的 per-sample 工具 mask
-├── training.py                   # mask-aware、episode-balanced 训练损失
+├── training.py                   # mask-aware、逐调用训练损失
 ├── main_train.py                 # 固定三方法、无 adaptation 的训练入口
 ├── diagnostics.py                # synthetic Tool/Arguments F1
 ├── decode_one_call.py            # TokMem/TapMem 单调用停止状态机
@@ -121,6 +122,98 @@ bash compositional_toolathlon/scripts/setup_python_runtime.sh
 bash compositional_toolathlon/scripts/pull_official_image.sh
 ```
 
+### 当前账号下运行 Docker（无 sudo 兼容路径）
+
+若当前账号不能访问宿主的 `/var/run/docker.sock`，可安装本轨道固定的 Docker
+26.1.3 静态二进制和 rootless extras。安装脚本只支持 `x86_64`，下载到临时目录并
+校验两个固定 SHA-256；目标目录若有陌生条目、符号链接或内容不同的同名文件会直接
+拒绝，不会覆盖：
+
+```bash
+bash compositional_toolathlon/scripts/prepare_rootless_docker.sh
+```
+
+在一个长期保持的终端中以前台方式启动 daemon：
+
+```bash
+bash compositional_toolathlon/scripts/start_rootless_docker.sh
+```
+
+默认客户端 socket 为
+`${XDG_RUNTIME_DIR:-/tmp}/compositional-toolathlon-rootless/docker.sock`，镜像和容器
+数据位于 `compositional_toolathlon/artifacts/rootless-docker-data/`。运行时目录会
+被检查为当前用户所有、非符号链接并收紧到 `0700`。可分别用
+`TOOLATHLON_ROOTLESS_RUNTIME_ROOT`、`TOOLATHLON_ROOTLESS_DATA_ROOT` 和
+`TOOLATHLON_ROOTLESS_BIN_DIR` 覆盖这三个位置。启动脚本只接受重复的
+`--registry-mirror=https://...` 和一个 `--max-concurrent-downloads=1..32`，不会把
+其他参数透传给 `dockerd`，从而不能覆盖私有 socket、data-root 或 single-UID
+runtime。三个覆盖值都必须是绝对且互不重叠的路径；runtime/data 目录首次使用时必须
+为空，脚本会写入含 `runtime` 或 `data` 角色的
+`.toolathlon-rootless-managed` 标记，后续拒绝接管无标记或角色不符的非空目录。
+
+这是无可用 `newuidmap/newgidmap` 时的窄兼容层：只把容器 ID 0 映射到当前宿主
+账号，不是标准的多 UID rootless Docker。固定的官方
+`lockon0927/toolathlon-task-image:1016beta` 本身含 GID 42 等非零 owner，因而会在
+解包第一层时报 `lchown ... invalid argument`；daemon 能启动并不代表官方镜像可以
+原样使用。若实验口径要求 byte-identical 官方镜像，必须由管理员安装可信的
+`uidmap` 包，再切换到标准多 UID rootless Docker 和全新 data-root。
+
+仅为当前账号下的探索性 smoke，可以从已经逐 blob 校验的本地 registry cache 生成
+独立的派生镜像；不能覆盖或冒充官方 tag：
+
+```bash
+python -m compositional_toolathlon.rootless_helpers.normalize_oci_ownership \
+  --cache-root "$PWD/compositional_toolathlon/artifacts/rootless-docker-registry-cache" \
+  --source-reference 1016beta \
+  --target-reference 1016beta-singleuid-raw
+```
+
+该入口固定检查上游 manifest
+`sha256:4d04fe4e0a6fdb4946f51bb05120cb44a0eef980231c11252f93b62897afcb9f`
+和 config
+`sha256:e2a967606d6e99522a9c8ebc785cd40273235a89836438101cb04283024cd181`，
+逐层校验压缩 digest、size 和未压缩 `diff_id`。当前固定镜像只在第
+`1,2,3,4,5,6,9` 层含 37 个非零 owner；转换器逐字节复制 tar payload、PAX、
+padding 和 EOF，仅修改这些 header 的 UID/GID 与 checksum，并保留 capability
+xattr。派生镜像改变了 shadow/setgid 等多用户 ownership 语义，所以使用它得到的
+结果必须标为 `singleuid-derived`，不能称为原始官方环境。
+
+派生镜像导入独立 tag 后，用 wrapper 执行动态门禁和探索性 runner。下面的
+`IMAGE` 必须解析到派生 manifest，不能换成或覆盖官方 tag：
+
+```bash
+IMAGE=127.0.0.1:5055/lockon0927/toolathlon-task-image:1016beta-singleuid-raw
+bash compositional_toolathlon/scripts/with_rootless_docker.sh \
+  bash compositional_toolathlon/scripts/check_rootless_docker.sh "$IMAGE"
+bash compositional_toolathlon/scripts/with_rootless_docker.sh \
+  bash compositional_toolathlon/scripts/run_pinned_official_task.sh \
+  finalpool/arrange-workspace quickstart /absolute/exploratory-dumps tapmem \
+  unified 100 scripts/formal_run_v0.json "$IMAGE" tokmem_runtime
+```
+
+`check_rootless_docker.sh` 不只检查 daemon：它要求所选 prepared image 已存在、能以
+root 身份启动，并能把 rootless namespace 内的私有 `/var/run/docker.sock` 挂入任务
+容器后成功执行嵌套 `docker version`。该检查只证明指定 tag 的动态兼容性，不证明它
+与官方镜像 byte-identical，也不代替 runner 的 preprocess/gateway/evaluator smoke。
+
+RootlessKit 使用固定安装的 `vpnkit` 和 builtin port driver，为 daemon 提供具有
+`CAP_NET_ADMIN` 的私有网络命名空间；官方 runner 的 `--network host` 因而指该
+私有命名空间，而不是宿主的真实 network namespace。daemon 仍关闭
+bridge/iptables，并用 `vfs` 存储驱动。
+`with_rootless_docker.sh` 会把被包裹的完整命令放入同一个 user/mount/net
+namespace，但不进入 PID namespace，并恢复调用者的绝对工作目录。在该 namespace
+中，当前账号拥有的 runner 输入显示为 `0:0`，从而避免 single-UID 下
+`docker cp` 恢复宿主 `1002:1002` 时的 `lchown ... invalid argument`；host agent
+也与 `--network host` 的任务容器共享 loopback，能够访问 MCP gateway。不要绕过
+wrapper 直接运行官方 runner。私有 namespace 内的 `127.0.0.1` 不是宿主真实
+loopback；依赖宿主本地 API 的模型/provider 需要另行显式接线，本地 TapMem 推理不受
+影响。
+`vfs` 不共享镜像层，prepared image 和 fresh episode 容器会明显放大磁盘占用，
+运行期间应同时监控 `df` 和
+`du -sh compositional_toolathlon/artifacts/rootless-docker-data`。第二个
+`/var/run/docker.sock` listener 只存在于 RootlessKit 的私有 mount namespace，不会
+改写宿主同名 socket；停止前台 daemon 不会自动删除持久化数据。
+
 若机器已有完整、同 SHA 的 Toolathlon checkout，可设置：
 
 ```bash
@@ -154,8 +247,8 @@ compositional_toolathlon/.toolathlon-venv/bin/python \
   -m compositional_toolathlon.mcp_adapter capture \
   --gateway-url http://127.0.0.1:8000/sse \
   --health-url http://127.0.0.1:8000/health \
-  --raw-output data/generated/manifests/raw_tools_list.json \
-  --manifest-output data/generated/manifests/tool_manifest.json
+  --raw-output compositional_toolathlon/data/generated/manifests/raw_tools_list.json \
+  --manifest-output compositional_toolathlon/data/generated/manifests/tool_manifest.json
 ```
 
 官方 gateway 的 exposed tool name 是不透明 wire name；它可能含连字符和冲突后缀。
@@ -176,8 +269,8 @@ toolathlon-gateway::opaque_wire_name::schema_hash
 
 ```bash
 python -m compositional_toolathlon.local_tools augment-manifest \
-  --input data/generated/manifests/tool_manifest.json \
-  --output data/generated/manifests/tool_manifest_default_decoupled.json
+  --input compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  --output compositional_toolathlon/data/generated/manifests/tool_manifest_default_decoupled.json
 ```
 
 `manage_context`、`history` 和 overlong 辅助组在该官方 decoupled 模式本来就被过滤，
@@ -186,15 +279,73 @@ disposable workspace 中提供人工审核过的最小 smoke arguments 并真实
 
 ```bash
 python -m compositional_toolathlon.tool_smoke \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
-  --cases data/generated/manifests/tool_smoke_cases.json \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest_default_decoupled.json \
+  --cases compositional_toolathlon/data/generated/manifests/tool_smoke_cases.json \
   --workspace-root /absolute/disposable/workspace \
-  --output data/generated/manifests/usable_tools.json \
+  --output compositional_toolathlon/data/generated/manifests/usable_tools.json \
   --confirm-disposable-workspace \
   --require-all-cases
 ```
 
 不要让模型自动发明 smoke arguments 后直接在宿主仓库执行；这些调用可能修改文件。
+
+无 Docker 时，可以在一个空的 synthetic workspace 上直接启动官方聚合 gateway。
+launcher 从 `experiment.json` 和固定 Toolathlon checkout 推导路径，运行时生成最小
+bundle 与四个 host-local server 配置；进程保持前台运行，收到 `SIGINT`/`SIGTERM`
+后关闭所有 MCP 子进程：
+
+```bash
+mkdir -p /tmp/toolathlon-synthetic-task-0001
+compositional_toolathlon/.toolathlon-venv/bin/python \
+  -m compositional_toolathlon.host_gateway \
+  --workspace /tmp/toolathlon-synthetic-task-0001 \
+  --port 8000 \
+  --servers filesystem terminal excel pdf-tools \
+  --output-dir /tmp/toolathlon-synthetic-task-0001-gateway
+```
+
+`--servers` 也可只启用当前 task 所需的子集。省略 `--output-dir` 时，bundle 和 server
+配置位于临时目录并在 gateway 退出后删除；显式指定时可保留它们用于复核。
+gateway runtime 目录应放在 synthetic workspace 外。每条 teacher candidate 都应
+使用新的空 workspace 和新的 gateway 进程。
+
+当前无外部 LLM endpoint 时，可以先构建可审计的 smoke corpus。该入口使用三种不同
+generator prompt 所约束的确定性模板和多 subagent review，但不会把它伪装成
+GPT-5.6 输出；每条计划仍会在独立 host gateway 中真实执行：
+
+```bash
+compositional_toolathlon/.toolathlon-venv/bin/python \
+  -m compositional_toolathlon.build_smoke_dataset \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  --output-root compositional_toolathlon/data/generated \
+  --smoke-id smoke_v5 \
+  --port-base 8250 \
+  --uvx-command /home/shilong/anaconda3/envs/tokmem/bin/uvx
+```
+
+中途失败时成功 task 已写入各自的 `checkpoint.json`，修正参数后可对同一
+`--smoke-id` 加 `--resume`；未完成的 task runtime 会先移到带
+`.failed_<timestamp>` 后缀的目录。checkpoint 只有在 task spec、action plan、
+manifest、保留 workspace digest 和 evaluator 全部仍匹配时才允许复用。smoke 分母
+固定为 38 个可学习目标：20 个 Excel、
+11 个 filesystem、5 个 PDF、`terminal-run_command` 和 sandboxed
+`local-python-execute`。`claim_done` 仍是每条轨迹的结束动作，但和环境说明、废弃
+接口、PDF 分页状态辅助工具、当前不支持的多模态读取一样，不作为 coverage target。
+
+当前 smoke 的每题菜单均包含 manifest 的 47 个工具，未实际需要的 33–41 个工具作为
+干扰项；另用一个 fresh gateway 对 8 个未进入训练轨迹的环境/兼容/分页工具逐一真实
+调用。因此 `usable_tools.json` 含 47 个已成功工具，而冻结的 `target_tools.json`
+只含 38 个训练 coverage 目标，不能用前者或完整 manifest 代替 coverage target。
+生成器还会拒绝 MCP `isError=false` 但正文以 `Error:`、
+`Failed to` 等开头的业务失败。合成 PDF 使用 ReportLab invariant 模式，XLSX 固定
+core properties 和 ZIP member 时间戳，以保证 recipe 在 fresh workspace 中具有稳定
+哈希。
+
+当前 `smoke_v5` 产物为 14 个 train、0 个 validation、2 个 synthetic-test
+episode，共 162 个 step（142/0/20）。冻结的 38 个目标全部在至少 3 个不同 train
+episode 中成功调用：30 个为 3 个、5 个为 4 个、2 个为 5 个，
+`filesystem-read_text_file` 为 8 个。两个 synthetic-test 任务使用与 train 不同的
+template、asset layout 和 action-plan signature。
 
 ### 2. 合成 task 与 teacher 轨迹
 
@@ -222,27 +373,54 @@ Teacher prompt 强制：
 export TOOLATHLON_LLM_BASE_URL=https://your-endpoint.example/v1
 export TOOLATHLON_LLM_API_KEY=your-key
 python -m compositional_toolathlon.generate_tasks \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
   --task-family excel-reshape \
   --split train \
   --count-per-session 2 \
-  --output data/generated/tasks/candidates/excel-reshape.jsonl
+  --must-require-tool-name excel-copy_range \
+  --output compositional_toolathlon/data/generated/tasks/candidates/excel-reshape.jsonl
 ```
+
+`--must-require-tool-name` 可重复传入；生成请求会携带对应的 stable tool ID，遗漏任一
+指定工具的候选会被拒绝。不传该参数时保持原生成行为。
+
+真实 LLM 重采样使用
+[`configs/generation_llm_v1.json`](configs/generation_llm_v1.json)，其中 generator、
+teacher 和 verifier 均记录为 `gpt-5.6-sol`。采集 teacher 候选时用
+`--teacher-session-id` 显式选择 `action-only-v1`、`state-first-v1` 或
+`tool-contract-first-v1`；三个 session 共用相同的长度和工具调用限制。旧
+`generation.json` 不传该参数时仍使用原来的单一 teacher prompt。
+
+没有独立 OpenAI-compatible endpoint 时，也可以复用本机已登录的 Codex CLI：
+
+```bash
+export TOOLATHLON_LLM_PROVIDER=codex_cli
+export TOOLATHLON_CODEX_MODEL=gpt-5.6-sol
+export TOOLATHLON_CODEX_TRACE_PATH=compositional_toolathlon/data/generated/provenance/codex_cli_invocations.jsonl
+```
+
+默认 provider 仍为 OpenAI-compatible endpoint。Codex provider 为 task/verifier
+请求启动独立 ephemeral thread；teacher 在同一 episode 内 resume 同一 thread，后续
+turn 只发送新增 observation。sidecar 只记录 thread、实际模型和 prompt/response
+哈希，不保存 prompt、响应正文或凭证。
 
 生成器只能输出声明式 workspace recipe 和 `workspace_assertions_v1`，不能输出要在
 宿主执行的 evaluator 代码。候选必须依次通过：资产可构建、initial state 必须 Fail、
 oracle state 必须 Pass、工具 smoke、相对路径、对十题题面的只拒绝式 5-gram 检查，
-以及独立 GPT-5.6 verifier：
+以及独立 GPT-5.6 verifier。Office evaluator 可精确检查 worksheet 顺序、非空
+单元格全集、solid fill 等样式、table 名称或忽略随机名称后的完整定义、chart
+数量/类型/锚点/标题/轴及完整 series 引用、合并区域，以及 PDF 页数和规范化后的
+逐页全文相等；题面声明的这些最终状态不能只靠“工具调用成功”判定：
 
 ```bash
 compositional_toolathlon/.toolathlon-venv/bin/python \
   -m compositional_toolathlon.verify_tasks \
-  --candidates data/generated/tasks/candidates/excel-reshape.jsonl \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
-  --usable-tools data/generated/manifests/usable_tools.json \
-  --protected-task-root datasets/toolathlon/tasks/finalpool \
-  --accepted-output data/generated/tasks/verified/excel-reshape.jsonl \
-  --rejected-output data/generated/tasks/rejected/excel-reshape.jsonl
+  --candidates compositional_toolathlon/data/generated/tasks/candidates/excel-reshape.jsonl \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  --usable-tools compositional_toolathlon/data/generated/manifests/usable_tools.json \
+  --protected-task-root compositional_toolathlon/vendor/toolathlon/tasks/finalpool \
+  --accepted-output compositional_toolathlon/data/generated/tasks/verified/excel-reshape.jsonl \
+  --rejected-output compositional_toolathlon/data/generated/tasks/rejected/excel-reshape.jsonl
 ```
 
 正式题面只参与拒绝近重复，不会把题面或匹配片段传回 generator/verifier 模型。
@@ -253,13 +431,30 @@ compositional_toolathlon/.toolathlon-venv/bin/python \
 ```bash
 compositional_toolathlon/.toolathlon-venv/bin/python \
   -m compositional_toolathlon.collect_teacher_episode \
-  --task-spec data/generated/tasks/verified/task_0001.json \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
+  --task-spec compositional_toolathlon/data/generated/tasks/verified/task_0001.json \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
   --workspace-root /absolute/fresh/workspace \
   --gateway-url http://127.0.0.1:8000/sse \
   --candidate-index 0 \
   --fresh-environment-id task_0001_candidate_0_container_abc \
-  --output data/generated/episodes/candidates/task_0001_0.jsonl
+  --generation-config compositional_toolathlon/configs/generation_llm_v1.json \
+  --teacher-session-id action-only-v1 \
+  --output compositional_toolathlon/data/generated/episodes/candidates/task_0001_0.jsonl
+```
+
+也可以用单题 runner 启动 gateway、等待健康检查并采集一次；每次调用应提供不同且
+为空的 workspace 和 runtime 目录，脚本不会重试采集或清理已有目录：
+
+```bash
+compositional_toolathlon/scripts/collect_llm_episode.sh \
+  compositional_toolathlon/data/generated/tasks/verified/task_0001.json \
+  compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  compositional_toolathlon/configs/generation_llm_v1.json \
+  action-only-v1 \
+  /absolute/fresh/workspace \
+  /absolute/fresh/runtime \
+  8000 \
+  compositional_toolathlon/data/generated/episodes/candidates/task_0001_0.jsonl
 ```
 
 该过程只把“一个结构化 call + 真实 observation”写入轨迹，GPT-5.6 的可见解释字符
@@ -270,59 +465,68 @@ workspace 到 bubblewrap jail，关闭网络，并把 Python 环境只读挂载�
 
 ```bash
 python -m compositional_toolathlon.select_canonical \
-  --candidates data/generated/episodes/candidates/*.jsonl \
-  --accepted-output data/generated/episodes/accepted.jsonl \
-  --rejected-output data/generated/episodes/rejected.jsonl
+  --candidates compositional_toolathlon/data/generated/episodes/candidates/*.jsonl \
+  --accepted-output compositional_toolathlon/data/generated/episodes/accepted.jsonl \
+  --rejected-output compositional_toolathlon/data/generated/episodes/rejected.jsonl
 ```
 
 ### 3. coverage gate 与 episode 拆 step
 
 接受的 episode 必须先按 `template_id` 和 asset seed 完成
-`train/validation/synthetic_test` 切分。smoke 阶段要求每个目标工具至少出现在
-`train` split 的 3 个不同真实成功 episode 中；validation 和 synthetic_test
-中的调用会分 split 报告，但不能补足训练 coverage。formal 时把参数形态和模板阈值
-提高到设计文档值：
+`train/synthetic_test` 切分；当前 validation split 固定为空。smoke 阶段要求每个
+目标工具至少出现在 `train` split 的 3 个不同真实成功 episode 中；
+synthetic_test 中的调用只做训练后诊断，不能补足训练 coverage。formal 时把参数
+形态和模板阈值提高到设计文档值：
 
 ```bash
 python -m compositional_toolathlon.leakage_audit \
-  --tasks data/generated/tasks/verified/all.jsonl \
-  --protected-task-root datasets/toolathlon/tasks/finalpool \
+  --tasks compositional_toolathlon/data/generated/tasks/verified/all.jsonl \
+  --protected-task-root compositional_toolathlon/vendor/toolathlon/tasks/finalpool \
   --embedding-model models/all-MiniLM-L6-v2 \
-  --output data/generated/provenance/semantic_leakage.json
+  --output compositional_toolathlon/data/generated/provenance/semantic_leakage.json
 
 python -m compositional_toolathlon.audit_dataset \
-  --episodes data/generated/episodes/accepted.jsonl \
-  --verified-tasks data/generated/tasks/verified/all.jsonl \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
-  --target-tools data/generated/manifests/usable_tools.json \
-  --semantic-leakage-audit data/generated/provenance/semantic_leakage.json \
+  --episodes compositional_toolathlon/data/generated/episodes/accepted.jsonl \
+  --verified-tasks compositional_toolathlon/data/generated/tasks/verified/all.jsonl \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  --target-tools compositional_toolathlon/data/generated/manifests/target_tools.json \
+  --semantic-leakage-audit compositional_toolathlon/data/generated/provenance/semantic_leakage.json \
   --min-successful-episodes 3 \
-  --output data/generated/coverage/smoke.json
+  --require-distractor-role \
+  --output compositional_toolathlon/data/generated/coverage/smoke.json
 ```
 
 coverage report 使用 schema version 2，并记录每个工具的
-`successful_episode_count_by_split` 和 `train_successful_episode_count`。旧版把三个
+`successful_episode_count_by_split` 和 `train_successful_episode_count`；正式审计还
+要求每条 episode 都有可核验的真实执行证据，并把每个目标工具在 train 中作为
+干扰项出现设为硬门槛。报告同时冻结每个 split 的 episode ID、step 数量和逐行
+canonical 内容哈希；训练入口会对实际 train 文件和空 validation split 重新计算并
+逐项比对，删步、改参数或调换顺序都会被拒绝。旧版把三个
 split 合并统计的 audit 不能用于训练，必须重新运行上述命令。
 
 只有 audit Pass 后再拆 step：
 
 ```bash
 python -m compositional_toolathlon.episode_to_steps \
-  --episodes data/generated/episodes/accepted.jsonl \
-  --output-dir data/generated/steps \
-  --workspace-root /absolute/temporary/workspace
+  --episodes compositional_toolathlon/data/generated/episodes/accepted.jsonl \
+  --output-dir compositional_toolathlon/data/generated/steps
 ```
 
 每个输出样本只监督下一次工具 memory token、canonical JSON arguments，以及
 EOC-only/TapMem 的 EOC。历史 call 和 observation 都属于上下文，loss mask 为
-`-100`。
+`-100`。collector/builder 会在每个 episode 中记录各自的 `workspace_root`；
+step 转换按 episode 将真实绝对路径替换为 `<WORKSPACE>`，推理执行前再映射到当前
+fresh workspace。`--workspace-root` 只用于迁移没有该字段的旧单 workspace 数据。
+因此一条含 12 次工具调用的 trajectory 会产生 12 条训练样本，而不是一个端到端
+样本。当前 `smoke_v5` 的 14 条 train trajectory 共得到 142 条不同 step；每个
+epoch 对这 142 条 step 无放回打乱并各训练一次。
 
 synthetic held-out 的结构化预测可单独计算诊断指标：
 
 ```bash
 python -m compositional_toolathlon.diagnostics \
-  --input data/generated/predictions/synthetic_test.jsonl \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
+  --input compositional_toolathlon/data/generated/predictions/synthetic_test.jsonl \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
   --output compositional_toolathlon/runs/example/synthetic_metrics.json
 ```
 
@@ -337,17 +541,44 @@ python -m compositional_toolathlon.diagnostics \
 python -m compositional_toolathlon.main_train \
   --method tokmem \
   --model-name models/Llama-3.1-8B-Instruct \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
-  --train-steps data/generated/steps/train.jsonl \
-  --validation-steps data/generated/steps/validation.jsonl \
-  --data-audit data/generated/coverage/smoke.json \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
+  --train-steps compositional_toolathlon/data/generated/steps/train.jsonl \
+  --data-audit compositional_toolathlon/data/generated/coverage/smoke.json \
   --run-dir compositional_toolathlon/runs/tokmem_seed42
 ```
 
 将 `--method` 改为 `eoc_only` 或 `tapmem` 即可运行另外两组。入口不提供 LoRA 或
-adaptation 参数；TapMem 固定为 EOC、TCRA、train-time logit add 和 detach。每轮
-在 synthetic validation 上评估并恢复最佳 trainable state；正式十题绝不参与
-checkpoint 选择。
+adaptation 参数；TapMem 固定为 EOC、TCRA、train-time logit add 和 detach。每个
+方法固定执行预先设定的 epoch 数，并保存最后一个 epoch；不做 validation 或
+early stopping，训练 CLI 也不接受 validation 文件。synthetic-test 和正式十题都
+绝不参与 checkpoint 选择。
+
+新 checkpoint 与 `run_config.json` 都保存实际加载 backbone 目录的 canonical
+absolute path。为兼容已有的 e10 artifact，推理只在旧 checkpoint 的相对路径以固定
+仓库根解析后与 run config 指向同一个已存在目录时，规范化内存副本再交给通用严格
+loader；磁盘 checkpoint 不被修改。不同目录、不存在路径和普通文件都会拒绝。
+
+2026-07-26 的 `mixed_v1` 条件使用 66 条完整轨迹和 460 个 step，并按实验决定同时
+保留 collector-rejected episode 与失败 observation。两种方法读取完全相同的数据：
+
+```bash
+python -m compositional_toolathlon.main_train \
+  --method tokmem \
+  --model-name models/Llama-3.1-8B-Instruct \
+  --manifest compositional_toolathlon/data/llm_v1/manifests/tool_manifest.json \
+  --train-steps compositional_toolathlon/data/mixed_v1/steps/train.jsonl \
+  --data-audit compositional_toolathlon/data/mixed_v1/coverage/train_all.json \
+  --run-dir compositional_toolathlon/runs/mixed_v1_llama31_8b_tokmem_seed42_e10 \
+  --epochs 10 \
+  --batch-size 2 \
+  --gradient-accumulation-steps 2
+```
+
+TapMem 只需把 `--method` 与 `--run-dir` 改为对应值。长 observation 使
+`batch-size=4,max-length=4096` 在单张 80GB A100 上达到显存峰值，因此使用
+`batch-size=2`、梯度累积 2 保持 effective batch size 4。输出仅包含
+`checkpoint_trainable.pt`、配置和指标；checkpoint 是 `trainable_only`，
+不保存 frozen backbone、optimizer 或 scheduler。
 
 ### 5. synthetic 和正式推理
 
@@ -355,8 +586,8 @@ synthetic held-out 使用真实 gateway、真实 observation 和声明式 evalua
 
 ```bash
 python -m compositional_toolathlon.run_synthetic_rollout \
-  --task-spec data/generated/tasks/verified/test_0001.json \
-  --manifest data/generated/manifests/tool_manifest_default_decoupled.json \
+  --task-spec compositional_toolathlon/data/generated/tasks/verified/test_0001.json \
+  --manifest compositional_toolathlon/data/generated/manifests/tool_manifest.json \
   --run-dir compositional_toolathlon/runs/tapmem_seed42 \
   --workspace-root /absolute/fresh/workspace \
   --gateway-url http://127.0.0.1:8000/sse \
@@ -372,8 +603,20 @@ runner 放在 private trusted stash 中的题面/路径 bundle 与 raw gateway�
 环境变量、退出码和最小 hook 见
 [`TOOLATHLON_RUNNER_HOOK.md`](TOOLATHLON_RUNNER_HOOK.md)。
 
-完整 checkout 到位并按该文档完成一次兼容 smoke 后，可把 wrapper 接入官方
-`tokmem_runtime` 分支：
+训练 manifest 来自 host synthetic gateway，而固定 `1016beta` 镜像内的 MCP 包版本
+可能更旧。例如当前镜像的 filesystem 是 `2025.7.1`，host 采集版本是
+`2026.7.10`，同名工具的可选字段会有差异。正式入口因此只按稳定 gateway wire name
+取“当前题实际暴露工具”和冻结 manifest 的交集；未知工具不会暴露给模型，缺失工具
+由 available-tool mask 屏蔽。MCP 参数不再用训练时 schema 预先拒绝，而是交给当前
+官方 gateway/server 按真实 schema 执行和返回错误。synthetic 数据生成、训练审计和
+held-out 诊断仍使用完整 schema 严格校验。推理结束后，`traj_log.json` 的
+`tool_calls.tools` 记录本次 live schema，`tokmem_rollout.json` 另存完整
+`tools/list` 以及 mapped、missing、extra、schema-changed wire name；这些内容仅作
+回放与审计，不进入学生模型上下文。由于 stable ID 仍含训练时的旧 schema hash，该
+设置应报告为跨版本 wire-name compatibility，而不能写成完全同一工具定义。
+
+完整 checkout 到位、Docker runtime 通过上述门禁并按该文档完成一次兼容 smoke
+后，可把 wrapper 接入官方 `tokmem_runtime` 分支：
 
 ```bash
 python -m compositional_toolathlon.scripts.install_runner_hook \
@@ -393,6 +636,24 @@ bash compositional_toolathlon/scripts/run_pinned_official_task.sh \
 该 wrapper 将宿主侧所有 `uv run` 固定到已同步完成的 Python 3.12.11 环境，并设置
 frozen/no-sync，避免在 vendored 源码下隐式创建或重写另一套环境；它随后完整执行
 官方 runner，而不是替代 evaluator。
+
+当前 seed-42、epoch-10 的十题单次成对测试可顺序运行；已有可解析且 method/task
+匹配的 `tokmem_rollout.json` 和 `eval_res.json` 会被跳过。模型非成功终止产生的
+`pass=null` 是一个已完成的端到端失败样本，也会保留而不是重跑：
+
+```bash
+bash compositional_toolathlon/scripts/run_seed42_e10_official_suite.sh
+```
+
+也可在命令末尾只列出尚未完成的 task ID。该入口固定使用同一 manifest、最大
+100 步和官方 evaluator；runner 返回非零表示该次模型运行未通过，但不会阻止后续
+method/task 继续执行。同一账号同一时刻只允许一个该 suite 进程。入口使用本机已
+导入并通过动态检查的 `1016beta-singleuid` tag；它是上文 single-UID 派生镜像的
+本地运行 tag，不是 byte-identical 官方 tag。
+
+只有在显式把 task 划为互不重叠的并行分区时，才可为每个进程设置不同的
+`TOOLATHLON_SUITE_LOCK_ID`；每个分区还应使用不同 GPU。默认 lock ID 不允许重复
+启动完整 suite。
 
 原 evaluator 跑完后，可将它的原始 JSON 原样挂接到诊断记录：
 
@@ -438,7 +699,8 @@ python -m unittest discover -s compositional_toolathlon/tests -v
 真实 MCP 和正式 evaluator smoke test 还要求：
 
 - 官方 checkout 能从 GitHub 下载；
-- 当前用户能访问 `/var/run/docker.sock`，或可使用 rootless Podman；
+- 当前用户能访问 `/var/run/docker.sock`，或上述单 UID rootless Docker 对固定镜像
+  的 pull、run、嵌套 socket 门禁全部通过；
 - host 支持 bubblewrap 的 user/network namespace；
 - prepared image 已拉取并记录 digest；
 - 训练/本地推理时有可见 GPU；

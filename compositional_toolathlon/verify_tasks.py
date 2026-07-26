@@ -14,6 +14,11 @@ from .model_client import OpenAICompatibleClient, read_prompt
 from .synthetic_workspace import verify_task_assets
 
 
+VERIFIER_RESPONSE_SCHEMA = (
+    PACKAGE_DIR / "configs" / "codex_verifier_schema.json"
+)
+
+
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     records = []
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -42,6 +47,10 @@ def load_usable_tools(
         raise ValueError("usable-tools file must be a list or object")
     if not isinstance(tools, list) or any(not isinstance(item, str) for item in tools):
         raise ValueError("usable_tool_ids must be a list of strings")
+    if not tools:
+        raise ValueError("usable_tool_ids cannot be empty")
+    if len(tools) != len(set(tools)):
+        raise ValueError("usable_tool_ids cannot contain duplicates")
     return set(tools)
 
 
@@ -144,6 +153,7 @@ async def verify_candidates(
                     max_completion_tokens=int(
                         config["verifier"]["max_completion_tokens"]
                     ),
+                    response_schema=VERIFIER_RESPONSE_SCHEMA,
                 )
                 if model_verdict.get("verdict") != "PASS":
                     verifier_reasons = model_verdict.get("reasons", [])

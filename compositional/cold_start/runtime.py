@@ -20,7 +20,7 @@ class _OrthogonalInitializationTarget:
 def make_orthogonal_new_embeddings(model, new_tool_count, seed):
     """Use the compositional experiment's exact orthogonal initialization."""
     if model.decouple_embeddings:
-        raise ValueError("The Llama-1B cold-start experiment uses coupled embeddings")
+        raise ValueError("The Llama cold-start experiment uses coupled embeddings")
 
     old_tool_count = int(model.num_tools)
     total_tool_count = old_tool_count + int(new_tool_count)
@@ -48,6 +48,131 @@ def make_orthogonal_new_embeddings(model, new_tool_count, seed):
         apply_orthogonal_init_all_tools(target, total_tool_count)
 
     return temporary.detach()[old_tool_count:].clone()
+
+
+def make_convex_new_embeddings(model, aggregation_weights):
+    """Aggregate learned old-tool embeddings with document-derived weights."""
+    old_embeddings = model.trainable_tool_embeddings[: model.num_tools]
+    combined = (
+        aggregation_weights.to(device=old_embeddings.device).float()
+        @ old_embeddings.detach().float()
+    )
+    return combined.to(dtype=old_embeddings.dtype)
+
+
+def bounded_affine_weights(convex_weights, negative_mass_cap):
+    """Extrapolate away from the old-tool mean with bounded negative mass."""
+    weights = convex_weights.detach().float()
+    old_tool_count = weights.shape[1]
+    uniform = torch.full_like(weights, 1.0 / old_tool_count)
+    direction = weights - uniform
+    cap = float(negative_mass_cap)
+    if cap < 0.0:
+        raise ValueError("negative_mass_cap must be non-negative")
+
+    gains = torch.ones(weights.shape[0], dtype=torch.float32)
+    if cap == 0.0:
+        return weights.clone(), gains, torch.zeros_like(gains)
+
+    for row_index in range(weights.shape[0]):
+        base = weights[row_index]
+        row_direction = direction[row_index]
+
+        def negative_mass(extrapolation):
+            candidate = base + extrapolation * row_direction
+            return candidate.clamp_max(0.0).neg().sum().item()
+
+        lower = 0.0
+        upper = 1.0
+        while negative_mass(upper) < cap:
+            upper *= 2.0
+        for _ in range(40):
+            middle = 0.5 * (lower + upper)
+            if negative_mass(middle) < cap:
+                lower = middle
+            else:
+                upper = middle
+        gains[row_index] = 1.0 + 0.5 * (lower + upper)
+
+    affine = uniform + gains[:, None] * (weights - uniform)
+    negative_mass = affine.clamp_max(0.0).neg().sum(dim=1)
+    return affine, gains, negative_mass
+
+
+def make_affine_new_embeddings(model, affine_weights):
+    """Apply shared affine coefficients to learned old-tool embeddings."""
+    old_embeddings = model.trainable_tool_embeddings[: model.num_tools]
+    combined = (
+        affine_weights.to(device=old_embeddings.device).float()
+        @ old_embeddings.detach().float()
+    )
+    return combined.to(dtype=old_embeddings.dtype)
+
+
+def partial_renorm_new_embeddings(model, new_embeddings, strength):
+    """Interpolate each new row norm toward the learned old-tool mean."""
+    old_embeddings = model.trainable_tool_embeddings[: model.num_tools]
+    target_norm = old_embeddings.detach().float().norm(dim=1).mean().clamp(min=1e-6)
+    new_float = new_embeddings.float()
+    new_norms = new_float.norm(dim=1, keepdim=True).clamp(min=1e-6)
+    scale = 1.0 + float(strength) * (target_norm / new_norms - 1.0)
+    renormalized = new_float * scale
+    return renormalized.to(dtype=old_embeddings.dtype), target_norm.detach().cpu()
+
+
+def coherence_partial_renorm_new_embeddings(
+    model,
+    new_embeddings,
+    aggregation_weights,
+    strength,
+):
+    """Restore norm in proportion to agreement among each tool's donors."""
+    old_embeddings = model.trainable_tool_embeddings[: model.num_tools]
+    old_norms = old_embeddings.detach().float().norm(dim=1)
+    donor_target_norms = (
+        aggregation_weights.to(device=old_embeddings.device).float()
+        @ old_norms
+    ).clamp(min=1e-6)
+    new_float = new_embeddings.float()
+    new_norms = new_float.norm(dim=1).clamp(min=1e-6)
+    coherence = (new_norms / donor_target_norms).clamp(min=0.0, max=1.0)
+    scale = 1.0 + float(strength) * (1.0 - coherence)
+    renormalized = new_float * scale[:, None]
+    return (
+        renormalized.to(dtype=old_embeddings.dtype),
+        donor_target_norms.detach().cpu(),
+        coherence.detach().cpu(),
+    )
+
+
+def squared_coherence_renorm_new_embeddings(
+    model,
+    new_embeddings,
+    aggregation_weights,
+    strength=1.0,
+):
+    """Use a parameter-free second-order correction for donor cancellation."""
+    old_embeddings = model.trainable_tool_embeddings[: model.num_tools]
+    old_norms = old_embeddings.detach().float().norm(dim=1)
+    donor_target_norms = (
+        aggregation_weights.to(device=old_embeddings.device).float()
+        @ old_norms
+    ).clamp(min=1e-6)
+    new_float = new_embeddings.float()
+    new_norms = new_float.norm(dim=1).clamp(min=1e-6)
+    coherence = (new_norms / donor_target_norms).clamp(min=0.0, max=1.0)
+    scale = 1.0 + float(strength) * (1.0 - coherence).square()
+    renormalized = new_float * scale[:, None]
+    return (
+        renormalized.to(dtype=old_embeddings.dtype),
+        donor_target_norms.detach().cpu(),
+        coherence.detach().cpu(),
+    )
+
+
+def renorm_new_embeddings_to_old_mean(model, new_embeddings):
+    """Match every new row to the mean norm of the learned old-tool rows."""
+    return partial_renorm_new_embeddings(model, new_embeddings, strength=1.0)
 
 
 def _available_reserved_tokens(model, count):
@@ -195,26 +320,79 @@ def _cold_start_logit_bias(
     hidden_states,
     active_decision_rows,
 ):
-    if self.logit_bias_head is None or not active_decision_rows.any():
+    if not active_decision_rows.any():
         return logits
+    active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
+    old_count = int(self._cold_start_old_tool_count)
+    tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
+    identity_offsets = getattr(
+        self,
+        "_cold_start_new_identity_offsets",
+        None,
+    )
+    if self.logit_bias_head is None:
+        if identity_offsets is None:
+            return logits
+        identity_offsets = identity_offsets.to(
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        new_token_ids = tool_token_ids[old_count:]
+        original_new_logits = logits[
+            active_indices[:, None],
+            new_token_ids[None, :],
+        ]
+        identity_logits = original_new_logits - identity_offsets.unsqueeze(0)
+        calibrated_new_logits = (
+            original_new_logits.max(dim=1, keepdim=True).values
+            + identity_logits
+            - identity_logits.max(dim=1, keepdim=True).values
+        )
+        updated_logits = logits.clone()
+        updated_logits[
+            active_indices[:, None],
+            new_token_ids[None, :],
+        ] = calibrated_new_logits
+        return updated_logits
     if hidden_states is None:
         raise ValueError("Boundary hidden states are required for TCRA")
 
-    active_indices = active_decision_rows.nonzero(as_tuple=False).squeeze(-1)
     scores = self._get_logit_bias_scores(hidden_states[active_indices]).float()
-    old_count = int(self._cold_start_old_tool_count)
-
     old_log_probabilities = torch.log_softmax(scores[:, :old_count], dim=-1)
     old_bias = old_log_probabilities + math.log(old_count)
     old_reference = (
         torch.logsumexp(scores[:, :old_count], dim=-1, keepdim=True)
         - math.log(old_count)
     )
-    new_bias = scores[:, old_count:] - old_reference
+    new_gain = float(getattr(self, "_cold_start_new_tcra_gain", 1.0))
+    new_bias = (scores[:, old_count:] - old_reference) * new_gain
     tool_bias = torch.cat([old_bias, new_bias], dim=-1)
     tool_bias = (tool_bias * self.logit_bias_scale).to(dtype=logits.dtype)
+    if identity_offsets is not None:
+        identity_offsets = identity_offsets.to(
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        new_token_ids = tool_token_ids[old_count:]
+        original_new_logits = (
+            logits[active_indices[:, None], new_token_ids[None, :]]
+            + tool_bias[:, old_count:]
+        )
+        identity_logits = original_new_logits - identity_offsets.unsqueeze(0)
+        calibrated_new_logits = (
+            original_new_logits.max(dim=1, keepdim=True).values
+            + identity_logits
+            - identity_logits.max(dim=1, keepdim=True).values
+        )
+        tool_bias[:, old_count:] += (
+            calibrated_new_logits - original_new_logits
+        )
+    new_penalty = float(
+        getattr(self, "_cold_start_new_logit_penalty", 0.0)
+    )
+    if new_penalty:
+        tool_bias[:, old_count:] -= new_penalty
 
-    tool_token_ids = self._get_tool_reserved_token_ids_tensor(logits.device)
     updated_logits = logits.clone()
     updated_logits[
         active_indices[:, None],
@@ -250,14 +428,13 @@ def append_cold_start_tools(
             new_tcra_weight,
             new_tcra_bias,
         )
-        model._cold_start_old_tool_count = old_tool_count
-        model._apply_logit_bias_to_logits = types.MethodType(
-            _cold_start_logit_bias,
-            model,
-        )
 
     model._cold_start_old_tool_count = old_tool_count
     model._cold_start_new_tool_count = len(new_tool_names)
+    model._apply_logit_bias_to_logits = types.MethodType(
+        _cold_start_logit_bias,
+        model,
+    )
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     model.eval()
@@ -282,10 +459,24 @@ def apply_cold_start_delta(model, delta):
         raise ValueError("Delta base-tool order does not match the loaded checkpoint")
 
     tcra = delta.get("tcra")
-    return append_cold_start_tools(
+    registry = append_cold_start_tools(
         model,
         delta["new_tool_names"],
         delta["new_embeddings"],
         None if tcra is None else tcra["new_weight"],
         None if tcra is None else tcra["new_bias"],
     )
+    calibration = delta.get("routing_calibration") or {}
+    model._cold_start_new_tcra_gain = float(
+        calibration.get("new_tcra_gain", 1.0)
+    )
+    model._cold_start_new_logit_penalty = float(
+        calibration.get("new_logit_penalty", 0.0)
+    )
+    identity_offsets = calibration.get("new_tool_identity_offsets")
+    model._cold_start_new_identity_offsets = (
+        None
+        if identity_offsets is None
+        else torch.as_tensor(identity_offsets).float().cpu()
+    )
+    return registry

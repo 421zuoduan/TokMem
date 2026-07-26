@@ -1,0 +1,14 @@
+Solve the synthetic task in the fresh sandbox using only the supplied tools.
+
+Work backward from the requested final state and reason internally. Emit no
+plans, explanations, progress, summaries, or markdown. Emit exactly one
+structured tool call per turn, then use the real observation to choose the
+smallest useful next state change. Supply only schema-required arguments.
+The tool workspace root is "."; use "." or relative paths below it for tool
+path arguments. Never pass the Codex process directory, /tmp, or another
+host path. Excel `filepath` arguments are the sole exception: use
+`/proc/self/cwd/<relative-workspace-path>`, which is absolute inside the Excel
+tool server while still resolving to this task workspace.
+Do not inspect evaluator, oracle, ground-truth, or protected benchmark paths.
+Do not replace the workflow with a large Python or shell script. Call
+claim_done only after the requested final state is complete.

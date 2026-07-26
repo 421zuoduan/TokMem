@@ -421,6 +421,34 @@ generation_provenance
 | formal | 建议 20–50 次 | 正式比较 |
 
 “出现”必须指工具在接受的轨迹中真实执行成功，不能只是在候选菜单中作为干扰项。
+smoke 实现的 coverage denominator 不是 manifest 中所有函数的机械并集，而是冻结的
+38 个可学习目标：20 个 Excel、11 个 filesystem、5 个 PDF、受控 terminal 和
+workspace-only Python。`claim_done`、环境/安全说明、废弃的 filesystem read、
+当前文本学生无法消费的 media read，以及四个 PDF search-session 分页辅助函数不计入
+分母；它们仍保留在每题的干扰菜单中，并在独立 fresh gateway probe 中验证可调用。
+`usable_tools.json` 当前记录完整 47 个成功工具，`target_tools.json` 只冻结 38 个
+coverage 目标，两者必须分开保存。
+
+当前 `smoke_v5` corpus 包含 14 个 train、0 个 validation 和 2 个 synthetic-test
+episode，共 162 个 step（142/0/20）。38 个目标都必须在至少 3 个不同 train task
+中真实成功出现；当前 30 个目标出现于 3 个 train episode、5 个出现于 4 个、2 个
+出现于 5 个，`filesystem-read_text_file` 出现于 8 个。synthetic-test 调用不补
+训练 coverage。每题向学生保留完整 47-tool 菜单；两个 synthetic-test task 使用
+train 未使用的 template、asset layout 和 plan signature。外部 GPT-5.6 endpoint
+未配置时，允许用三种不同 prompt 约束的
+确定性模板和多 subagent review 验证工程闭环，但 provenance 必须明确写明非
+GPT-5.6，且这批数据只能作为 smoke，不能替代 formal 的模型生成数据。
+
+`smoke_v5` 的通过报告还必须同时满足：所有 accepted episode 均声明并携带可核验的
+真实执行 metadata；每个目标工具在至少一个 train template 中作为未调用干扰项；
+semantic audit 绑定 task ID 与完整题面；coverage audit 绑定各 split 的 episode ID、
+step 数量和 canonical step 内容哈希。训练入口会重新计算这些绑定，不能用删步、改
+参数、换顺序或关闭干扰项检查的文件开始训练。
+
+Office/PDF 终态采用严格断言：Excel 检查每个相关 worksheet 的非空单元格全集、
+solid fill、table 定义、chart 的完整 series 引用和合并区域；PDF 检查页数以及
+规范化后的逐页全文相等。这样额外写入单元格、删除中间 chart series 或向 PDF 页面
+追加内容都会失败，而不是只检查调用是否返回成功。
 
 正式数据还应满足：
 
@@ -431,7 +459,11 @@ generation_provenance
 - 2–4、5–8、9–15 步任务都有覆盖；
 - 每个 episode 的所有调用具有真实 observation。
 
-长轨迹拆出的 step 更多，不能因此在 loss 中自动获得更大权重。正式 loader 应按 episode 或目标工具重采样，使少量长轨迹不会支配训练；三种方法必须使用相同采样权重。
+当前主协议把“下一次工具调用决策”作为基本训练单位：一条含 \(L\) 次调用的
+trajectory 拆成 \(L\) 条 step，每个 epoch 对所有不同 step 无放回打乱并各训练
+一次。因此长 trajectory 会按其包含的真实决策数贡献更多监督，但不会因重采样导致
+某些 GT step 整轮缺席。三种方法必须使用完全相同的 step 集合、无放回采样规则和
+随机 seed；若另做 episode-balanced 采样，只能作为预注册的独立消融。
 
 ### 7.6 多 session 生成策略
 
@@ -773,15 +805,23 @@ memory token
 + response end
 ```
 
+所以训练单位不是完整 trajectory，而是 next-tool-call step。`smoke_v5` 的 14 条
+train trajectory 展开为 142 条不同 GT step；每个 epoch 将这 142 条 step 无放回
+打乱并各训练一次。第 \(k\) 条 step 的输入仍包含同一 trajectory 中前 \(k-1\) 次
+真实调用及 observation，因此没有丢掉执行上下文。
+
 ### 9.6 split 规则
 
 必须在拆 step 之前按 episode 和任务族切分：
 
 ```text
-train / validation / synthetic_test
+train / synthetic_test
 ```
 
 禁止随机打散 step 后切分，否则同一任务前几个步骤可能在训练集、后几个步骤在测试集。
+当前协议不保留 validation：原 validation episode 已并入 train，生成的
+`validation.jsonl` 必须为空。synthetic-test 只用于训练完成后的诊断，不参与
+early stopping、epoch 选择或超参数选择。
 
 分组键至少包括：
 
@@ -871,7 +911,7 @@ user
 - backbone checkpoint；
 - tokenizer；
 - tool manifest；
-- train/validation/synthetic-test episode；
+- train/synthetic-test episode；
 - step 展开规则；
 - batch size；
 - optimizer；
@@ -880,7 +920,7 @@ user
 - context length；
 - observation 截断；
 - available-tool mask；
-- checkpoint 选择规则；
+- 固定 epoch 数和 final-epoch checkpoint 规则；
 - 训练随机 seed 列表。
 
 只允许方法定义中的 EOC 和 TCRA 不同。
@@ -919,20 +959,18 @@ teacher 生成 GT 时可以看到工具文档，因为 teacher 的职责是产�
 - 每工具建议 20–50 个 accepted episode；
 - 使用预先固定的 3 个训练 seed；
 - 加入 9–15 步任务和干扰工具；
-- checkpoint 只按 synthetic validation 选择；
+- 固定训练 epoch 数并保存 final-epoch checkpoint；
 - 冻结后才运行 Toolathlon。
 
 ### 11.4 checkpoint 选择
 
 不能根据 10 道正式题的分数选择 checkpoint、超参数、prompt 或数据配比。
 
-checkpoint 选择只使用：
-
-- synthetic validation loss；
-- next-tool 指标；
-- function-call exact match；
-- schema-valid rate；
-- synthetic validation rollout Pass。
+当前协议不使用 validation 做 checkpoint 选择。epoch 数、学习率和其他超参数必须在
+看到 synthetic-test 或正式十题结果之前预先固定；每个方法都保存并比较最后一个
+epoch 的 checkpoint。synthetic-test 的 next-tool、function-call、schema-valid
+和 rollout Pass 只作为训练后诊断，不得反向选择 checkpoint。训练 CLI 不提供
+validation 输入参数；数据审计中的 validation 必须绑定为空 split。
 
 正式 Toolathlon 运行一次后，不得回到训练阶段针对失败题生成相似数据。若这样做，后续结果必须标为 test-aware adaptation，不能和主结果合并。
 
@@ -1160,8 +1198,8 @@ docs-only 数据如果使用，必须单独标注。主结论应来自真实执�
 
 - 按 episode/template 分 split；
 - 没有跨 split 近重复；
-- 每个目标工具在 `train` split 中至少有 3 个不同的真实成功 episode；validation
-  和 synthetic test 的调用只报告、不计入该门槛；
+- 每个目标工具在 `train` split 中至少有 3 个不同的真实成功 episode；
+  synthetic test 的调用只报告、不计入该门槛；
 - 路径已规范化；
 - tool manifest hash 一致；
 - target 未被截断；
@@ -1188,7 +1226,6 @@ compositional_toolathlon/data/generated/
 │   └── excluded_tools.json
 ├── tasks/
 │   ├── train/
-│   ├── validation/
 │   └── synthetic_test/
 ├── episodes/
 │   ├── candidates/
@@ -1196,7 +1233,7 @@ compositional_toolathlon/data/generated/
 │   └── rejected/
 ├── steps/
 │   ├── train.json
-│   ├── validation.json
+│   ├── validation.json  # compatibility placeholder; must be empty
 │   └── synthetic_test.json
 ├── prompts/
 │   ├── generators/
@@ -1269,7 +1306,7 @@ results/toolathlon_<run_name>/
 
 1. 每工具至少 10 个成功 episode。
 2. 训练一个 seed 的 TokMem、EOC-only、TapMem。
-3. 在 synthetic validation 做 teacher-forced 和 rollout。
+3. 训练结束后在 synthetic-test 做 teacher-forced 和 rollout 诊断。
 4. 在 2–3 道 Toolathlon 题上只检查工程链路。
 
 这些题的结果不能用于调超参数后再作为正式结果。
@@ -1280,7 +1317,7 @@ results/toolathlon_<run_name>/
 2. 每工具扩到建议的 20–50 个 accepted episode。
 3. 运行泄漏审计。
 4. 训练预先固定的 3 个 seed。
-5. 只按 synthetic validation 选择 checkpoint。
+5. 按预注册 epoch 数保存 final-epoch checkpoint。
 6. 冻结模型和推理配置。
 
 ### Phase 4：正式 Toolathlon

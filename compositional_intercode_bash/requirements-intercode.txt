@@ -1,0 +1,13 @@
+# Optional dependencies needed only for real InterCode Docker evaluation.
+docker>=6.0
+gymnasium>=0.28
+mysql-connector-python>=8.0
+rpyc>=5.3
+pandas>=1.5
+scikit-learn>=1.2
+rich>=13.0
+
+# Training/data dependencies used directly by this directory.
+bashlex==0.18
+safetensors>=0.4
+pyarrow>=12

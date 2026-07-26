@@ -10,13 +10,22 @@ from typing import Any
 
 from .episode_to_steps import (
     ALLOWED_SPLITS,
+    flatten_episode,
     read_records,
+    record_content_hash,
     validate_episode,
     validate_group_splits,
 )
 from .generate_tasks import validate_task_candidate
 from .manifest import load_manifest, validate_tool_arguments
-from .verify_tasks import load_usable_tools, read_jsonl
+from .target_policy import (
+    TARGET_POLICY_HASH,
+    TARGET_POLICY_NAME,
+    TARGET_POLICY_VERSION,
+    TARGET_TOOL_NAMES,
+    validate_target_tools_report,
+)
+from .verify_tasks import read_jsonl
 
 
 def _shape(value: Any) -> Any:
@@ -47,6 +56,25 @@ def episode_id_hash(values: set[str] | list[str]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def semantic_task_content_hash(tasks: list[dict[str, Any]]) -> str:
+    material = json.dumps(
+        sorted(
+            (
+                {
+                    "task_id": task["task_id"],
+                    "instruction": task["instruction"],
+                }
+                for task in tasks
+            ),
+            key=lambda record: record["task_id"],
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _instruction_ngrams(text: str, width: int = 5) -> set[tuple[str, ...]]:
     tokens = re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE)
     if len(tokens) < width:
@@ -69,7 +97,6 @@ def _asset_layout_signature(task: dict[str, Any]) -> str:
             }
         )
     material = {
-        "task_family": task["task_family"],
         "files": sorted(files, key=lambda value: json.dumps(value, sort_keys=True)),
         "directory_depths": sorted(
             len(Path(path).parts)
@@ -92,12 +119,21 @@ def audit_synthetic_task_splits(
 ) -> dict[str, Any]:
     template_splits: dict[str, set[str]] = defaultdict(set)
     layout_splits: dict[str, set[str]] = defaultdict(set)
+    plan_signature_splits: dict[str, set[str]] = defaultdict(set)
     asset_seeds = set()
     for task in task_specs:
         template_splits[task["template_id"]].add(task["split"])
         layout_splits[_asset_layout_signature(task)].add(task["split"])
+        generation_provenance = task["generation_provenance"]
+        if "plan_signature" in generation_provenance:
+            plan_signature = generation_provenance["plan_signature"]
+            if not isinstance(plan_signature, str) or not plan_signature.strip():
+                raise ValueError(
+                    "generation_provenance.plan_signature must be a non-empty string"
+                )
+            plan_signature_splits[plan_signature].add(task["split"])
         provenance_key = (
-            task["generation_provenance"].get("session_id"),
+            generation_provenance.get("session_id"),
             task["asset_seed"],
         )
         if provenance_key in asset_seeds:
@@ -118,6 +154,15 @@ def audit_synthetic_task_splits(
             failures.append(
                 {
                     "kind": "asset_layout_cross_split",
+                    "signature": signature,
+                    "splits": sorted(splits),
+                }
+            )
+    for signature, splits in plan_signature_splits.items():
+        if len(splits) > 1:
+            failures.append(
+                {
+                    "kind": "plan_signature_cross_split",
                     "signature": signature,
                     "splits": sorted(splits),
                 }
@@ -160,13 +205,30 @@ def audit_dataset(
     min_argument_shapes: int,
     min_templates: int,
     require_distractor_role: bool,
+    require_real_execution: bool = False,
+    include_rejected: bool = False,
+    include_failed_calls: bool = False,
 ) -> dict[str, Any]:
     validate_group_splits(episodes)
     manifest_records = {
         record["stable_id"]: record for record in manifest["tools"]
     }
     for episode in episodes:
-        validate_episode(episode, require_clean=True)
+        if require_real_execution:
+            teacher = episode.get("teacher")
+            if (
+                not isinstance(teacher, dict)
+                or teacher.get("real_execution") is not True
+            ):
+                raise ValueError(
+                    "formal dataset audit requires "
+                    "teacher.real_execution=true for every episode"
+                )
+        validate_episode(
+            episode,
+            require_clean=not include_failed_calls,
+            include_rejected=include_rejected,
+        )
         if episode["tool_manifest_hash"] != manifest["manifest_hash"]:
             raise ValueError("episode uses a different manifest hash")
         for index in range(0, len(episode["messages"]), 2):
@@ -197,12 +259,33 @@ def audit_dataset(
     )
     shapes: dict[str, set[str]] = defaultdict(set)
     templates: dict[str, set[str]] = defaultdict(set)
+    shapes_by_split: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    templates_by_split: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
     step_bins = Counter()
     splits = Counter()
     split_episode_ids: dict[str, set[str]] = defaultdict(set)
+    split_steps: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for episode in episodes:
-        if episode["task_id"] not in task_by_id:
+        task = task_by_id.get(episode["task_id"])
+        if task is None:
             raise ValueError(f"episode task has no verified task spec: {episode['task_id']}")
+        episode_task_pairs = (
+            ("template_id", "template_id"),
+            ("asset_seed", "asset_seed"),
+            ("split", "split"),
+            ("instruction", "instruction"),
+            ("available_tool_ids", "available_tools"),
+        )
+        for episode_field, task_field in episode_task_pairs:
+            if episode.get(episode_field) != task.get(task_field):
+                raise ValueError(
+                    f"episode {episode['episode_id']} field {episode_field!r} "
+                    f"does not match verified task {task_field!r}"
+                )
         call_count = len(episode["messages"]) // 2
         if 2 <= call_count <= 4:
             step_bins["2-4"] += 1
@@ -214,6 +297,13 @@ def audit_dataset(
             step_bins["outside_preregistered_bins"] += 1
         splits[episode["split"]] += 1
         split_episode_ids[episode["split"]].add(episode["episode_id"])
+        split_steps[episode["split"]].extend(
+            flatten_episode(
+                episode,
+                require_clean=not include_failed_calls,
+                include_rejected=include_rejected,
+            )
+        )
         for index in range(0, len(episode["messages"]), 2):
             call = episode["messages"][index]
             observation = episode["messages"][index + 1]
@@ -228,14 +318,26 @@ def audit_dataset(
             )
             shapes[tool_id].add(argument_shape(call["arguments"]))
             templates[tool_id].add(episode["template_id"])
+            shapes_by_split[episode["split"]][tool_id].add(
+                argument_shape(call["arguments"])
+            )
+            templates_by_split[episode["split"]][tool_id].add(
+                episode["template_id"]
+            )
 
     distractor_roles: dict[str, set[str]] = defaultdict(set)
     intended_roles: dict[str, set[str]] = defaultdict(set)
+    train_distractor_roles: dict[str, set[str]] = defaultdict(set)
+    train_intended_roles: dict[str, set[str]] = defaultdict(set)
     for task in task_specs:
         for tool_id in task["distractor_tools"]:
             distractor_roles[tool_id].add(task["template_id"])
+            if task["split"] == "train":
+                train_distractor_roles[tool_id].add(task["template_id"])
         for tool_id in task["intended_required_tools"]:
             intended_roles[tool_id].add(task["template_id"])
+            if task["split"] == "train":
+                train_intended_roles[tool_id].add(task["template_id"])
 
     known_tools = {record["stable_id"] for record in manifest["tools"]}
     unknown_targets = sorted(target_tool_ids - known_tools)
@@ -268,16 +370,31 @@ def audit_dataset(
             "actual_template_count": len(templates[tool_id]),
             "intended_template_count": len(intended_roles[tool_id]),
             "distractor_template_count": len(distractor_roles[tool_id]),
+            "train_argument_shape_count": len(
+                shapes_by_split["train"][tool_id]
+            ),
+            "train_actual_template_count": len(
+                templates_by_split["train"][tool_id]
+            ),
+            "train_intended_template_count": len(
+                train_intended_roles[tool_id]
+            ),
+            "train_distractor_template_count": len(
+                train_distractor_roles[tool_id]
+            ),
         }
         reasons = []
         if metrics["train_successful_episode_count"] < min_successful_episodes:
             reasons.append("train_successful_episode_count")
-        if metrics["argument_shape_count"] < min_argument_shapes:
-            reasons.append("argument_shape_count")
-        if metrics["actual_template_count"] < min_templates:
-            reasons.append("actual_template_count")
-        if require_distractor_role and metrics["distractor_template_count"] == 0:
-            reasons.append("distractor_template_count")
+        if metrics["train_argument_shape_count"] < min_argument_shapes:
+            reasons.append("train_argument_shape_count")
+        if metrics["train_actual_template_count"] < min_templates:
+            reasons.append("train_actual_template_count")
+        if (
+            require_distractor_role
+            and metrics["train_distractor_template_count"] == 0
+        ):
+            reasons.append("train_distractor_template_count")
         metrics["passed"] = not reasons
         metrics["failed_thresholds"] = reasons
         per_tool[tool_id] = metrics
@@ -288,6 +405,7 @@ def audit_dataset(
         "schema_version": 2,
         "passed": not failures and split_audit["passed"],
         "tool_manifest_hash": manifest["manifest_hash"],
+        "target_tool_count": len(target_tool_ids),
         "thresholds": {
             "min_successful_episodes": min_successful_episodes,
             "successful_episode_scope": "train",
@@ -295,11 +413,37 @@ def audit_dataset(
             "min_templates": min_templates,
             "require_distractor_role": require_distractor_role,
         },
+        "execution_requirements": {
+            "real_execution": require_real_execution,
+        },
+        "training_episode_policy": {
+            "include_rejected": include_rejected,
+            "include_failed_calls": include_failed_calls,
+        },
+        "episode_acceptance_counts": dict(
+            sorted(
+                Counter(
+                    "accepted" if episode["accepted"] else "rejected"
+                    for episode in episodes
+                ).items()
+            )
+        ),
         "episode_count": len(episodes),
-        "split_episode_counts": dict(sorted(splits.items())),
+        "split_episode_counts": {
+            split: splits[split]
+            for split in ALLOWED_SPLITS
+        },
         "split_episode_id_hashes": {
-            split: episode_id_hash(ids)
-            for split, ids in sorted(split_episode_ids.items())
+            split: episode_id_hash(split_episode_ids[split])
+            for split in ALLOWED_SPLITS
+        },
+        "split_step_counts": {
+            split: len(split_steps[split])
+            for split in ALLOWED_SPLITS
+        },
+        "split_step_content_hashes": {
+            split: record_content_hash(split_steps[split])
+            for split in ALLOWED_SPLITS
         },
         "step_length_bins": dict(sorted(step_bins.items())),
         "per_tool": per_tool,
@@ -326,20 +470,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-argument-shapes", type=int, default=1)
     parser.add_argument("--min-templates", type=int, default=1)
     parser.add_argument("--require-distractor-role", action="store_true")
+    parser.add_argument(
+        "--include-rejected",
+        action="store_true",
+        help="include complete collector-rejected episodes in the training audit",
+    )
+    parser.add_argument(
+        "--include-failed-calls",
+        action="store_true",
+        help="include steps whose real tool observation reports failure",
+    )
     parser.add_argument("--output", required=True)
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    manifest = load_manifest(args.manifest)
-    target_tools = load_usable_tools(args.target_tools, manifest["manifest_hash"])
-    non_task_actions = {
-        record["stable_id"]
-        for record in manifest["tools"]
-        if record["dispatch_kind"] in {"terminal", "runner_state"}
+    threshold_values = {
+        "--min-successful-episodes": args.min_successful_episodes,
+        "--min-argument-shapes": args.min_argument_shapes,
+        "--min-templates": args.min_templates,
     }
-    target_tools -= non_task_actions
+    non_positive = {
+        name: value
+        for name, value in threshold_values.items()
+        if value <= 0
+    }
+    if non_positive:
+        raise ValueError(
+            "coverage thresholds must be positive integers: "
+            + ", ".join(
+                f"{name}={value}" for name, value in sorted(non_positive.items())
+            )
+        )
+    if args.min_successful_episodes < 3:
+        raise ValueError(
+            "--min-successful-episodes must be at least 3 for the frozen "
+            "Toolathlon smoke contract"
+        )
+    if not args.require_distractor_role:
+        raise ValueError(
+            "--require-distractor-role is mandatory for the frozen "
+            "Toolathlon smoke contract"
+        )
+    manifest = load_manifest(args.manifest)
+    target_tools_payload = json.loads(
+        Path(args.target_tools).read_text(encoding="utf-8")
+    )
+    target_tools = validate_target_tools_report(target_tools_payload, manifest)
     report = audit_dataset(
         episodes=read_records(args.episodes),
         task_specs=read_jsonl(args.verified_tasks),
@@ -349,6 +527,17 @@ def main() -> int:
         min_argument_shapes=args.min_argument_shapes,
         min_templates=args.min_templates,
         require_distractor_role=args.require_distractor_role,
+        require_real_execution=True,
+        include_rejected=args.include_rejected,
+        include_failed_calls=args.include_failed_calls,
+    )
+    report.update(
+        {
+            "target_policy_name": TARGET_POLICY_NAME,
+            "target_policy_version": TARGET_POLICY_VERSION,
+            "target_policy_hash": TARGET_POLICY_HASH,
+            "target_tool_count": len(TARGET_TOOL_NAMES),
+        }
     )
     semantic_audit = json.loads(
         Path(args.semantic_leakage_audit).read_text(encoding="utf-8")
@@ -359,6 +548,13 @@ def main() -> int:
     ).hexdigest()
     if semantic_audit.get("task_id_hash") != expected_task_hash:
         raise ValueError("semantic leakage audit covers a different verified task set")
+    verified_tasks = read_jsonl(args.verified_tasks)
+    if semantic_audit.get("task_content_hash") != semantic_task_content_hash(
+        verified_tasks
+    ):
+        raise ValueError(
+            "semantic leakage audit covers different task instructions"
+        )
     report["semantic_leakage_audit"] = semantic_audit
     report["passed"] = report["passed"] and semantic_audit.get("passed") is True
     output_path = Path(args.output)

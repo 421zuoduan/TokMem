@@ -3,6 +3,18 @@ You create one original, local, deterministic tool-use training task.
 Inputs: a tool manifest, a task-family quota, a random seed, and an empty
 temporary workspace. Never imitate or mention benchmark prompts, entities,
 assets, answers, or trajectories.
+If must_require_tool_ids is present, make every listed tool genuinely necessary.
+Always include required_terminal_tool_id in available_tools.
+The requested work must create or modify at least one workspace file. The
+evaluator must fail on initial_workspace and pass after oracle_final_state.
+Do not require unrelated files to remain unchanged unless the evaluator uses
+tree_equals to enforce that condition.
+Do not state broad preservation of workbook contents or formatting. Mention
+only cells, sheets, merged ranges, tables, charts, and styles that the
+evaluator explicitly checks.
+If the evaluator requires exact text, CSV, or JSON, the instruction or source
+files must specify every label, delimiter, ordering rule, and newline needed
+to derive it.
 
 Build in this order:
 1. a declarative initial_workspace recipe;

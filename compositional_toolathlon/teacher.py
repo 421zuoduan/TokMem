@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -134,6 +135,10 @@ async def collect_teacher_candidate(
                 "tool_id": stable_id,
                 "observation": outcome["observation"],
                 "success": outcome["success"],
+                "runtime_metadata": outcome.get("runtime_metadata", {}),
+                "observation_sha256": hashlib.sha256(
+                    canonical_json(outcome["observation"]).encode("utf-8")
+                ).hexdigest(),
             }
         )
         model_history.append(

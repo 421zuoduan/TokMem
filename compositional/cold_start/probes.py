@@ -28,6 +28,15 @@ def schema_text(schema):
     return "\n".join(lines)
 
 
+def purpose_schema(schema):
+    """Keep the routing-relevant purpose while removing schema-format noise."""
+    return {
+        "name": schema["name"],
+        "description": schema.get("description", ""),
+        "parameters": {},
+    }
+
+
 def _right_pad(sequences, pad_token_id, device):
     max_length = max(len(sequence) for sequence in sequences)
     input_ids = torch.full(
@@ -54,15 +63,33 @@ def _right_pad(sequences, pad_token_id, device):
     return input_ids, attention_mask, lengths
 
 
+def _final_hidden_states_without_logits(model, input_ids, attention_mask):
+    """Run the backbone only; the vocabulary projection is not needed here."""
+    causal_lm = model._get_core_model()
+    backbone = getattr(causal_lm, causal_lm.base_model_prefix)
+    outputs = backbone(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+        return_dict=True,
+    )
+    return outputs.last_hidden_state
+
+
 def extract_document_hidden_states(
     model,
     tokenizer,
     schemas,
     batch_size=8,
+    document_view="full",
 ):
     """Return one normalized final hidden state for every tool document."""
     sequences = []
     for schema in schemas:
+        if document_view == "purpose":
+            schema = purpose_schema(schema)
+        elif document_view != "full":
+            raise ValueError(f"Unknown document view: {document_view}")
         document = DOCUMENT_TEMPLATE.format(schema=schema_text(schema))
         prompt = format_user_assistant_prompt(
             tokenizer,
@@ -83,7 +110,8 @@ def extract_document_hidden_states(
             device,
         )
         with torch.inference_mode():
-            _, hidden_states = model.forward_with_final_hidden_states(
+            hidden_states = _final_hidden_states_without_logits(
+                model,
                 input_ids,
                 attention_mask,
             )

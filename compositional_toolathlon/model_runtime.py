@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +43,57 @@ def _dtype(name: str) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }[name]
+
+
+def resolve_base_model_path(
+    *,
+    run_config_model_name: str,
+    checkpoint_model_name: str,
+) -> str:
+    configured_path = Path(run_config_model_name)
+    if not configured_path.is_absolute():
+        raise ValueError("run config base model path must be absolute")
+    try:
+        configured_path = configured_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError("run config base model path does not exist") from exc
+    if not configured_path.is_dir():
+        raise ValueError("run config base model path must be a directory")
+
+    checkpoint_path = Path(checkpoint_model_name)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = REPO_ROOT / checkpoint_path
+    try:
+        checkpoint_path = checkpoint_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError("checkpoint base model path does not exist") from exc
+    if not checkpoint_path.is_dir():
+        raise ValueError("checkpoint base model path must be a directory")
+    if configured_path != checkpoint_path:
+        raise ValueError("checkpoint and run config base model differ")
+    return str(configured_path)
+
+
+def prepare_checkpoint_for_base_model(
+    *,
+    checkpoint: dict[str, Any],
+    run_config_model_name: str,
+) -> tuple[str, dict[str, Any]]:
+    metadata = checkpoint.get("model_metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("checkpoint lacks model_metadata")
+    checkpoint_model_name = metadata.get("base_model")
+    if not isinstance(checkpoint_model_name, str) or not checkpoint_model_name:
+        raise ValueError("checkpoint model_metadata lacks base_model")
+    model_name = resolve_base_model_path(
+        run_config_model_name=run_config_model_name,
+        checkpoint_model_name=checkpoint_model_name,
+    )
+    normalized_checkpoint = dict(checkpoint)
+    normalized_metadata = dict(metadata)
+    normalized_metadata["base_model"] = model_name
+    normalized_checkpoint["model_metadata"] = normalized_metadata
+    return model_name, normalized_checkpoint
 
 
 @dataclass
@@ -94,9 +144,10 @@ def load_tool_model(
     if toolathlon_metadata.get("method") != method:
         raise ValueError("checkpoint and run config method differ")
 
-    model_name = checkpoint["model_metadata"]["base_model"]
-    if os.path.realpath(run_config["model_name"]) != os.path.realpath(model_name):
-        raise ValueError("checkpoint and run config base model differ")
+    model_name, checkpoint_for_load = prepare_checkpoint_for_base_model(
+        checkpoint=checkpoint,
+        run_config_model_name=run_config["model_name"],
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.bos_token
@@ -117,7 +168,7 @@ def load_tool_model(
         logit_bias_network=run_config["logit_bias_network"],
         logit_bias_scale=float(run_config["logit_bias_scale"]),
     )
-    load_checkpoint_into_model(model, checkpoint)
+    load_checkpoint_into_model(model, checkpoint_for_load)
     model.eval()
     return LoadedToolModel(
         model=model,

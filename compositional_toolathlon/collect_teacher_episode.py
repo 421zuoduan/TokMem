@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PACKAGE_DIR
+from .episode_to_steps import validate_episode
 from .generate_tasks import validate_task_candidate
 from .local_tools import CompositeToolExecutor
 from .manifest import load_manifest
@@ -30,6 +31,54 @@ class DeclarativeWorkspaceEvaluator:
         return evaluate_workspace(self.workspace, self.evaluator)
 
 
+def resolve_teacher_settings(
+    generation_config: dict[str, Any],
+    teacher_session_id: str | None = None,
+) -> tuple[TeacherSettings, str | None]:
+    teacher_config = generation_config["teacher"]
+    resolved_session_id = None
+    if "teacher_sessions" in generation_config:
+        if teacher_session_id is None:
+            raise ValueError(
+                "--teacher-session-id is required when teacher_sessions are configured"
+            )
+        session = next(
+            (
+                item
+                for item in generation_config["teacher_sessions"]
+                if item["session_id"] == teacher_session_id
+            ),
+            None,
+        )
+        if session is None:
+            raise ValueError(f"unknown teacher session: {teacher_session_id}")
+        teacher_config = {**teacher_config, **session}
+        resolved_session_id = teacher_session_id
+    elif teacher_session_id is not None:
+        raise ValueError("generation config does not define teacher_sessions")
+
+    return (
+        TeacherSettings(
+            model=generation_config["models"]["teacher"],
+            prompt_version=teacher_config["prompt_version"],
+            system_prompt=read_prompt(
+                PACKAGE_DIR / "prompts" / teacher_config["prompt"]
+            ),
+            max_tool_calls=int(teacher_config["max_tool_calls"]),
+            max_completion_tokens_per_action=int(
+                teacher_config["max_completion_tokens_per_action"]
+            ),
+            max_visible_assistant_characters=int(
+                teacher_config["max_visible_assistant_characters"]
+            ),
+            max_argument_characters_per_call=int(
+                teacher_config["max_argument_characters_per_call"]
+            ),
+        ),
+        resolved_session_id,
+    )
+
+
 async def collect_one(
     *,
     task_spec: dict[str, Any],
@@ -40,6 +89,7 @@ async def collect_one(
     candidate_index: int,
     fresh_environment_id: str,
     client: OpenAICompatibleClient,
+    teacher_session_id: str | None = None,
 ) -> dict[str, Any]:
     validate_task_candidate(task_spec, manifest)
     if task_spec.get("verified") is not True:
@@ -61,21 +111,9 @@ async def collect_one(
     if actual_initial_hash != asset_verification["initial_workspace_hash"]:
         raise ValueError("materialized teacher workspace hash differs from verifier")
 
-    teacher_config = generation_config["teacher"]
-    settings = TeacherSettings(
-        model=generation_config["models"]["teacher"],
-        prompt_version=teacher_config["prompt_version"],
-        system_prompt=read_prompt(PACKAGE_DIR / "prompts" / teacher_config["prompt"]),
-        max_tool_calls=int(teacher_config["max_tool_calls"]),
-        max_completion_tokens_per_action=int(
-            teacher_config["max_completion_tokens_per_action"]
-        ),
-        max_visible_assistant_characters=int(
-            teacher_config["max_visible_assistant_characters"]
-        ),
-        max_argument_characters_per_call=int(
-            teacher_config["max_argument_characters_per_call"]
-        ),
+    settings, resolved_session_id = resolve_teacher_settings(
+        generation_config,
+        teacher_session_id,
     )
     python_tool_ids = {
         record["stable_id"]
@@ -106,10 +144,19 @@ async def collect_one(
             candidate_index=candidate_index,
         )
     episode["workspace_template"] = task_spec["task_id"] + "/initial_workspace"
+    episode["workspace_root"] = str(workspace)
     episode["initial_state_hash"] = actual_initial_hash
     episode["final_state_hash"] = workspace_digest(workspace)
     episode["teacher"]["fresh_environment_id"] = fresh_environment_id
     episode["teacher"]["gateway_url_recorded_as"] = "loopback-sse"
+    episode["teacher"]["real_execution"] = True
+    if resolved_session_id is not None:
+        episode["teacher"]["session_id"] = resolved_session_id
+    teacher_thread_id = getattr(client, "teacher_thread_id", None)
+    if isinstance(teacher_thread_id, str):
+        episode["teacher"]["thread_id"] = teacher_thread_id
+    if episode["accepted"]:
+        validate_episode(episode, require_clean=True)
     return episode
 
 
@@ -123,6 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gateway-url", default="http://127.0.0.1:8000/sse")
     parser.add_argument("--candidate-index", type=int, required=True)
     parser.add_argument("--fresh-environment-id", required=True)
+    parser.add_argument("--teacher-session-id")
     parser.add_argument("--output", required=True)
     parser.add_argument(
         "--generation-config",
@@ -147,6 +195,7 @@ def main() -> int:
             candidate_index=args.candidate_index,
             fresh_environment_id=args.fresh_environment_id,
             client=OpenAICompatibleClient.from_env(),
+            teacher_session_id=args.teacher_session_id,
         )
     )
     output_path = Path(args.output)

@@ -91,6 +91,22 @@ def normalize_workspace_paths(value: Any, workspace_root: str | None) -> Any:
     return value
 
 
+def materialize_workspace_paths(value: Any, workspace_root: str) -> Any:
+    normalized_root = workspace_root.rstrip("/")
+    if not normalized_root:
+        raise ValueError("workspace_root must be non-empty")
+    if isinstance(value, str):
+        return value.replace("<WORKSPACE>", normalized_root)
+    if isinstance(value, list):
+        return [materialize_workspace_paths(item, normalized_root) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: materialize_workspace_paths(item, normalized_root)
+            for key, item in value.items()
+        }
+    return value
+
+
 def slot_sentinel(memory_slot: int) -> str:
     if not 0 <= memory_slot <= 9999:
         raise ValueError("memory slot must be in [0, 9999]")

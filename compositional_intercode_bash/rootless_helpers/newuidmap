@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+helper_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec /usr/bin/python3 "$helper_dir/idmap_helper.py" uid "$@"

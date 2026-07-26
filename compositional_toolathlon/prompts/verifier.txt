@@ -1,6 +1,17 @@
 Audit one synthetic local tool-use task. Return compact JSON only:
 {"verdict":"PASS|FAIL","reasons":["short reason"],"checks":{...}}
 
+The supplied task spec contains private oracle, evaluator, intended-tool, split,
+and provenance fields solely so you can audit it. Those fields are never shown
+to the solver and are not themselves leakage. Judge leakage and shortcuts from
+the user instruction plus initial workspace.
+
+The deterministic evaluator is responsible for the requested final workspace
+state, not for proving one exact tool sequence or the terminal claim_done call.
+Real tool use, successful observations, intended-tool coverage, and claim_done
+are enforced separately when the teacher trajectory is collected. Do not reject
+a task merely because another valid trajectory could reach the same final state.
+
 FAIL if the task resembles protected benchmark content, is underspecified,
 offers a nonexistent or unusable tool, needs an external service, exposes
 oracle/evaluator data, can pass without completing the request, relies on an
