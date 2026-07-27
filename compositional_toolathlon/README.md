@@ -637,6 +637,43 @@ bash compositional_toolathlon/scripts/run_pinned_official_task.sh \
 frozen/no-sync，避免在 vendored 源码下隐式创建或重写另一套环境；它随后完整执行
 官方 runner，而不是替代 evaluator。
 
+#### 用非测试官方题观察 GPT-5.6 轨迹
+
+固定十题之外的官方题只用于观察 GPT-5.6 在真实环境中的
+`observation -> next action -> verification` 行为，并据此修改后续合成数据规则。
+这些官方轨迹不得直接并入主训练集；否则实验口径会从 synthetic-only
+known-tool/unseen-task 变成 benchmark-transfer。其余官方题还都会引入当前 47-tool
+manifest 之外的至少一种 MCP server，因此也不能直接交给现有
+`episode_to_steps.py`。
+
+本机 Codex CLI teacher 使用官方 fresh container、gateway、GT 隐藏和 evaluator：
+
+```bash
+bash compositional_toolathlon/scripts/run_gpt56_reference_task.sh \
+  interview-report \
+  /absolute/output/gpt56_interview_report \
+  state-first
+```
+
+可选 prompt 为 `action-only`、`state-first` 和 `contract-first`。runner 对固定十题有
+硬拒绝检查；输出包含官方 `traj_log.json`、`eval_res.json` 和额外的
+`gpt5.6_rollout.json`。GPT-5.6 每轮只返回一个结构化调用，真实 observation 通过
+同一 Codex thread 继续输入，不保留可见思考文本。不同 prompt 的轨迹分别统计：
+
+该入口只把官方 runner 发出的 `docker` 子命令放入 RootlessKit namespace；runner
+和 Codex CLI 留在宿主网络。不要再用 `with_rootless_docker.sh` 包裹整个 teacher
+入口，否则 GPT-5.6 websocket 会被带入 VPNKit namespace。
+
+- observation 后先读状态还是直接写状态；
+- 写操作前后的检查比例；
+- 工具失败后是否改变工具或参数；
+- claim_done 前是否验证用户要求的最终状态；
+- 参数 schema 错误、重复调用和无效调用；
+- read / transform / write / verify / finish 的阶段结构。
+
+只从这些轨迹提炼生成约束和简短状态摘要格式，再为当前 manifest 重新生成独立合成
+任务并真实执行。不要复制官方题面、实体、文件名、参数值或工具序列。
+
 当前 seed-42、epoch-10 的十题单次成对测试可顺序运行；已有可解析且 method/task
 匹配的 `tokmem_rollout.json` 和 `eval_res.json` 会被跳过。模型非成功终止产生的
 `pass=null` 是一个已完成的端到端失败样本，也会保留而不是重跑：
@@ -654,6 +691,17 @@ method/task 继续执行。同一账号同一时刻只允许一个该 suite 进�
 只有在显式把 task 划为互不重叠的并行分区时，才可为每个进程设置不同的
 `TOOLATHLON_SUITE_LOCK_ID`；每个分区还应使用不同 GPU。默认 lock ID 不允许重复
 启动完整 suite。
+
+Qwen3.5-9B、seed 42、epoch 20 的 trainable-only checkpoint 使用专用
+`tokmem-qwen35` 环境加载，并写入独立的 `qwen35_9b_e20` 输出标签：
+
+```bash
+bash compositional_toolathlon/scripts/run_qwen35_9b_e20_official_suite.sh
+```
+
+该 wrapper 复用相同的十题官方流程、manifest、100 步上限和断点判定，不会覆盖
+Llama epoch-10 结果。互不重叠的并行分区仍必须分别设置
+`TOOLATHLON_SUITE_GPU` 和 `TOOLATHLON_SUITE_LOCK_ID`。
 
 原 evaluator 跑完后，可将它的原始 JSON 原样挂接到诊断记录：
 

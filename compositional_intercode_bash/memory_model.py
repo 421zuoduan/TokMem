@@ -20,8 +20,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-METHODS = {"tokmem", "tapmem"}
-TCRA_TRIGGER_POLICY = "outside_raw_memory_or_mass_constraint_v3"
+METHODS = {"tokmem", "eoc_only", "tapmem"}
+TCRA_TRIGGER_POLICY = "assistant_start_or_generated_eoc_with_mass_constraint_v4"
+TCRA_ADDITIVE_ONLY_TRIGGER_POLICY = (
+    "assistant_start_or_generated_eoc_train_inference_aligned_v3"
+)
 _RESERVED_PATTERN = re.compile(r"reserved_special_token_\d+")
 
 
@@ -251,6 +254,7 @@ class ProceduralMemoryModel(nn.Module):
         initialization_seed: int,
         logit_bias_scale: float = 1.0,
         memory_bank_probability_threshold: float = 0.5,
+        enable_memory_bank_constraint: bool = False,
     ) -> None:
         super().__init__()
         if method not in METHODS:
@@ -258,9 +262,11 @@ class ProceduralMemoryModel(nn.Module):
         self.base_model = base_model
         self.registry = registry
         self.method = method
-        self.use_eoc = method == "tapmem"
+        self.use_eoc = method in {"eoc_only", "tapmem"}
         self.use_logit_bias = method == "tapmem"
-        self.use_memory_bank_constraint = method == "tapmem"
+        self.use_memory_bank_constraint = (
+            method == "tapmem" and bool(enable_memory_bank_constraint)
+        )
         self.logit_bias_scale = float(logit_bias_scale)
         self.memory_bank_probability_threshold = float(
             memory_bank_probability_threshold
@@ -372,6 +378,7 @@ class ProceduralMemoryModel(nn.Module):
         local_files_only: bool = True,
         logit_bias_scale: float = 1.0,
         memory_bank_probability_threshold: float = 0.5,
+        enable_memory_bank_constraint: bool = False,
     ) -> "ProceduralMemoryModel":
         from transformers import AutoModelForCausalLM
 
@@ -391,6 +398,7 @@ class ProceduralMemoryModel(nn.Module):
             initialization_seed=initialization_seed,
             logit_bias_scale=logit_bias_scale,
             memory_bank_probability_threshold=memory_bank_probability_threshold,
+            enable_memory_bank_constraint=enable_memory_bank_constraint,
         )
 
     def _capture_output_input(self, _module: nn.Module, inputs: tuple[Any, ...]) -> None:
@@ -492,6 +500,37 @@ class ProceduralMemoryModel(nn.Module):
         selected = full_logits.index_select(-1, token_ids) + bias
         return torch.index_copy(full_logits, -1, token_ids, selected)
 
+    def tcra_trigger_masks(
+        self,
+        raw_logits: torch.Tensor,
+        decision_context: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply TCRA only at assistant-start and generated-EOC boundaries."""
+
+        if raw_logits.shape[:-1] != decision_context.shape:
+            raise ValueError("decision_context must match the logits prefix shape")
+        decision_context = decision_context.to(
+            device=raw_logits.device,
+            dtype=torch.bool,
+        )
+        token_ids = self._procedure_token_ids
+        if token_ids.device != raw_logits.device:
+            token_ids = token_ids.to(raw_logits.device)
+        constraint_mask = torch.zeros_like(decision_context)
+        if self.use_memory_bank_constraint:
+            float_logits = raw_logits.float()
+            memory_logits = float_logits.index_select(-1, token_ids)
+            memory_mass = torch.exp(
+                torch.logsumexp(memory_logits, dim=-1)
+                - torch.logsumexp(float_logits, dim=-1)
+            )
+            constraint_mask = (
+                memory_mass >= self.memory_bank_probability_threshold
+            )
+        constraint_mask = decision_context & constraint_mask
+        routing_mask = decision_context
+        return routing_mask, constraint_mask
+
     @torch.inference_mode()
     def generate_tokens(
         self,
@@ -522,30 +561,25 @@ class ProceduralMemoryModel(nn.Module):
         constraint_changed_token_count = 0
         for _step in range(max_new_tokens):
             raw_next_token = int(torch.argmax(next_logits, dim=-1).item())
-            constrain_to_memory_bank = False
-            if self.use_memory_bank_constraint and not inside_procedure:
-                float_logits = next_logits.float()
-                memory_logits = float_logits.index_select(
-                    -1,
-                    self._procedure_token_ids,
+            at_decision_boundary = (
+                _step == 0
+                or (
+                    bool(generated)
+                    and generated[-1] == self.registry.eoc_token_id
                 )
-                memory_mass = torch.exp(
-                    torch.logsumexp(memory_logits, dim=-1)
-                    - torch.logsumexp(float_logits, dim=-1)
-                )
-                constrain_to_memory_bank = bool(
-                    memory_mass.item()
-                    >= self.memory_bank_probability_threshold
-                )
+            )
+            routing_mask, constraint_mask = self.tcra_trigger_masks(
+                next_logits,
+                torch.tensor(
+                    [at_decision_boundary and not inside_procedure],
+                    dtype=torch.bool,
+                    device=next_logits.device,
+                ),
+            )
+            apply_routing_bias = bool(routing_mask.item())
+            constrain_to_memory_bank = bool(constraint_mask.item())
             decision_logits = next_logits
-            if (
-                self.use_logit_bias
-                and not inside_procedure
-                and (
-                    raw_next_token in procedure_token_ids
-                    or constrain_to_memory_bank
-                )
-            ):
+            if self.use_logit_bias and apply_routing_bias:
                 decision_logits = self.add_routing_bias(
                     decision_logits,
                     boundary_hidden,

@@ -9,6 +9,7 @@ from unittest import mock
 
 import torch
 
+from compositional_intercode_bash.atomizer import atomize_command
 from compositional_intercode_bash.checkpoint import (
     base_model_load_location,
     build_base_model_identity,
@@ -23,14 +24,154 @@ from compositional_intercode_bash.memory_model import (
 from compositional_intercode_bash.training_data import (
     RoutingSites,
     add_train_routing_bias,
+    compute_training_loss_sums,
     gather_routing_sites,
+    gather_training_tcra_sites,
+    residual_set_margin_routing_loss,
     serialize_view,
     strip_control_token_ids,
 )
 from compositional_intercode_bash.tests.helpers import ByteTokenizer, TinyCausalLM
+from compositional_intercode_bash.unigram import ProcedureUnigramModel
 
 
 class MemoryModelTest(unittest.TestCase):
+    def test_serialize_view_builds_fixed_count_posterior_routing_targets(self):
+        tokenizer = ByteTokenizer(native_reserved=7)
+        registry = MemoryTokenRegistry.build(tokenizer, 5)
+        command = "a | b | c"
+        atomized = atomize_command(command)
+        signatures = atomized.signatures
+        procedure_model = ProcedureUnigramModel(
+            [
+                (signatures[0],),
+                (signatures[1],),
+                (signatures[2],),
+                signatures[:2],
+                signatures[1:],
+            ],
+            [0.1, 0.1, 0.1, 0.3, 0.4],
+            0.2,
+        )
+        example = serialize_view(
+            tokenizer,
+            registry,
+            {
+                "instruction": "run a pipeline",
+                "command_raw": command,
+                "base_chunks": list(atomized.base_chunks),
+                "segments": [
+                    {"piece_id": 0, "start": 0, "end": 1},
+                    {"piece_id": 4, "start": 1, "end": 3},
+                ],
+            },
+            method="tapmem",
+            max_length=10000,
+            procedure_model=procedure_model,
+            routing_target_mode="fixed_count_posterior",
+        )
+        targets = example.routing_target_probabilities
+        self.assertIsNotNone(targets)
+        self.assertAlmostEqual(targets[0][0], 4 / 7, places=12)
+        self.assertAlmostEqual(targets[0][3], 3 / 7, places=12)
+        self.assertEqual(sum(value > 0 for value in targets[0]), 2)
+        self.assertEqual(targets[1][4], 1.0)
+
+    def test_residual_routing_sets_soften_only_boundary_samples(self):
+        tokenizer = ByteTokenizer(native_reserved=7)
+        registry = MemoryTokenRegistry.build(tokenizer, 5)
+        command = "a | b | c"
+        atomized = atomize_command(command)
+        signatures = atomized.signatures
+        procedure_model = ProcedureUnigramModel(
+            [
+                (signatures[0],),
+                (signatures[1],),
+                (signatures[2],),
+                signatures[:2],
+                signatures[1:],
+            ],
+            [0.1, 0.1, 0.1, 0.3, 0.4],
+            0.2,
+        )
+        view = {
+            "instruction": "run a pipeline",
+            "command_raw": command,
+            "base_chunks": list(atomized.base_chunks),
+            "segments": [
+                {"piece_id": 0, "start": 0, "end": 1},
+                {"piece_id": 4, "start": 1, "end": 3},
+            ],
+            "presentation_kind": "boundary_sample",
+        }
+        boundary = serialize_view(
+            tokenizer,
+            registry,
+            view,
+            method="tapmem",
+            max_length=10000,
+            procedure_model=procedure_model,
+            routing_target_mode="residual_set_margin",
+            routing_candidate_mass=0.9,
+        )
+        self.assertEqual(boundary.routing_valid_piece_ids, [[0, 3], [4]])
+
+        anchor = serialize_view(
+            tokenizer,
+            registry,
+            {**view, "presentation_kind": "coverage_anchor"},
+            method="tapmem",
+            max_length=10000,
+            procedure_model=procedure_model,
+            routing_target_mode="residual_set_margin",
+            routing_candidate_mass=0.9,
+        )
+        self.assertEqual(anchor.routing_valid_piece_ids, [[0], [4]])
+
+    def test_residual_routing_loss_fixes_wrong_and_ignores_correct_rankings(self):
+        raw = torch.tensor([[2.0, 1.0, 0.0]])
+        wrong_valid = torch.tensor([[False, True, False]])
+        no_correction = torch.zeros_like(raw, requires_grad=True)
+        corrected = torch.tensor(
+            [[0.0, 3.0, 0.0]],
+            requires_grad=True,
+        )
+        original_loss = residual_set_margin_routing_loss(
+            raw,
+            no_correction,
+            wrong_valid,
+            logit_bias_scale=1.0,
+            margin=0.5,
+        )
+        corrected_loss = residual_set_margin_routing_loss(
+            raw,
+            corrected,
+            wrong_valid,
+            logit_bias_scale=1.0,
+            margin=0.5,
+        )
+        self.assertLess(corrected_loss.item(), original_loss.item())
+        corrected_loss.backward()
+        self.assertIsNotNone(corrected.grad)
+
+        correct_valid = torch.tensor([[True, False, False]])
+        preserved = residual_set_margin_routing_loss(
+            raw,
+            torch.zeros_like(raw),
+            correct_valid,
+            logit_bias_scale=1.0,
+            margin=0.5,
+        )
+        changed = residual_set_margin_routing_loss(
+            raw,
+            torch.tensor([[0.0, 3.0, 0.0]]),
+            correct_valid,
+            logit_bias_scale=1.0,
+            margin=0.5,
+        )
+        self.assertAlmostEqual(preserved.item(), 0.0, places=7)
+        self.assertAlmostEqual(changed.item(), 0.0, places=7)
+
     def test_formal_base_model_identity_requires_commit_or_hashed_directory(self):
         with self.assertRaisesRegex(RuntimeError, "40-character commit"):
             build_base_model_identity(
@@ -173,8 +314,18 @@ class MemoryModelTest(unittest.TestCase):
             max_length=10000,
             explicit_response_end_ids=[tokenizer.eot_id, tokenizer.eos_token_id],
         )
+        eoc_only = serialize_view(
+            tokenizer,
+            registry,
+            view,
+            method="eoc_only",
+            max_length=10000,
+            explicit_response_end_ids=[tokenizer.eot_id, tokenizer.eos_token_id],
+        )
         self.assertEqual(tokmem.memory_token_count, 2)
         self.assertEqual(tokmem.eoc_count, 0)
+        self.assertEqual(eoc_only.eoc_count, 2)
+        self.assertEqual(eoc_only.route_site_count, 0)
         self.assertEqual(tapmem.eoc_count, 2)
         self.assertEqual(tapmem.route_site_count, 2)
 
@@ -193,15 +344,15 @@ class MemoryModelTest(unittest.TestCase):
             tokenizer.eos_token_id,
         ]
         expected_tapmem_target = [
-            *prefix_ids,
             registry.procedure_token_ids[0],
+            *prefix_ids,
             *tokenizer.encode("ab", add_special_tokens=False),
-            registry.eoc_token_id,
             *gap_ids,
+            registry.eoc_token_id,
             registry.procedure_token_ids[2],
             *tokenizer.encode("c", add_special_tokens=False),
-            registry.eoc_token_id,
             *suffix_ids,
+            registry.eoc_token_id,
             tokenizer.eot_id,
             tokenizer.eos_token_id,
         ]
@@ -213,18 +364,33 @@ class MemoryModelTest(unittest.TestCase):
             tapmem.input_ids[tapmem.prompt_length :],
             expected_tapmem_target,
         )
+        self.assertEqual(
+            eoc_only.input_ids[eoc_only.prompt_length :],
+            expected_tapmem_target,
+        )
+
+        eoc_only_model = ProceduralMemoryModel(
+            TinyCausalLM(len(tokenizer), hidden_size=8),
+            registry,
+            method="eoc_only",
+            initialization_seed=3,
+        )
+        self.assertTrue(eoc_only_model.use_eoc)
+        self.assertFalse(eoc_only_model.use_logit_bias)
+        self.assertIsNotNone(eoc_only_model.eoc_embedding)
+        self.assertIsNone(eoc_only_model.routing_head)
 
         labels = torch.tensor([tapmem.labels])
         sites = gather_routing_sites(labels, registry)
         self.assertEqual(
             sites.time_indices.tolist()[0],
-            tapmem.prompt_length + len(prefix_ids) - 1,
+            tapmem.prompt_length - 1,
         )
         self.assertEqual(sites.targets.tolist(), [0, 2])
         self.assertEqual(sites.count, 2)
         self.assertEqual(
             tapmem.labels[sites.time_indices.tolist()[1]],
-            gap_ids[-1],
+            registry.eoc_token_id,
         )
 
     def test_route_sites_allow_ordinary_prefix_and_delayed_memory(self):
@@ -350,7 +516,108 @@ class MemoryModelTest(unittest.TestCase):
             0.0,
         )
 
-    def test_generation_bias_follows_delayed_raw_memory_candidates(self):
+    def test_training_tcra_sites_match_gold_start_and_eoc_boundaries(self):
+        tokenizer = ByteTokenizer(native_reserved=5)
+        registry = MemoryTokenRegistry.build(tokenizer, 3)
+        procedure_text = tokenizer.byte_offset + ord("p")
+        pipe = tokenizer.byte_offset + ord("|")
+        labels = torch.tensor(
+            [[
+                -100,
+                registry.procedure_token_ids[0],
+                procedure_text,
+                pipe,
+                registry.eoc_token_id,
+                registry.procedure_token_ids[2],
+                procedure_text,
+                registry.eoc_token_id,
+            ]]
+        )
+        sites = gather_training_tcra_sites(
+            labels,
+            registry,
+        )
+        self.assertEqual(sites.batch_indices.tolist(), [0, 0])
+        self.assertEqual(sites.time_indices.tolist(), [0, 4])
+
+        labels[0, 4] = procedure_text
+        with self.assertRaisesRegex(ValueError, "not at assistant-start or EOC"):
+            gather_training_tcra_sites(labels, registry)
+
+    def test_training_ar_loss_reaches_routing_head_at_triggered_sites(self):
+        tokenizer = ByteTokenizer(native_reserved=5)
+        registry = MemoryTokenRegistry.build(tokenizer, 3)
+        model = ProceduralMemoryModel(
+            TinyCausalLM(len(tokenizer), hidden_size=8),
+            registry,
+            method="tapmem",
+            initialization_seed=4,
+            enable_memory_bank_constraint=False,
+        )
+        ordinary = tokenizer.byte_offset + ord("a")
+        procedure_text = tokenizer.byte_offset + ord("p")
+        pipe = tokenizer.byte_offset + ord("|")
+        input_ids = torch.tensor(
+            [[
+                ordinary,
+                registry.procedure_token_ids[0],
+                procedure_text,
+                pipe,
+                registry.eoc_token_id,
+                registry.procedure_token_ids[2],
+                procedure_text,
+                registry.eoc_token_id,
+                ordinary,
+            ]]
+        )
+        labels = input_ids.clone()
+        labels[:, 0] = -100
+
+        def scripted_forward(
+            self,
+            input_ids,
+            attention_mask=None,
+            **_kwargs,
+        ):
+            logits = torch.zeros(
+                input_ids.shape[0],
+                input_ids.shape[1],
+                len(tokenizer),
+            )
+            logits[
+                :,
+                :,
+                registry.procedure_token_ids[1],
+            ] = 1.0
+            hidden = torch.zeros(
+                input_ids.shape[0],
+                input_ids.shape[1],
+                self.hidden_size,
+            )
+            hidden[:, 0, 0] = 1.0
+            hidden[:, 4, 1] = 1.0
+            return MemoryForwardOutput(
+                logits=logits,
+                final_hidden_state=hidden,
+                past_key_values=None,
+                base_output=None,
+            )
+
+        model.forward = types.MethodType(scripted_forward, model)
+        component = compute_training_loss_sums(
+            model,
+            input_ids,
+            torch.ones_like(input_ids),
+            labels,
+        )
+        component.ar_loss_sum.backward()
+        self.assertIsNotNone(model.routing_head.weight.grad)
+        self.assertGreater(
+            float(model.routing_head.weight.grad.abs().sum().item()),
+            0.0,
+        )
+
+    def test_generation_bias_runs_at_start_and_generated_eoc_boundaries(self):
         tokenizer = ByteTokenizer(native_reserved=5)
         registry = MemoryTokenRegistry.build(tokenizer, 3)
         model = ProceduralMemoryModel(
@@ -367,12 +634,11 @@ class MemoryModelTest(unittest.TestCase):
         ]
         scripted_tokens = [
             ordinary_a,
-            registry.eoc_token_id,
             ordinary_b,
+            registry.eoc_token_id,
             registry.procedure_token_ids[0],
             ordinary_a,
             registry.eoc_token_id,
-            ordinary_b,
             registry.procedure_token_ids[2],
             ordinary_a,
             registry.eoc_token_id,
@@ -432,10 +698,10 @@ class MemoryModelTest(unittest.TestCase):
         self.assertEqual(result["generated_ids"], scripted_tokens)
         self.assertTrue(result["terminated"])
         self.assertFalse(result["missing_terminator"])
-        # The orphan EOC and ordinary gap do not trigger routing.  Each raw
-        # memory candidate does, including one delayed after EOC + ordinary.
-        self.assertEqual(bias_calls, [4, 8])
-        self.assertEqual(result["memory_bank_constraint_trigger_count"], 2)
+        # TCRA runs before the first token and immediately after every emitted
+        # EOC, including the final EOC whose full-vocabulary winner terminates.
+        self.assertEqual(bias_calls, [1, 4, 7, 10])
+        self.assertEqual(result["memory_bank_constraint_trigger_count"], 0)
         self.assertEqual(result["memory_bank_constraint_changed_token_count"], 0)
         # The first terminator token alone did not stop generation.
         self.assertEqual(len(forward_calls), len(scripted_tokens))
@@ -517,9 +783,9 @@ class MemoryModelTest(unittest.TestCase):
             result["generated_ids"],
             [ordinary, registry.procedure_token_ids[2], registry.eoc_token_id, *terminator],
         )
-        # The first rescore chose an ordinary token, so the model stayed
-        # OUTSIDE and the next raw memory candidate was routed again.
-        self.assertEqual(bias_calls, [1, 2])
+        # The first rescore chose an ordinary token, so no further routing is
+        # applied until the subsequently generated EOC boundary.
+        self.assertEqual(bias_calls, [1, 4])
 
     def test_memory_bank_probability_gate_is_tapmem_only_and_outside_only(self):
         tokenizer = ByteTokenizer(native_reserved=5)
@@ -527,13 +793,14 @@ class MemoryModelTest(unittest.TestCase):
         ordinary = tokenizer.byte_offset + ord("a")
         terminator = [tokenizer.byte_offset + ord("x")]
 
-        def run(method):
+        def run(method, *, enable_memory_bank_constraint=True):
             model = ProceduralMemoryModel(
                 TinyCausalLM(len(tokenizer), hidden_size=8),
                 registry,
                 method=method,
                 initialization_seed=7,
                 memory_bank_probability_threshold=0.5,
+                enable_memory_bank_constraint=enable_memory_bank_constraint,
             )
             forward_calls = []
             bias_calls = []
@@ -615,6 +882,17 @@ class MemoryModelTest(unittest.TestCase):
         self.assertEqual(tokmem["memory_bank_constraint_trigger_count"], 0)
         self.assertEqual(
             tokmem["memory_bank_constraint_changed_token_count"],
+            0,
+        )
+
+        additive_tapmem, additive_bias_calls = run(
+            "tapmem",
+            enable_memory_bank_constraint=False,
+        )
+        self.assertEqual(additive_tapmem["generated_ids"], [ordinary, *terminator])
+        self.assertEqual(additive_bias_calls, [1])
+        self.assertEqual(
+            additive_tapmem["memory_bank_constraint_trigger_count"],
             0,
         )
 

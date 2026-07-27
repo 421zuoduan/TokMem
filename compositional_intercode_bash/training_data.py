@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from .atomizer import atomize_command
 from .memory_model import METHODS, MemoryTokenRegistry, ProceduralMemoryModel
+from .unigram import ProcedureUnigramModel
 
 
 SYSTEM_PROMPT = (
@@ -20,7 +21,10 @@ SYSTEM_PROMPT = (
     "Do not add Markdown fences or explanations. "
     "Use the execution result from earlier turns when it is available."
 )
-TARGET_SERIALIZATION_POLICY = "procedure_core_eoc_gap_v2"
+TARGET_SERIALIZATION_POLICY = "procedure_surface_connector_eoc_v3"
+ROUTING_TARGET_MODES = frozenset(
+    {"one_hot", "fixed_count_posterior", "residual_set_margin"}
+)
 
 
 def response_end_token_ids(tokenizer) -> list[int]:
@@ -125,6 +129,96 @@ class SerializedExample:
     memory_token_count: int
     eoc_count: int
     route_site_count: int
+    routing_target_probabilities: list[list[float]] | None
+    routing_valid_piece_ids: list[list[int]] | None
+
+
+def fixed_count_routing_targets(
+    view: Mapping[str, Any],
+    procedure_model: ProcedureUnigramModel,
+) -> list[list[float]]:
+    """Return a conditional next-procedure distribution at each chosen boundary."""
+
+    chunks = [str(value) for value in view["base_chunks"]]
+    segments = list(view["segments"])
+    _validate_segments(segments, len(chunks), procedure_model.size)
+    signatures: list[tuple[str, str] | None] = [None] * len(chunks)
+    for segment in segments:
+        piece_id = int(segment["piece_id"])
+        start = int(segment["start"])
+        end = int(segment["end"])
+        piece = procedure_model.pieces[piece_id]
+        if len(piece) != end - start:
+            raise ValueError(
+                f"Segment span does not match procedure {piece_id}: {segment}"
+            )
+        for position, signature in enumerate(piece, start=start):
+            incumbent = signatures[position]
+            if incumbent is not None and incumbent != signature:
+                raise ValueError("Selected procedures imply inconsistent atom signatures")
+            signatures[position] = signature
+    if any(signature is None for signature in signatures):
+        raise ValueError("Selected procedures do not recover every atom signature")
+    sequence = tuple(signature for signature in signatures if signature is not None)
+
+    targets: list[list[float]] = []
+    for segment_index, segment in enumerate(segments):
+        start = int(segment["start"])
+        remaining = len(segments) - segment_index
+        distribution = procedure_model.fixed_count_next_piece_distribution(
+            sequence,
+            start,
+            remaining,
+        )
+        dense = [0.0] * procedure_model.size
+        for piece_id, probability in distribution:
+            dense[piece_id] = probability
+        selected_piece = int(segment["piece_id"])
+        if dense[selected_piece] <= 0.0:
+            raise ValueError(
+                f"Selected procedure {selected_piece} is not a legal continuation"
+            )
+        targets.append(dense)
+    return targets
+
+
+def residual_routing_valid_piece_ids(
+    view: Mapping[str, Any],
+    procedure_model: ProcedureUnigramModel,
+    *,
+    cumulative_mass: float,
+) -> list[list[int]]:
+    """Build per-boundary valid sets without softening artificial anchors."""
+
+    if not 0.0 < cumulative_mass <= 1.0:
+        raise ValueError("cumulative_mass must be in (0, 1]")
+    segments = list(view["segments"])
+    if view.get("presentation_kind") != "boundary_sample":
+        return [[int(segment["piece_id"])] for segment in segments]
+
+    probabilities = fixed_count_routing_targets(view, procedure_model)
+    valid_sets: list[list[int]] = []
+    for segment, distribution in zip(segments, probabilities):
+        candidates = sorted(
+            (
+                (probability, piece_id)
+                for piece_id, probability in enumerate(distribution)
+                if probability > 0.0
+            ),
+            key=lambda value: (-value[0], value[1]),
+        )
+        selected: list[int] = []
+        mass = 0.0
+        for probability, piece_id in candidates:
+            selected.append(piece_id)
+            mass += probability
+            if mass >= cumulative_mass:
+                break
+        gold_piece = int(segment["piece_id"])
+        if gold_piece not in selected:
+            selected.append(gold_piece)
+        valid_sets.append(sorted(selected))
+    return valid_sets
 
 
 def serialize_view(
@@ -135,9 +229,21 @@ def serialize_view(
     method: str,
     max_length: int,
     explicit_response_end_ids: Sequence[int] | None = None,
+    procedure_model: ProcedureUnigramModel | None = None,
+    routing_target_mode: str = "one_hot",
+    routing_candidate_mass: float = 0.9,
 ) -> SerializedExample:
     if method not in METHODS:
         raise ValueError(f"Unknown method: {method}")
+    if routing_target_mode not in ROUTING_TARGET_MODES:
+        raise ValueError(f"Unknown routing_target_mode: {routing_target_mode}")
+    if routing_target_mode != "one_hot":
+        if method != "tapmem":
+            raise ValueError("Posterior routing targets are TapMem-only")
+        if procedure_model is None:
+            raise ValueError("Posterior routing targets require a procedure model")
+        if procedure_model.size != registry.num_procedures:
+            raise ValueError("Procedure model and memory registry sizes differ")
     chunks = [str(value) for value in view["base_chunks"]]
     segments = list(view["segments"])
     _validate_segments(segments, len(chunks), registry.num_procedures)
@@ -149,22 +255,43 @@ def serialize_view(
             f"{view.get('presentation_id', '<unknown>')}"
         )
 
-    use_eoc = method == "tapmem"
-    target: list[int] = []
-    cursor = 0
+    use_eoc = method in {"eoc_only", "tapmem"}
+    segment_bounds: list[tuple[int, int, int]] = []
     for segment in segments:
         start = int(segment["start"])
         end = int(segment["end"])
         core_start = atomized.atoms[start].char_start
         core_end = atomized.atoms[end - 1].char_end
-        target.extend(_encode_chunk(tokenizer, command_raw[cursor:core_start]))
-        piece_id = int(segment["piece_id"])
-        target.append(registry.procedure_token_ids[piece_id])
-        target.extend(_encode_chunk(tokenizer, command_raw[core_start:core_end]))
-        if use_eoc:
+        segment_bounds.append((int(segment["piece_id"]), core_start, core_end))
+
+    target: list[int] = []
+    if use_eoc:
+        surface_start = 0
+        for segment_index, (piece_id, _core_start, _core_end) in enumerate(
+            segment_bounds
+        ):
+            surface_end = (
+                segment_bounds[segment_index + 1][1]
+                if segment_index + 1 < len(segment_bounds)
+                else len(command_raw)
+            )
+            target.append(registry.procedure_token_ids[piece_id])
+            target.extend(
+                _encode_chunk(
+                    tokenizer,
+                    command_raw[surface_start:surface_end],
+                )
+            )
             target.append(registry.eoc_token_id)
-        cursor = core_end
-    target.extend(_encode_chunk(tokenizer, command_raw[cursor:]))
+            surface_start = surface_end
+    else:
+        cursor = 0
+        for piece_id, core_start, core_end in segment_bounds:
+            target.extend(_encode_chunk(tokenizer, command_raw[cursor:core_start]))
+            target.append(registry.procedure_token_ids[piece_id])
+            target.extend(_encode_chunk(tokenizer, command_raw[core_start:core_end]))
+            cursor = core_end
+        target.extend(_encode_chunk(tokenizer, command_raw[cursor:]))
     end_ids = (
         [int(value) for value in explicit_response_end_ids]
         if explicit_response_end_ids is not None
@@ -211,6 +338,22 @@ def serialize_view(
         memory_token_count=len(segments),
         eoc_count=len(segments) if use_eoc else 0,
         route_site_count=len(segments) if method == "tapmem" else 0,
+        routing_target_probabilities=(
+            fixed_count_routing_targets(view, procedure_model)
+            if routing_target_mode == "fixed_count_posterior"
+            and procedure_model is not None
+            else None
+        ),
+        routing_valid_piece_ids=(
+            residual_routing_valid_piece_ids(
+                view,
+                procedure_model,
+                cumulative_mass=routing_candidate_mass,
+            )
+            if routing_target_mode == "residual_set_margin"
+            and procedure_model is not None
+            else None
+        ),
     )
 
 
@@ -223,8 +366,13 @@ class BoundaryViewDataset(Dataset):
         *,
         method: str,
         max_length: int,
+        procedure_model: ProcedureUnigramModel | None = None,
+        routing_target_mode: str = "one_hot",
+        routing_candidate_mass: float = 0.9,
     ) -> None:
         self.views = list(views)
+        self.routing_target_mode = routing_target_mode
+        self.routing_num_procedures = registry.num_procedures
         end_token_ids = response_end_token_ids(tokenizer)
         self.examples = [
             serialize_view(
@@ -234,6 +382,9 @@ class BoundaryViewDataset(Dataset):
                 method=method,
                 max_length=max_length,
                 explicit_response_end_ids=end_token_ids,
+                procedure_model=procedure_model,
+                routing_target_mode=routing_target_mode,
+                routing_candidate_mass=routing_candidate_mass,
             )
             for view in self.views
         ]
@@ -253,6 +404,15 @@ class BoundaryViewDataset(Dataset):
             "effective_batch_id": view.get("effective_batch_id"),
             "position_in_batch": view.get("position_in_batch"),
             "pool": view.get("pool"),
+            "routing_target_probabilities": (
+                example.routing_target_probabilities
+            ),
+            "routing_valid_piece_ids": example.routing_valid_piece_ids,
+            "routing_num_procedures": (
+                self.routing_num_procedures
+                if example.routing_valid_piece_ids is not None
+                else None
+            ),
         }
 
     def exposure_report(self) -> dict[str, int]:
@@ -284,6 +444,44 @@ def left_pad_collate(
         input_rows.append([pad_token_id] * padding + list(record["input_ids"]))
         label_rows.append([-100] * padding + list(record["labels"]))
         mask_rows.append([0] * padding + [1] * len(record["input_ids"]))
+    routing_targets = [
+        target
+        for record in records
+        for target in (record.get("routing_target_probabilities") or [])
+    ]
+    posterior_records = [
+        record.get("routing_target_probabilities") is not None
+        for record in records
+    ]
+    if any(posterior_records) and not all(posterior_records):
+        raise ValueError("A batch mixes one-hot and posterior routing targets")
+    valid_set_records = [
+        record.get("routing_valid_piece_ids") is not None
+        for record in records
+    ]
+    if any(valid_set_records) and not all(valid_set_records):
+        raise ValueError("A batch mixes residual-set and other routing targets")
+    if any(posterior_records) and any(valid_set_records):
+        raise ValueError("A batch has two routing target modes")
+    routing_valid_mask = None
+    if all(valid_set_records):
+        procedure_counts = {
+            int(record["routing_num_procedures"]) for record in records
+        }
+        if len(procedure_counts) != 1:
+            raise ValueError("A batch mixes procedure inventory sizes")
+        number_of_procedures = next(iter(procedure_counts))
+        valid_piece_ids = [
+            piece_ids
+            for record in records
+            for piece_ids in record["routing_valid_piece_ids"]
+        ]
+        routing_valid_mask = torch.zeros(
+            (len(valid_piece_ids), number_of_procedures),
+            dtype=torch.bool,
+        )
+        for row_index, piece_ids in enumerate(valid_piece_ids):
+            routing_valid_mask[row_index, piece_ids] = True
     return {
         "input_ids": torch.tensor(input_rows, dtype=torch.long),
         "labels": torch.tensor(label_rows, dtype=torch.long),
@@ -298,6 +496,12 @@ def left_pad_collate(
             record.get("position_in_batch") for record in records
         ],
         "pools": [record.get("pool") for record in records],
+        "routing_target_probabilities": (
+            torch.tensor(routing_targets, dtype=torch.float32)
+            if all(posterior_records)
+            else None
+        ),
+        "routing_valid_mask": routing_valid_mask,
     }
 
 
@@ -310,6 +514,16 @@ class RoutingSites:
     @property
     def count(self) -> int:
         return int(self.targets.numel())
+
+
+@dataclass
+class TCRASites:
+    batch_indices: torch.Tensor
+    time_indices: torch.Tensor
+
+    @property
+    def count(self) -> int:
+        return int(self.batch_indices.numel())
 
 
 def gather_routing_sites(
@@ -348,11 +562,41 @@ def gather_routing_sites(
     )
 
 
+def gather_training_tcra_sites(
+    labels: torch.Tensor,
+    registry: MemoryTokenRegistry,
+) -> TCRASites:
+    """Collect gold procedure starts at assistant-start or EOC boundaries."""
+
+    routing_sites = gather_routing_sites(labels, registry)
+    if routing_sites.count == 0:
+        return TCRASites(
+            batch_indices=routing_sites.batch_indices,
+            time_indices=routing_sites.time_indices,
+        )
+    preceding_labels = labels[
+        routing_sites.batch_indices,
+        routing_sites.time_indices,
+    ]
+    valid_boundaries = (preceding_labels == -100) | (
+        preceding_labels == registry.eoc_token_id
+    )
+    if not bool(valid_boundaries.all()):
+        invalid_count = int((~valid_boundaries).sum().item())
+        raise ValueError(
+            f"{invalid_count} procedure tokens are not at assistant-start or EOC boundaries"
+        )
+    return TCRASites(
+        batch_indices=routing_sites.batch_indices,
+        time_indices=routing_sites.time_indices,
+    )
+
+
 def add_train_routing_bias(
     model: ProceduralMemoryModel,
     shift_logits: torch.Tensor,
     boundary_hidden: torch.Tensor,
-    sites: RoutingSites,
+    sites: RoutingSites | TCRASites,
     *,
     detach_hidden: bool = True,
 ) -> torch.Tensor:
@@ -382,6 +626,58 @@ def add_train_routing_bias(
         token_ids[None, :],
     ] = selected + bias
     return output
+
+
+def residual_set_margin_routing_loss(
+    raw_memory_logits: torch.Tensor,
+    route_logits: torch.Tensor,
+    valid_mask: torch.Tensor,
+    *,
+    logit_bias_scale: float,
+    margin: float,
+) -> torch.Tensor:
+    """Train TCRA only when the raw memory ranking needs correction."""
+
+    if raw_memory_logits.ndim != 2:
+        raise ValueError("raw_memory_logits must have shape [sites, procedures]")
+    if route_logits.shape != raw_memory_logits.shape:
+        raise ValueError("route_logits and raw_memory_logits must have equal shape")
+    if valid_mask.shape != raw_memory_logits.shape:
+        raise ValueError("valid_mask and raw_memory_logits must have equal shape")
+    if valid_mask.dtype != torch.bool:
+        raise ValueError("valid_mask must be boolean")
+    if not valid_mask.any(dim=-1).all():
+        raise ValueError("Every routing site needs at least one valid procedure")
+    if valid_mask.all(dim=-1).any():
+        raise ValueError("Every routing site needs at least one invalid procedure")
+    if margin < 0.0:
+        raise ValueError("margin must be nonnegative")
+
+    raw_scores = raw_memory_logits.detach().float()
+    correction = (
+        F.log_softmax(route_logits.float(), dim=-1)
+        + math.log(raw_scores.shape[-1])
+    ) * float(logit_bias_scale)
+    calibrated_scores = raw_scores + correction
+    raw_top = raw_scores.argmax(dim=-1, keepdim=True)
+    raw_top_is_valid = valid_mask.gather(-1, raw_top).squeeze(-1)
+
+    valid_score = calibrated_scores.masked_fill(
+        ~valid_mask,
+        -torch.inf,
+    ).amax(dim=-1)
+    invalid_score = calibrated_scores.masked_fill(
+        valid_mask,
+        -torch.inf,
+    ).amax(dim=-1)
+    fix_loss = F.softplus(float(margin) + invalid_score - valid_score)
+
+    per_site = torch.where(
+        raw_top_is_valid,
+        torch.zeros_like(fix_loss),
+        fix_loss,
+    )
+    return per_site.sum()
 
 
 @dataclass
@@ -428,6 +724,9 @@ def compute_training_loss_sums(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     labels: torch.Tensor,
+    routing_target_probabilities: torch.Tensor | None = None,
+    routing_valid_mask: torch.Tensor | None = None,
+    routing_margin: float = 0.5,
 ) -> TrainingLossSums:
     """Return unnormalized CE sums so microbatching cannot change the objective."""
 
@@ -453,16 +752,75 @@ def compute_training_loss_sums(
             sites.time_indices,
         ]
         route_logits = model.routing_scores(boundary_hidden.detach())
-        route_loss = F.cross_entropy(
-            route_logits.float(),
-            sites.targets,
-            reduction="sum",
+        if (
+            routing_target_probabilities is not None
+            and routing_valid_mask is not None
+        ):
+            raise ValueError("A microbatch has two routing target modes")
+        if routing_valid_mask is not None:
+            token_ids = torch.tensor(
+                model.registry.procedure_token_ids,
+                dtype=torch.long,
+                device=shift_logits.device,
+            )
+            raw_memory_logits = shift_logits[
+                sites.batch_indices[:, None],
+                sites.time_indices[:, None],
+                token_ids[None, :],
+            ]
+            route_loss = residual_set_margin_routing_loss(
+                raw_memory_logits,
+                route_logits,
+                routing_valid_mask.to(device=route_logits.device),
+                logit_bias_scale=model.logit_bias_scale,
+                margin=routing_margin,
+            )
+        elif routing_target_probabilities is None:
+            route_loss = F.cross_entropy(
+                route_logits.float(),
+                sites.targets,
+                reduction="sum",
+            )
+        else:
+            expected_shape = (
+                sites.count,
+                model.registry.num_procedures,
+            )
+            if tuple(routing_target_probabilities.shape) != expected_shape:
+                raise ValueError(
+                    "Posterior routing targets have shape "
+                    f"{tuple(routing_target_probabilities.shape)}, "
+                    f"expected {expected_shape}"
+                )
+            target_probabilities = routing_target_probabilities.to(
+                device=route_logits.device,
+                dtype=torch.float32,
+            )
+            row_sums = target_probabilities.sum(dim=-1)
+            if not torch.allclose(
+                row_sums,
+                torch.ones_like(row_sums),
+                rtol=1e-5,
+                atol=1e-6,
+            ):
+                raise ValueError("Posterior routing targets must sum to one")
+            route_loss = -(
+                target_probabilities
+                * F.log_softmax(route_logits.float(), dim=-1)
+            ).sum()
+        tcra_sites = gather_training_tcra_sites(
+            labels,
+            model.registry,
         )
+        tcra_hidden = output.final_hidden_state[
+            tcra_sites.batch_indices,
+            tcra_sites.time_indices,
+        ]
         shift_logits = add_train_routing_bias(
             model,
             shift_logits,
-            boundary_hidden,
-            sites,
+            tcra_hidden,
+            tcra_sites,
             detach_hidden=True,
         )
     supervised_tokens = int((shift_labels != -100).sum().item())
@@ -536,6 +894,9 @@ def compute_training_loss(
     labels: torch.Tensor,
     *,
     route_loss_weight: float = 0.1,
+    routing_target_probabilities: torch.Tensor | None = None,
+    routing_valid_mask: torch.Tensor | None = None,
+    routing_margin: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, float | int]]:
     """Convenience wrapper for a single, already-complete effective batch."""
 
@@ -544,6 +905,9 @@ def compute_training_loss(
         input_ids,
         attention_mask,
         labels,
+        routing_target_probabilities,
+        routing_valid_mask,
+        routing_margin,
     )
     return combine_training_loss_sums(
         [component],

@@ -407,6 +407,61 @@ class ProcedureUnigramModel:
     ) -> float:
         return float(self.count_forward(sequence, piece_count)[piece_count, len(sequence)])
 
+    def fixed_count_next_piece_distribution(
+        self,
+        sequence: Sequence[Signature],
+        start: int,
+        remaining_piece_count: int,
+    ) -> list[tuple[int, float]]:
+        """Condition the next piece on a boundary and an exact remaining count."""
+
+        length = len(sequence)
+        if not 0 <= start < length:
+            raise ValueError(f"start must be in [0, {length}), got {start}")
+        if remaining_piece_count <= 0:
+            raise ValueError("remaining_piece_count must be positive")
+
+        log_weights = self.log_weights
+        beta = np.full(
+            (remaining_piece_count + 1, length + 1),
+            NEG_INF,
+            dtype=np.float64,
+        )
+        beta[0, length] = 0.0
+        for remaining in range(1, remaining_piece_count + 1):
+            for position in range(length - 1, -1, -1):
+                beta[remaining, position] = _logsumexp(
+                    float(log_weights[piece_id])
+                    + float(beta[remaining - 1, end])
+                    for end, piece_id in self.arcs_from(sequence, position)
+                    if np.isfinite(beta[remaining - 1, end])
+                )
+
+        log_partition = float(beta[remaining_piece_count, start])
+        if not np.isfinite(log_partition):
+            raise ValueError(
+                "No complete continuation exists from "
+                f"start={start} with {remaining_piece_count} pieces"
+            )
+        values = [
+            (
+                piece_id,
+                math.exp(
+                    float(log_weights[piece_id])
+                    + float(beta[remaining_piece_count - 1, end])
+                    - log_partition
+                ),
+            )
+            for end, piece_id in self.arcs_from(sequence, start)
+            if np.isfinite(beta[remaining_piece_count - 1, end])
+        ]
+        total = sum(probability for _piece_id, probability in values)
+        if not values or not math.isclose(total, 1.0, rel_tol=1e-10, abs_tol=1e-12):
+            raise AssertionError(
+                f"Fixed-count next-piece probabilities sum to {total}"
+            )
+        return values
+
     def segmentation_log_weight(self, segments: Sequence[Segment]) -> float:
         return float(sum(self.log_weights[segment.piece_id] for segment in segments))
 

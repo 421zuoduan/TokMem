@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRACK_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CALLER_WORKDIR="$(pwd -P)"
+BIN_DIR="${TOOLATHLON_ROOTLESS_BIN_DIR:-$TRACK_DIR/artifacts/rootless-docker/bin}"
+DEFAULT_RUNTIME_PARENT="${XDG_RUNTIME_DIR:-/tmp}"
+RUNTIME_ROOT="${TOOLATHLON_ROOTLESS_RUNTIME_ROOT:-$DEFAULT_RUNTIME_PARENT/compositional-toolathlon-rootless}"
+CLIENT_SOCKET="$RUNTIME_ROOT/docker.sock"
+CHILD_PID_FILE="$RUNTIME_ROOT/state/child_pid"
+
+ROOTLESSKIT_CHILD_PID="$(<"$CHILD_PID_FILE")"
+exec nsenter \
+    --target "$ROOTLESSKIT_CHILD_PID" \
+    --user \
+    --mount \
+    --net \
+    "--wd=$CALLER_WORKDIR" \
+    --preserve-credentials \
+    "$BIN_DIR/docker" \
+    --host "unix://$CLIENT_SOCKET" \
+    "$@"

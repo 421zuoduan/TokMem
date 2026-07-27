@@ -82,6 +82,35 @@ class UnigramTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.model.sample_fixed_count(self.sequence, 4, rng)
 
+    def test_fixed_count_next_piece_distribution_conditions_on_current_state(self):
+        first = dict(
+            self.model.fixed_count_next_piece_distribution(
+                self.sequence,
+                start=0,
+                remaining_piece_count=2,
+            )
+        )
+        self.assertEqual(set(first), {0, 3})
+        self.assertAlmostEqual(first[0], 0.5, places=12)
+        self.assertAlmostEqual(first[3], 0.5, places=12)
+
+        second = dict(
+            self.model.fixed_count_next_piece_distribution(
+                self.sequence,
+                start=1,
+                remaining_piece_count=1,
+            )
+        )
+        self.assertEqual(set(second), {4})
+        self.assertAlmostEqual(second[4], 1.0, places=12)
+
+        with self.assertRaises(ValueError):
+            self.model.fixed_count_next_piece_distribution(
+                self.sequence,
+                start=1,
+                remaining_piece_count=3,
+            )
+
     def test_viterbi_tie_break_does_not_depend_on_arc_order(self):
         model = ProcedureUnigramModel(
             [

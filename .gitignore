@@ -64,6 +64,7 @@ nohup.out
 *.out
 .codex
 .learnings
+/.index6_migration_staging/
 
 # Local rebuttal source material
 REBUTTAL_TEXT.md

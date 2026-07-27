@@ -18,20 +18,23 @@ checkpoint、日志和 Docker 构建记录都必须写在本目录下；I/O 代�
 
 训练方法只比较：
 
-| 方法 | procedure memory | EOC | TCRA / logit bias | memory bank 概率门 |
+| 方法 | procedure memory | EOC | TCRA / logit bias | hard memory bank 门 |
 |---|---:|---:|---:|---:|
 | `tokmem` | 是 | 否 | 否 | 否 |
-| `tapmem` | 是 | 是 | 是 | 是 |
+| `eoc_only` | 是 | 是 | 否 | 否 |
+| `tapmem` | 是 | 是 | 是 | 默认关闭 |
 
-两者都冻结基础语言模型并训练 procedure embedding；TapMem 另外训练 EOC embedding
-和原论文中的线性 TCRA head。procedure 不再被假定为铺满整段回答。训练目标保留
+三种设置都冻结基础语言模型并训练 procedure embedding；EOC-only 和 TapMem 另外
+训练 EOC embedding，只有 TapMem 训练原论文中的线性 TCRA head。EOC-only 是用于
+区分“EOC 本身”和“TCRA 校准”作用的消融，不作为新的主方法。procedure 不再被假定
+为铺满整段回答。训练目标保留
 原始 Bash 文本中 procedure 以外的前缀、连接符、空白和注释。例如 TokMem 可以是：
 
 ```text
 普通前缀 <memory_1> Bash片段1 | <memory_2> Bash片段2 普通后缀
 ```
 
-TapMem 只在每个 procedure 的实际结尾加 EOC：
+EOC-only 和 TapMem 都只在每个 procedure 的实际结尾加 EOC：
 
 ```text
 普通前缀 <memory_1> Bash片段1 <EOC> | <memory_2> Bash片段2 <EOC> 普通后缀
@@ -41,12 +44,39 @@ TapMem 只在每个 procedure 的实际结尾加 EOC：
 普通文本或 EOC，不再要求 memory 紧挨着 EOC。推理时 TapMem 维护一个简单状态：
 选中 memory 后进入 procedure，生成 EOC 后退出；普通文本不会被误当成 procedure。
 
-只有 TapMem 使用 memory bank 概率门。在 procedure 外，先从**没有加 TCRA 的全词表
-logits**计算全部 memory token 的 softmax 概率总和。总和达到默认阈值 `0.5` 时，
-应用 TCRA 后只在 memory bank 内选择；未达到时仍在全词表中选择。低于阈值但原始
-top-1 已经是 memory 时，TapMem 仍按原 TCRA 做软重排，但不屏蔽普通 token。在
-procedure 内不计算这道门，也不应用 TCRA。TokMem 始终使用原始全词表 greedy
-解码，不使用 EOC、TCRA 或这道概率门。
+TapMem 默认采用纯加性 TCRA。在 procedure 外，只有**尚未加入 TCRA 的全词表
+top-1 已经是 memory token**时，才把 routing head 的校准值加到 memory logits；
+然后仍在完整词表中选择。procedure 内不应用 TCRA。训练也在所有有 AR 监督的位置
+执行同一判断，而不是只在真实 memory 位置无条件加 bias；因此普通文本位置如果被
+原模型误判为 memory，也会通过 AR loss 更新 routing head。routing bias 不做
+`detach`，AR 梯度可以直接进入 routing head。
+
+旧的 hard memory-bank 概率门只保留为 `--enable-memory-bank-constraint` 消融选项，
+不属于默认 TapMem 设置。TokMem 始终使用原始全词表 greedy 解码，不使用 EOC、
+TCRA 或 hard gate。
+
+EOC-only 的完整实验入口是 `run_eoc_only_e100_seed42_pipeline.sh`。它使用与主实验
+相同的 Llama-3.1-8B-Instruct、5200 次样本呈现、100 epochs、学习率 0.005 和
+seed 42；当前 launcher 在 GPU 3 训练，完成后分别在 GPU 3、3、5、6 上运行四分片
+200 题真实环境评测。checkpoint 只保存 procedure embedding 和 EOC embedding，
+不包含 routing head 或冻结的基础模型。
+
+该配置的完整结果为 83/200（41.5%），平均连续 reward 为 0.81820，平均执行
+6.67 轮；fs1/fs2/fs3/fs4 分别成功 20/24/28/11 题。
+
+当前代码框架下的 TokMem 已使用同一 runner v13 完整重跑。其结果为
+83/200（41.5%），平均连续 reward 为 0.82075，平均执行 6.775 轮；
+fs1/fs2/fs3/fs4 分别成功 23/25/25/10 题。从现在起，该结果是本项目默认且唯一
+用于表格、分析和论文叙述的 TokMem 基线。旧 runner v12 的 86/200（43.0%）只作为
+历史存档结果。
+
+同一 v13 协议下，TokMem 与 EOC-only 均成功 83 题；两者共同成功 64 题，各自独有
+成功 19 题，McNemar `p=1.0`。当前单 seed 没有证据表明只加入 EOC 会改变成功率。
+
+当前代码框架下重新训练和评测 TokMem 的入口是
+`run_tokmem_current_e100_seed42_pipeline.sh`。它与 EOC-only 使用相同基础模型、
+数据、100 epochs、学习率和 seed，区别仅为不训练或生成 EOC；输出使用独立的
+`tokmem_llama8b_current_e100_seed42_v1` 名称，不覆盖旧 TokMem checkpoint。
 
 此外评测一个不训练的 `Base+ToolDesc` 基线：同一个原始基础模型在 system prompt
 中获得一份固定的文字工具目录，不使用 memory token。目录只由去泄漏后的 TRAIN
@@ -425,6 +455,50 @@ partial run 的 scheduler 仍按完整正式 schedule 的总更新数计算 warm
 checkpoint 会记录 split 哈希和两侧模板组，并强制 `formal_ready=false`。选好路由头
 学习率后，正式 TapMem 必须重新初始化并去掉 `--route-probe-split`，在全部 TRAIN
 views 上完整训练；不能接着使用 partial 权重。
+
+### 6.1.1 模糊边界的条件概率路由监督
+
+`--routing-target-mode fixed_count_posterior` 不再要求 TCRA head 在模糊边界上只认
+当前抽中的一个 procedure。对一条 view 中的每个真实 memory 位置，程序使用当前
+atom 起点和剩余 procedure 数，通过已有 unigram 模型计算下一段所有合法 procedure
+的条件概率，再用这组概率计算 routing loss。它不会把不同生成前缀合并，也不会把
+所有候选平均分配；低概率的 coverage 切分仍只得到低权重。
+
+这个选项只改变额外的 routing loss。自回归目标仍监督当前 view 实际抽中的 memory
+token，TCRA 仍把校准值加到原始 memory-token logits 上。routing head 的初始化、
+`logit-bias-scale` 和推理解码方式都不因此改变。旧实验默认仍是
+`--routing-target-mode one_hot`。
+
+### 6.1.2 纠错型 routing loss
+
+`--routing-target-mode residual_set_margin` 直接在“原始 memory logits + TCRA
+校准”上训练，而不是要求 routing head 单独复现 unigram 概率。只有
+`boundary_sample` 会使用模糊集合：按固定段数条件概率从高到低保留到累计质量达到
+`--routing-candidate-mass`，并始终加入当前 gold procedure。`coverage_anchor`、
+`reference_anchor` 和普通单候选位置仍只认当前 gold，避免稀有 procedure 的监督被
+低概率候选冲淡。
+
+若原始 memory-bank top-1 不在合理集合中，loss 要求校准后最好的合理 procedure 比
+最强错误 procedure 至少高 `--routing-margin`；若原始 top-1 已经合理，这项额外
+routing loss 记为 0，不使用 keep loss。AR 前向只在 procedure 外且原始全词表
+top-1 是 memory token 时加入同一份 TCRA bias，且 AR 梯度会直接传给 routing
+head。真实 memory 位置仍单独用于 routing 监督，两类位置不再混为一谈。
+
+纯加性 TapMem 现在是默认设置；旧 launcher 中的
+`--disable-memory-bank-constraint` 仍作为兼容参数接受。当原始 top-1 是 memory
+token 时，TCRA 进行加性重排，但不会强制在 memory bank 内选择。
+
+2026-07-27 之前 residualroute 的 0.05/0.1 实验使用 keep loss，并隔离了 routing
+head 的 AR 梯度；这些结果只作为历史消融记录，不能代表当前实现。随后在统一触发和
+完整 AR 梯度下比较了无 keep 与 keep weight 0.25：分别得到 72/200 和 74/200，
+逐题差异不显著（`p=0.871`），而 keep 版本平均 reward 更低、缺少结束 token 的
+轮次从 3 增加到 28。因此当前实现删除 keep loss。
+
+当前 100-epoch 主实验入口是
+`run_tapmem_residualroute_tcra_aligned_e100_seed42_pipeline.sh`。它先在 GPU 1 训练，
+再自动使用 GPU 1、3、5、6 运行四分片 200 题真实环境评测；checkpoint 和评测目录
+使用 `tapmem_llama8b_residualroute_tcra_aligned_nokeep_e100_seed42_v2`，不会覆盖
+已有的无 keep 和 keep025 实验。
 
 ### 6.2 Base+ToolDesc 不训练基线
 

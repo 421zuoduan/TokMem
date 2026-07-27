@@ -156,6 +156,9 @@ def save_checkpoint(
             "memory_bank_probability_threshold": (
                 model.memory_bank_probability_threshold
             ),
+            "memory_bank_constraint_enabled": (
+                model.use_memory_bank_constraint
+            ),
             "lexicon_hash": lexicon_hash,
             "view_metadata": dict(training_summary.get("view_metadata", {})),
             "registry": model.registry.to_dict(),
@@ -225,6 +228,12 @@ def load_checkpoint(
         logit_bias_scale=float(metadata["logit_bias_scale"]),
         memory_bank_probability_threshold=float(
             metadata["memory_bank_probability_threshold"]
+        ),
+        enable_memory_bank_constraint=bool(
+            metadata.get(
+                "memory_bank_constraint_enabled",
+                metadata["method"] == "tapmem",
+            )
         ),
     )
     tensors = load_file(str(checkpoint_dir / "trainable.safetensors"), device=str(device))

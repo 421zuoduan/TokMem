@@ -64,7 +64,7 @@ DEFAULT_IMAGES = {
     "fs3": "intercode-nl2bash-fs3",
     "fs4": "intercode-nl2bash-fs4",
 }
-RUNNER_PROTOCOL = "intercode_bash_try_again_official_reward_v12"
+RUNNER_PROTOCOL = "intercode_bash_try_again_official_reward_v13"
 FORMAL_SUMMARY_SCHEMA = "intercode_bash_eval_summary_v11"
 SHARD_SUMMARY_SCHEMA = "intercode_bash_eval_shard_summary_v8"
 SHARD_ASSIGNMENT = "per_filesystem_local_index_modulo"

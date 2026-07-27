@@ -669,3 +669,347 @@ TokMem `summary_10_turn.json` 的 SHA-256 为
 200 个 episode、200 个唯一 task ID 和四个 shard summary 均已核对，统一汇总记录
 `evaluation_complete=true`。与 TapMem 一样，本次仍使用 single-UID rootless Docker
 和 cgroup v1，所以 `paper_ready=false`；标准隔离环境要求仍未满足。
+
+## TapMem 阈值 1.0、100 epochs 的完整结果
+
+### 目的和设置
+
+2026-07-27 又训练并测试了一版 TapMem，把
+`memory_bank_probability_threshold` 从 0.5 改为 1.0。其他主要训练设置保持不变：
+
+| 设置 | 数值 |
+|---|---:|
+| 基础模型 | Llama-3.1-8B-Instruct |
+| 训练轮数 | 100 epochs |
+| 样本呈现次数 | 5,200 |
+| 参数更新次数 | 1,300 |
+| batch size | 1 |
+| gradient accumulation | 4 |
+| memory learning rate | 0.005 |
+| routing learning rate | 0.005 |
+| model seed | 42 |
+| data seed | 1729 |
+
+训练数据、procedure inventory、基础模型和随机种子都与前面的实验相同。最终 loss
+为 0.73842。checkpoint 位于：
+
+```text
+compositional_intercode_bash/runs/
+  tapmem_llama8b_nogate_threshold1_e100_seed42_v1/
+```
+
+checkpoint 只保存 4 个训练张量：procedure embedding、EOC embedding、routing head
+权重和偏置，共 2,396,452 个参数；没有保存冻结的 8B backbone。
+`trainable.safetensors` 的 SHA-256 为
+`8459afefc208f4e03b6c8ca45a62d31dcfb875bd3b71766737b86c2e1ea0aa9f`。
+
+阈值 1.0 应理解为“尽量关闭基于概率总和的硬门控”，不能写成严格的“完全没有硬
+门控”。生成时程序先用 float32 计算全部 memory token 的概率总和，只有计算结果
+`>= 1.0` 才强制从 memory bank 选 token。通常这个条件不会满足；但是当普通 token
+的概率相对极小时，float32 的减法和指数运算可能把总和舍入为恰好 1.0，此时仍会触发
+硬门控。EOC 和 TCRA 的 logit bias 始终保留，这版仍然是 TapMem。
+
+这个阈值只用于生成，不进入训练 forward 和 loss。因此“用阈值 1.0 训练”的实际含义
+是：按同一 TapMem 训练方法得到 checkpoint，并在 checkpoint 中固定记录阈值 1.0，
+评测加载后按这个阈值生成。仓库里原有的 100-epoch TapMem checkpoint 使用旧版 v3
+训练语义，不能作为“同一权重、只改阈值”的严格对照。
+
+### 完整 200 题结果
+
+完整结果如下：
+
+| 指标 | 结果 |
+|---|---:|
+| 题目数 | 200 |
+| reward 等于 1 的题目 | 76 |
+| 成功率 | 38.00% |
+| 平均最高 reward | 0.80730 |
+| 平均执行轮数 | 6.930 |
+| 达到满分后结束 | 76 |
+| 运行满 10 轮后结束 | 124 |
+| 官方 parser 无法解析后结束 | 0 |
+| 上下文溢出 | 0 |
+
+逐文件系统结果：
+
+| 文件系统 | 题数 | 成功题 | 成功率 | 平均最高 reward |
+|---|---:|---:|---:|---:|
+| fs1 | 60 | 19 | 31.67% | 0.79767 |
+| fs2 | 53 | 25 | 47.17% | 0.81528 |
+| fs3 | 60 | 24 | 40.00% | 0.81117 |
+| fs4 | 27 | 8 | 29.63% | 0.80444 |
+
+完整评测中，概率阈值导致的 memory-bank 硬门控触发 961 次，其中 350 次改变了原本
+会生成的 token。这证实阈值 1.0 大幅减少了门控，但没有在 float32 数值意义上把它
+彻底关掉。作为参考，前一版阈值 0.5、151-epoch TapMem 分别为 1,458 次和 610 次。
+两版 checkpoint 的训练轮数和权重不同，所以触发次数的减少不能全部归因于阈值。
+
+阈值 1.0 版本有 15 个生成轮没有正常结束标志，5 题、15 轮 observation 被统一规则
+裁剪；没有删除历史轮、parser 失败或 context overflow。
+
+### 与已有结果的比较
+
+| 方法 | 训练轮数 | 阈值 | 成功题 | 成功率 | 平均 reward | 平均轮数 |
+|---|---:|---:|---:|---:|---:|---:|
+| TapMem，本次 | 100 | 1.0 | 76 / 200 | 38.00% | 0.80730 | 6.930 |
+| TapMem，前一版 | 151 | 0.5 | 76 / 200 | 38.00% | 0.80675 | 7.005 |
+| TokMem | 100 | 不使用 | 86 / 200 | 43.00% | 0.82725 | 6.575 |
+
+本次 TapMem 与阈值 0.5 TapMem 逐题比较：55 题都成功，103 题都失败，21 题只有本次
+成功，21 题只有阈值 0.5 版本成功。两侧精确 McNemar 检验 `p=1.0`。连续 reward
+方面，本次更高 46 题，阈值 0.5 版本更高 42 题，112 题相同；两侧符号检验
+`p=0.74933`。两者的总体结果基本持平，但由于训练轮数为 100 对 151，不能把这个
+比较解释为纯粹的阈值消融。
+
+本次 TapMem 与 100-epoch TokMem 逐题比较：62 题都成功，100 题都失败，14 题只有
+TapMem 成功，24 题只有 TokMem 成功。两侧精确 McNemar 检验 `p=0.14331`。连续
+reward 方面，TapMem 更高 31 题，TokMem 更高 47 题，122 题相同；两侧符号检验
+`p=0.08878`。TokMem 数值上仍高 5 个百分点，但单个 seed 的成功率差异没有达到
+0.05 显著性水平。
+
+因此，这次实验没有显示把阈值提高到 1.0 能提升 TapMem 的最终成功率。它与旧
+TapMem checkpoint 的成功率相同，并且仍低于当前 TokMem checkpoint。若要把差异
+严格归因于阈值，下一步应固定本次同一组训练权重，只生成两个仅阈值元数据不同的
+checkpoint，分别用 0.5 和 1.0 跑同一批 200 题；不需要重新训练两次。
+
+### 并行执行和产物核验
+
+评测先分成四个 shard：GPU 3 跑 shard 0、1，GPU 5 跑 shard 2、3，每张卡两个模型
+进程。峰值显存低于 50 GB/卡。shard 3 在 fs3 切换到 fs4 时遇到一次 rootless Docker
+并发竞态：一个进程刚列出容器，另一个进程随即清理了它，前者 inspect 时收到 404。
+这个错误发生在新环境初始化阶段，没有写入半道 episode，也没有改变评分。其他三个
+shard 完成后，用完全相同的命令和 `--resume` 串行补完 shard 3 的 6 道 fs4 题。
+
+最后又运行一次无 shard 的 `--resume`。程序核对了 200 个 episode、200 个唯一 task
+ID、`60/53/60/27` 的文件系统分布、四个完整 shard summary、checkpoint identity、
+runner identity、官方源码 identity 和镜像 ID，统一汇总记录
+`evaluation_complete=true`。
+
+结果目录：
+
+```text
+compositional_intercode_bash/evaluations/
+  tapmem_llama8b_nogate_threshold1_e100_seed42_v1_official_agent_parse_preserve_full200_v1/
+    episodes_10_turn/
+    shard_summary_10_turn_000_of_004.json
+    shard_summary_10_turn_001_of_004.json
+    shard_summary_10_turn_002_of_004.json
+    shard_summary_10_turn_003_of_004.json
+    summary_10_turn.json
+```
+
+`summary_10_turn.json` 的 SHA-256 为
+`5a135695f892cb847daa05b8e13b6de14f9180b6cfad952cad361b794a08da04`；
+checkpoint identity 为
+`c243f45d582f9c843a12e56f44bf7636aa4bcf5d2cd8d881c1be1f863aec3173`；
+runner identity 仍为
+`247d90b3f7bdd15149ea4555cfd8607820019dcef8242d4f2761143599df3456`。
+本次继续使用 single-UID rootless Docker、VFS 和 cgroup v1，因此
+`paper_ready=false`；如需把数字放进论文正式表格，仍应在具有标准隔离能力的 Docker
+环境中复跑。
+
+## procedure 外屏蔽 EOC 后的 50-epoch 后台复训
+
+2026-07-27 修正了 TapMem 的 EOC 状态约束：procedure 外先把 EOC logit 设为负无穷，
+再用同一份已屏蔽 logits 计算原始 top-1、memory-bank 概率和 TCRA 后的最终选择；
+进入 procedure 后仍允许 EOC 正常结束 procedure。这样孤立 EOC 不会再进入当前回答
+的自回归上下文。评测 runner protocol 同步从 v12 更新为 v13。
+
+针对修改后的生成逻辑，更新了原先允许 orphan EOC 的单测。定向 13 项测试和整个
+`compositional_intercode_bash` 的 106 项 CPU 测试全部通过。
+
+本轮继续使用 Llama-3.1-8B-Instruct、data seed 1729、model seed 42、batch size 1、
+gradient accumulation 4、memory/routing learning rate 0.005 和概率阈值 1.0。固定
+views 源文件包含 100 epochs，程序不允许把不完整源 schedule 声称为正式
+`--training-epochs 50`，所以按已有入口使用 `--epoch-limit 50`，严格训练前 50 个
+source epochs，预期执行 650 次参数更新。该 checkpoint 会标记为 exploratory，后续
+评测必须显式允许 exploratory checkpoint。
+
+固定 launcher：
+
+```text
+compositional_intercode_bash/train_tapmem_eocmask_t1_e50_seed42.sh
+```
+
+输出目录：
+
+```text
+compositional_intercode_bash/runs/
+  tapmem_llama8b_eocmask_t1_e50_seed42_v1/
+```
+
+2026-07-27 10:11 CST 使用物理 GPU 3，通过 `nohup + setsid` 启动后台训练。启动 PID
+为 `2278707`；核验时 `PPID=1`、session ID 与 PID 相同、无 TTY，说明进程已经脱离
+发起终端，终端断开不会终止训练。10:12 CST 模型已进入 GPU 训练阶段，占用约
+17.6 GB 显存。PID、launcher 路径和日志位置同时保存在输出目录的
+`background.pid`、`background_run.md` 和 `background.log` 中。
+
+训练于 2026-07-27 10:16 CST 完成。实际执行 50 epochs、2600 次样本呈现和 650 次
+参数更新，最后一条训练 loss 为 `0.7631701596577962`。后台进程正常退出，日志末尾
+包含完整训练汇总，未发现 traceback、运行时错误或显存溢出。生成的
+`trainable.safetensors` 只含 `procedure_embeddings`、`eoc_embedding` 和 routing
+head 的权重、偏置，共 2,396,452 个可训练参数，没有保存冻结的 Llama 主干；其
+SHA-256 为
+`6d6549ac02797141ba51ad0e3a60ca1196a1595c5a3f85123285ad49e61b7464`。
+
+## EOC 屏蔽版 50-epoch checkpoint 的 200 题后台评测
+
+2026-07-27 10:21 CST 启动四分片真实环境评测。固定入口为：
+
+```text
+compositional_intercode_bash/evaluate_tapmem_eocmask_t1_e50_seed42_sharded.sh
+```
+
+输出目录为：
+
+```text
+compositional_intercode_bash/evaluations/
+  tapmem_llama8b_eocmask_t1_e50_seed42_v1_official_agent_parse_preserve_full200_v1/
+```
+
+shard 0、1 放在物理 GPU 3，shard 2、3 放在物理 GPU 5。总控进程 PID 为
+`2291008`，启动后 `PPID=1`、session ID 与 PID 相同，已经脱离发起终端。启动核验
+确认四个 evaluator 都在运行，GPU 3 和 GPU 5 各加载两个模型进程，每个模型进程约占
+26 GB 显存。
+
+总控会等待四个 shard。失败的 shard 会使用同一编号和 `--resume` 串行恢复，然后
+自动运行无 shard 的 `--resume`：补齐仍缺少的 episode，核对完整 200 题，再写
+`summary_10_turn.json`。这一流程不改变 benchmark 的逐轮执行和评分逻辑，也不需要
+人工监控或手动合并。分片日志写在 `logs/`，整体进度写在 `coordinator.log`。
+
+本轮显式允许加载 exploratory checkpoint。由于训练只取固定 100-epoch 日程的前
+50 epochs，而且使用 single-UID rootless Docker，结果按预期不能标记为论文正式
+隔离环境结果；这不影响完整评测流程以及与同环境结果进行诊断性比较。
+
+四个 shard 于 2026-07-27 11:05 CST 全部完成，第一次无 shard 严格合并于 11:06
+CST 完成。输出目录包含 200 个 episode、四个完整 shard summary 和最终
+`summary_10_turn.json`；最终文件记录 `evaluation_complete=true`，文件系统题量为
+`60/53/60/27`。
+
+结果为 54 / 200 题成功，成功率 27.00%，平均最高 reward 为 0.77310，平均执行
+7.985 轮。逐文件系统成功题数为 fs1 9 / 60、fs2 23 / 53、fs3 15 / 60、fs4
+7 / 27。没有 context overflow，也没有官方 parser 失败；11 题、25 轮 observation
+经过统一长度裁剪。共有 210 个生成轮没有正常结束标志。memory-bank 约束触发 1724
+次，其中 1045 次改变了原本会生成的 token。
+
+最终 `summary_10_turn.json` 的 SHA-256 为
+`fad6567d6994e7e80e06727f0ea322cc10d028730b4471a8a95b44c15ff7cc90`。
+`paper_ready=false` 是由 50-epoch exploratory checkpoint 和 single-UID rootless
+Docker 共同决定，并非评测未完成。
+
+与已有 100-epoch TokMem 的 200 题结果直接比较，本次 50-epoch TapMem 成功率为
+27.00%，TokMem 为 43.00%；平均最高 reward 分别为 0.77310 和 0.82725，平均轮数
+分别为 7.985 和 6.575。逐题配对后，47 题两者都成功，107 题两者都失败，39 题只有
+TokMem 成功，7 题只有 TapMem 成功；两侧精确 McNemar 检验
+`p=1.8315e-6`。连续 reward 上 TokMem 更高 71 题、TapMem 更高 30 题、99 题相同，
+两侧符号检验 `p=5.5331e-5`。
+
+当前结果只能说明“这一个 50-epoch TapMem checkpoint 明显不如已有 100-epoch
+TokMem checkpoint”。两者训练量不同：TokMem 有 5200 次样本呈现和 1300 次更新，
+TapMem 只有 2600 次样本呈现和 650 次更新；评测 runner 也分别为 v12 和 v13。
+v13 的代码差异只在 TapMem 的 EOC 状态约束分支，但严格比较仍应把 TapMem 训练到
+100 epochs，并用 v13 对 TokMem 重跑同一批 200 题。
+
+对 210 个“回答未正常结束”轮次逐个检查后，可以排除“代码误把回答结束 token
+屏蔽掉”这一解释。EOC 是 `<|reserved_special_token_247|>`，回答结束标记是独立的
+`<|eot_id|>`；v13 只在 procedure 外屏蔽前者。210 个异常轮次全部生成到 512-token
+上限，207 轮进入过 procedure，199 轮在达到上限时仍没有用 EOC 退出 procedure。
+
+204 / 210 个异常轮次触发过 memory-bank 约束，150 轮至少有一次由约束改变了原本的
+token。触发约束的轮次有 16.25% 缺少 `<|eot_id|>`，未触发的轮次为 1.75%。这说明
+异常与 TCRA 把生成送入 procedure 强相关；进入以后，当前 checkpoint 又经常不能
+及时生成 EOC，于是命令片段和 memory token 循环到长度上限。
+
+训练不足也有直接证据。50-epoch 模型只得到 4846 次 EOC 监督，旧 100-epoch
+TapMem 为 9708 次；两者总体自回归 loss 分别为 5.058 和 3.604，routing loss
+分别为 33.382 和 22.592。旧 100-epoch 模型只有 15 / 1386 个轮次用满 512 token。
+不过旧模型使用 v12，仍允许 procedure 外 EOC，因此要严格区分训练轮数和 EOC 屏蔽
+的作用，需要用同一组权重分别在 v12/v13 解码，或把当前 v13 TapMem 训练到 100
+epochs 后再比较。
+
+## 条件概率 routing loss 的 100-epoch TapMem 重跑
+
+本轮不使用 routing head 零初始化，不改 `logit-bias-scale=1.0`，TCRA 继续把
+routing correction 加到原始 memory-token logits 上。取消 procedure 外 EOC
+屏蔽，并把 memory-bank 概率阈值保持为 `1.0`，因此不会用 hard gate 强制进入
+memory bank。
+
+routing 辅助损失改为 `fixed_count_posterior`。每个真实 routing 位置分别根据当前
+atom 起点和剩余 procedure 数，计算固定段数条件下下一段各 procedure 的概率；不按
+`sample_id + atom_start` 合并不同前缀，也不把候选平均分配。现有 5200 条 views
+共有 9708 个 routing 位置，其中 3296 个位置存在两个或更多合法候选；当前被抽中
+procedure 的平均条件概率为 0.83695，说明大多数位置仍接近 one-hot，真正模糊的
+位置才会得到软监督。
+
+正式设置使用 Llama-3.1-8B-Instruct、100 epochs、memory learning rate 0.005、
+routing learning rate 0.001、route loss weight 0.1、batch size 1 和 gradient
+accumulation 4。固定的训练后自动评测入口为：
+
+```text
+compositional_intercode_bash/
+  run_tapmem_posteriorroute_t1_e100_seed42_pipeline.sh
+```
+
+训练输出和 200 题真实环境评测输出分别为：
+
+```text
+compositional_intercode_bash/runs/
+  tapmem_llama8b_posteriorroute_t1_e100_seed42_v1/
+compositional_intercode_bash/evaluations/
+  tapmem_llama8b_posteriorroute_t1_e100_seed42_v1_official_agent_parse_preserve_full200_v1/
+```
+
+2026-07-27 12:00 CST 已用 `nohup + setsid` 启动上述流水线，总控 PID 为
+`3533768`，训练子进程 PID 为 `3533772`。核验时总控 `PPID=1`、没有 TTY，说明终端
+断开不会终止任务；训练进程已在物理 GPU 1 占用约 17.9 GB 显存并进入计算。训练成功
+后脚本会自动在物理 GPU 1、3、5、6 各启动一个评测分片，不需要人工继续操作或持续
+监控。
+
+该流水线于 2026-07-27 12:41 CST 完成全部 200 题。条件概率 routing loss 的
+TapMem 成功 75 / 200 题，成功率 37.50%，平均最高 reward 为 0.81820，平均执行
+6.93 轮；各文件系统为 fs1 19 / 60、fs2 20 / 53、fs3 28 / 60、fs4 8 / 27。
+没有 parser 失败和 context overflow，共 12 个生成轮缺少正常结束标志。
+
+与旧 100-epoch TapMem 相比，成功题数从 76 变为 75，但平均 reward 从 0.80730
+提高到 0.81820；与 100-epoch TokMem 相比仍少 11 道成功题。阈值虽然设为 `1.0`，
+hard memory-bank constraint 仍因浮点概率取整触发 362 次并改变 144 个 token，
+因此该设置不能视为真正关闭 hard gate。
+
+## 纠错型 routing loss 与纯加性 TCRA 重跑
+
+下一轮继续复用相同 5200 条 views，不重新生成数据。只有 `boundary_sample` 按固定
+段数条件概率累计到 90% 构造合理 procedure 集合；coverage/reference anchor 使用
+当前 gold。9708 个 routing 位置中，2477 个位置包含多个合理 procedure：2474 个
+集合大小为 2，3 个集合大小为 3。
+
+routing loss 直接使用“原始 memory logits + TCRA correction”。原始 memory top-1
+错误时使用 margin 0.5 的纠错损失，原始 top-1 已合理时使用权重 0.25 的排序保持
+损失。AR 前向保留加性 correction，但隔离其对 routing head 的梯度。routing head
+仍使用原有初始化，`logit-bias-scale=1.0`，routing LR 为 0.001，route loss
+weight 为 0.1，共训练 100 epochs。
+
+以上是当时实际运行的历史设置。当前代码已经删除排序保持 loss，也不再隔离 routing
+head 的 AR 梯度；训练和推理统一改为在 procedure 外、原始全词表 top-1 为 memory
+token 时才加入 TCRA bias。因此下面的旧结果仍不能直接代表当前实现。
+
+本轮使用 `--disable-memory-bank-constraint` 显式关闭 hard gate，推理时只有原始
+top-1 已是 memory token 才应用加性 TCRA。训练后自动评测入口为：
+
+```text
+compositional_intercode_bash/
+  run_tapmem_residualroute_additive_e100_seed42_pipeline.sh
+```
+
+输出目录为：
+
+```text
+compositional_intercode_bash/runs/
+  tapmem_llama8b_residualroute_additive_e100_seed42_v1/
+compositional_intercode_bash/evaluations/
+  tapmem_llama8b_residualroute_additive_e100_seed42_v1_official_agent_parse_preserve_full200_v1/
+```
+
+2026-07-27 13:16 CST 已用 `nohup + setsid` 启动流水线，总控 PID 为 `4014982`，
+训练子进程 PID 为 `4014985`。启动核验时总控 `PPID=1`、没有 TTY；训练进程已在
+物理 GPU 1 占用约 17.6 GB 显存并进入实际计算。训练完成后会自动转入 GPU
+1、3、5、6 的四分片真实环境评测。

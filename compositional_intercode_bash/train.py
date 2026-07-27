@@ -33,13 +33,19 @@ from .io_utils import (
     write_json,
     write_jsonl,
 )
-from .memory_model import METHODS, TCRA_TRIGGER_POLICY, ProceduralMemoryModel
+from .memory_model import (
+    METHODS,
+    TCRA_ADDITIVE_ONLY_TRIGGER_POLICY,
+    TCRA_TRIGGER_POLICY,
+    ProceduralMemoryModel,
+)
 from .route_probe_split import (
     checkpoint_split_record,
     load_route_probe_manifest,
 )
 from .training_data import (
     BoundaryViewDataset,
+    ROUTING_TARGET_MODES,
     TARGET_SERIALIZATION_POLICY,
     compute_training_loss_sums,
     left_pad_collate,
@@ -987,6 +993,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         memory_bank_probability_threshold=(
             args.memory_bank_probability_threshold
         ),
+        enable_memory_bank_constraint=args.enable_memory_bank_constraint,
     )
     if model.registry.num_procedures != lexicon.size:
         raise AssertionError("Procedure inventory was silently changed")
@@ -1003,6 +1010,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         model.registry,
         method=args.method,
         max_length=args.max_length,
+        procedure_model=lexicon,
+        routing_target_mode=args.routing_target_mode,
+        routing_candidate_mass=args.routing_candidate_mass,
     )
     loader = DataLoader(
         dataset,
@@ -1119,6 +1129,17 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             input_ids,
             attention_mask,
             labels,
+            (
+                batch["routing_target_probabilities"].to(args.device)
+                if batch["routing_target_probabilities"] is not None
+                else None
+            ),
+            (
+                batch["routing_valid_mask"].to(args.device)
+                if batch["routing_valid_mask"] is not None
+                else None
+            ),
+            args.routing_margin,
         )
         micro_loss = normalized_microbatch_loss(
             components,
@@ -1327,8 +1348,22 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "training_modes": training_modes,
         "loss_normalization": LOSS_NORMALIZATION,
         "target_serialization_policy": TARGET_SERIALIZATION_POLICY,
+        "routing_target_mode": args.routing_target_mode,
+        "routing_candidate_mass": args.routing_candidate_mass,
+        "routing_margin": args.routing_margin,
         "tcra_trigger_policy": (
-            TCRA_TRIGGER_POLICY if args.method == "tapmem" else None
+            (
+                TCRA_TRIGGER_POLICY
+                if model.use_memory_bank_constraint
+                else TCRA_ADDITIVE_ONLY_TRIGGER_POLICY
+            )
+            if args.method == "tapmem"
+            else None
+        ),
+        "memory_bank_constraint_enabled": (
+            model.use_memory_bank_constraint
+            if args.method == "tapmem"
+            else False
         ),
         "memory_bank_probability_threshold": (
             args.memory_bank_probability_threshold
@@ -1423,12 +1458,49 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--route-loss-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--routing-target-mode",
+        choices=sorted(ROUTING_TARGET_MODES),
+        default="one_hot",
+        help=(
+            "TapMem routing supervision: the selected procedure only, or the "
+            "fixed-count conditional posterior at the current boundary"
+        ),
+    )
+    parser.add_argument(
+        "--routing-candidate-mass",
+        type=float,
+        default=0.9,
+        help="Cumulative fixed-count probability retained as a valid set",
+    )
+    parser.add_argument(
+        "--routing-margin",
+        type=float,
+        default=0.5,
+        help="Required valid-vs-invalid calibrated memory-logit margin",
+    )
     parser.add_argument("--logit-bias-scale", type=float, default=1.0)
     parser.add_argument(
         "--memory-bank-probability-threshold",
         type=float,
         default=0.5,
     )
+    memory_bank_group = parser.add_mutually_exclusive_group()
+    memory_bank_group.add_argument(
+        "--enable-memory-bank-constraint",
+        action="store_true",
+        help=(
+            "Enable the legacy hard memory-bank probability gate; the "
+            "default TapMem path uses additive raw-top-1 TCRA only"
+        ),
+    )
+    memory_bank_group.add_argument(
+        "--disable-memory-bank-constraint",
+        dest="enable_memory_bank_constraint",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(enable_memory_bank_constraint=False)
     parser.add_argument(
         "--dtype",
         choices=("float32", "float16", "bfloat16"),
@@ -1453,10 +1525,18 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--training-epochs must be positive")
     if args.routing_learning_rate is not None and args.routing_learning_rate <= 0:
         parser.error("--routing-learning-rate must be positive")
+    if not 0.0 < args.routing_candidate_mass <= 1.0:
+        parser.error("--routing-candidate-mass must be in (0, 1]")
+    if args.routing_margin < 0.0:
+        parser.error("--routing-margin must be nonnegative")
     if not 0.0 <= args.memory_bank_probability_threshold <= 1.0:
         parser.error("--memory-bank-probability-threshold must be in [0, 1]")
-    if args.method == "tokmem" and args.routing_learning_rate is not None:
+    if args.method != "tapmem" and args.routing_learning_rate is not None:
         parser.error("--routing-learning-rate applies only to tapmem")
+    if args.method != "tapmem" and args.enable_memory_bank_constraint:
+        parser.error("--enable-memory-bank-constraint applies only to tapmem")
+    if args.method != "tapmem" and args.routing_target_mode != "one_hot":
+        parser.error("--routing-target-mode applies only to tapmem")
     if args.route_probe_split is not None and args.method != "tapmem":
         parser.error("--route-probe-split applies only to tapmem")
     if args.route_probe_split is not None and args.epoch_limit is not None:

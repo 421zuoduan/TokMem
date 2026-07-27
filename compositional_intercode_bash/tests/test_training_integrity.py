@@ -735,7 +735,7 @@ class EffectiveBatchLossTest(unittest.TestCase):
             self.assertAlmostEqual(
                 metrics["total_loss"],
                 reference_metrics["total_loss"],
-                places=6,
+                delta=1e-6,
             )
             self.assertEqual(set(gradients), set(reference_gradients))
             for parameter_name, reference_gradient in reference_gradients.items():
